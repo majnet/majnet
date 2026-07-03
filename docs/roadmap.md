@@ -57,6 +57,17 @@ Code ✅ / live wiring ⏳:
 - [ ] Runbooks (`docs/runbooks/`)
 - [ ] Self-update story
 
+## Phase 6 — One-line auto-provisioning (Coolify-style install)
+
+The end-state onboarding must be fully automatic — no manual per-node SSH steps:
+
+- [ ] **One-line install on the main node** (`curl … | bash` style): installs the control plane (bot, reconciler, dashboard) and self-configures everything it can locally
+- [ ] **Web-based setup continues from there**: first-run wizard on the dashboard (GitHub App creation via the [App manifest flow](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app-from-a-manifest), Tailscale key, Cloudflare token, root org)
+- [ ] **Node enrollment through the brain**: give the control plane SSH credentials for a fresh server + pick its role → it runs the bootstrap remotely (WG keys, Docker + mTLS PKI, firewall, agents) and registers the node in `nodes.yaml` itself
+- [ ] The manual `bootstrap/` scripts remain the underlying payload — the brain executes the same steps over SSH; keep them runnable standalone for break-glass/recovery
+
+> Origin: requirement added 2026-07-03 — the whole setup must be auto-provisioned like Coolify: one command on the master, continue in the web UI, add nodes by handing the brain SSH access.
+
 ## Open questions (design doc §20)
 
 1. Backup target: Backblaze B2 vs Hetzner Storage Box

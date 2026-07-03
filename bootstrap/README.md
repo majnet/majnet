@@ -2,6 +2,8 @@
 
 Phase 0 tooling — idempotent bash bootstrap for the three Debian nodes (evolves v1's `prepare-server`, design doc §18). Re-running is always safe; node recovery = re-run + restic restore + reconciler reconverges from git.
 
+> **Direction (roadmap phase 6):** the manual procedure below is temporary. The end state is Coolify-style auto-provisioning — one-line install on the main node, setup wizard in the dashboard, and node enrollment by handing the control plane SSH access; these scripts then become the payload the brain executes remotely. Keep them standalone-runnable for break-glass and recovery.
+
 ## Layout
 
 ```
