@@ -62,7 +62,8 @@ command -v sops >/dev/null && command -v age-keygen >/dev/null || { red "need so
 
 step "building fixture in $WORK"
 SNAP="$WORK/snapshots"
-mkdir -p "$SNAP" "$WORK/age"
+# The project's env-branch dirs are created here (git tracks no empty dirs).
+mkdir -p "$SNAP" "$WORK/age" "$SNAP/$PROJECT/ops/env/stable/secrets"
 cp -R scripts/smoke/fixture/* "$SNAP/"
 
 # Class age key + one SOPS-encrypted secret, exactly as the bot would pass it through.

@@ -11,6 +11,38 @@ Two custom Rust services form the control plane:
 
 📄 **Full design:** [docs/design.md](docs/design.md) · **Roadmap:** [docs/roadmap.md](docs/roadmap.md) · **Diagrams:** [docs/diagrams/](docs/diagrams/)
 
+> This repo is the platform **source code only**. Live platform config lives in GitHub: the `majksa-platform/platform` repo (nodes, people, project registry — seeded from [`platform-seed/`](platform-seed/)) and one `ops` repo per project org.
+
+## Quick start
+
+### Hacking on the platform
+
+Everything you need comes from **nix + direnv** ([hook direnv into your shell](https://direnv.net/docs/hook.html) first):
+
+```sh
+git clone git@github.com:maxa-ondrej/majnet.git && cd majnet
+direnv allow          # builds the dev shell: Rust, clippy, rust-analyzer, sops, age, plantuml
+cargo test --workspace && cargo clippy --workspace
+```
+
+Then prove the core actually works — the smoke test runs the reconciler's full loop (converge → SOPS secret on tmpfs → blue-green → GC) against your **local Docker daemon**, no servers or GitHub needed:
+
+```sh
+scripts/smoke-test.sh
+```
+
+### Installing the platform (operators)
+
+The end goal is a Coolify-style one-line install (roadmap phase 6). Until then, bringing up a real installation is the phase-0/1 manual path:
+
+1. **Nodes** — provision 3 Debian machines (main / prod / private) and run [`bootstrap/`](bootstrap/README.md): WireGuard mesh, Docker APIs on WG + mTLS, per-zone firewalls.
+2. **GitHub** — create the `majksa-platform` root org, push [`platform-seed/`](platform-seed/README.md) as its `platform` repo, register the GitHub App per [`crates/bot/README.md`](crates/bot/README.md).
+3. **Keys** — `age-keygen` the two class keys (`age-stable.key`, `age-production.key`) + `openssl rand -hex 32 > db-master.key` into the reconciler's key dir.
+4. **Control plane** — run `majnet-bot` and `majnet-reconciler` on the main node (env-var tables in the two crate READMEs), dashboard via [`dashboard/`](dashboard/README.md).
+5. **First project** — create a project org, install the App on it, add one line to `projects.yaml`. The bot materializes everything else.
+
+Day-2 operations live in [`docs/runbooks/`](docs/runbooks/).
+
 ## Topology
 
 | Node | Trust zone | Runs |
