@@ -1,0 +1,7 @@
+# GitHub username ↔ Tailscale identity (design doc §10, §16).
+# GitHub username is *the* identity everywhere; this file maps it to the
+# tailnet login for ACL rendering and dashboard authorization.
+people:
+  - github: maxa-ondrej
+    tailscale: ondrej.maxa11@gmail.com
+    admin: true

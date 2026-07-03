@@ -1,0 +1,32 @@
+// Tailscale ACL policy template (HuJSON) — rendered and pushed by the bot
+// (design doc §7, §11.6). {{...}} blocks are expanded from people.yaml +
+// each project's project.yaml. Until the bot exists (phase 3), render by
+// hand and paste into the Tailscale admin console.
+{
+  "groups": {
+    "group:admins": [
+      // {{range .Admins}}"{{.Tailscale}}",{{end}}
+      "ondrej.maxa11@gmail.com",
+    ],
+    // Per-project member groups:
+    // {{range .Projects}}
+    // "group:proj-{{.Name}}": [{{range .Members}}"{{.Tailscale}}",{{end}}],
+    // {{end}}
+  },
+
+  "tagOwners": {
+    "tag:main": ["group:admins"],
+    // Per-project ingress nodes join the tailnet with their project tag:
+    // {{range .Projects}}"tag:proj-{{.Name}}": ["group:admins"],{{end}}
+  },
+
+  "acls": [
+    // Admins reach the control plane: dashboard, Dozzle, Beszel (main node).
+    { "action": "accept", "src": ["group:admins"], "dst": ["tag:main:*"] },
+
+    // Project members reach only their own project's ingress.
+    // {{range .Projects}}
+    // { "action": "accept", "src": ["group:proj-{{.Name}}"], "dst": ["tag:proj-{{.Name}}:443"] },
+    // {{end}}
+  ],
+}

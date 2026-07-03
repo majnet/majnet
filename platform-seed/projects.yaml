@@ -1,0 +1,7 @@
+# Project registry — the discovery gate (design doc §2).
+# A project exists only when the GitHub App is installed on its org AND the
+# org is listed here. Adding a line here is the one manual step per project
+# (after creating the org and installing the App).
+projects: []
+# - name: zpevnik
+#   org: zpevnik

@@ -1,0 +1,23 @@
+# The three nodes — static trust-zoned placement (design doc §4).
+# WG pubkeys and public endpoints get filled in during node bootstrap.
+wireguard_subnet: 10.88.0.0/24
+docker_api_port: 2376
+
+nodes:
+  - name: main
+    role: main                # control plane: bot, reconciler, dashboard, observability
+    wireguard_ip: 10.88.0.1
+    public_endpoint: ""       # <ip>:51820 — fill in
+    wireguard_pubkey: ""      # printed by bootstrap step 20 — fill in
+
+  - name: prod
+    role: prod                # public zone: edge-main, production apps + DBs
+    wireguard_ip: 10.88.0.2
+    public_endpoint: ""
+    wireguard_pubkey: ""
+
+  - name: private
+    role: private             # internal zone: project ingresses, stable/ephemeral apps, dev DBs
+    wireguard_ip: 10.88.0.3
+    public_endpoint: ""
+    wireguard_pubkey: ""

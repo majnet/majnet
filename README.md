@@ -31,7 +31,8 @@ majnet/
 │   ├── bot/              # GitHub Bot (liaison)
 │   └── reconciler/       # Reconciler (orchestrator)
 ├── dashboard/            # web UI over reconciler (reads) + bot (writes)
-├── bootstrap/            # node bootstrap: Docker, WireGuard, roles, firewall
+├── bootstrap/            # node bootstrap: Docker, WireGuard, roles, firewall (bash, Debian)
+├── platform-seed/        # initial content for the majksa-platform/platform repo
 ├── templates/
 │   └── repo-templates/   # app repo templates (GHA workflow, branch protection)
 └── docs/

@@ -1,0 +1,9 @@
+# Cloudflare origin certificate (SSL mode: Full (strict)).
+# Generate in the CF dashboard (15y validity), place on the prod node at
+# /etc/majnet/origin-certs/{cert,key}.pem.
+tls:
+  stores:
+    default:
+      defaultCertificate:
+        certFile: /certs/cert.pem
+        keyFile: /certs/key.pem

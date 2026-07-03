@@ -1,0 +1,19 @@
+# Phase-0 smoke test: proves Cloudflare → edge-main → container end to end.
+# Retire once the first real production app is live.
+services:
+  hello:
+    image: traefik/whoami:latest
+    container_name: hello-world
+    restart: unless-stopped
+    networks:
+      - edge
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.hello.rule: Host(`hello.majksa.net`)
+      traefik.http.routers.hello.entrypoints: websecure
+      traefik.http.routers.hello.tls: "true"
+      traefik.http.services.hello.loadbalancer.server.port: "80"
+
+networks:
+  edge:
+    external: true

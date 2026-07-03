@@ -1,0 +1,23 @@
+# edge-main — the single public entry point, prod node only (design doc §7).
+# Serves production apps via docker labels; Cloudflare (proxied, Full strict)
+# in front, origin cert terminating here. Phase 0: started by hand; from
+# phase 2 the reconciler owns it.
+services:
+  traefik:
+    image: traefik:v3.5
+    container_name: edge-main
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik/traefik.yaml:/etc/traefik/traefik.yaml:ro
+      - ./traefik/dynamic:/etc/traefik/dynamic:ro
+      - /etc/majnet/origin-certs:/certs:ro   # Cloudflare origin cert + key
+    networks:
+      - edge
+
+networks:
+  edge:
+    name: edge          # production apps attach here via reconciler

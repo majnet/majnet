@@ -4,12 +4,16 @@ Phased plan from the design doc (§19), tracked here as the implementation progr
 
 ## Phase 0 — Foundations 🚧 (current)
 
-- [ ] Node bootstrap: WireGuard mesh, Docker APIs bound to WG IPs + mTLS, node roles (`bootstrap/`)
-- [ ] Firewalls (public 80/443 from Cloudflare ranges only on prod; everything else WG/Tailscale)
-- [ ] Tailscale org + base ACLs
-- [ ] Root org `majksa-platform` + `platform` repo (nodes.yaml, people.yaml, projects.yaml, ACL template)
-- [ ] `edge-main` Traefik on prod node
-- [ ] Hello-world public service
+Tooling ✅ / infra provisioning ⏳:
+
+- [x] Node bootstrap tooling: WireGuard mesh, Docker APIs bound to WG IPs + mTLS, node roles, PKI (`bootstrap/`)
+- [x] Firewall tooling: nftables per role, prod 80/443 from Cloudflare ranges w/ weekly refresh (`bootstrap/steps/40`)
+- [x] `edge-main` Traefik + hello-world manifests (`platform-seed/platform/`)
+- [x] Platform repo seed: nodes.yaml, people.yaml, projects.yaml, ACL template (`platform-seed/`)
+- [ ] Provision the 3 Debian nodes + run bootstrap (needs servers, WG pubkey exchange, Docker PKI distribution)
+- [ ] Tailscale org + paste rendered base ACL
+- [ ] Create root org `majksa-platform` on GitHub + push `platform-seed/` as the `platform` repo
+- [ ] Cloudflare: origin cert on prod node, proxied DNS record → hello-world reachable publicly
 
 ## Phase 1 — Bot MVP
 
