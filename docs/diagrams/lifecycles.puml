@@ -1,0 +1,26 @@
+@startuml majnet-v2-lifecycles
+' MajNet v2 — Ephemeral environment lifecycle + blue-green deploy states
+
+skinparam shadowing false
+
+state "Ephemeral environment" as EphemeralLifecycle {
+  [*] --> Deployed : PR opened\n(bot renders app-prN.yaml)
+  Deployed --> Deployed : PR sync\n(digest update via render PR)
+  Deployed --> Grace : PR closed/merged\n(manifest removed)
+  Grace --> [*] : GC after 48 h
+  Deployed --> [*] : hard TTL 7 d\nor manual removal
+}
+
+state "Blue-green deploy (per app)" as BlueGreen {
+  [*] --> Migrating : rendered manifest changed
+  Migrating --> Starting : migration one-shot OK
+  Migrating --> Failed : migration exit != 0
+  Starting --> HealthCheck : new container started
+  HealthCheck --> Flipping : health check passed
+  HealthCheck --> Failed : retries exhausted\n(old container keeps serving)
+  Flipping --> Draining : Traefik label moved to new
+  Draining --> Done : old container stopped
+  Failed --> [*] : deploy marked failed,\nevent recorded with commit SHA
+  Done --> [*]
+}
+@enduml

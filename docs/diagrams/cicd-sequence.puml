@@ -1,0 +1,44 @@
+@startuml majnet-v2-cicd
+' MajNet v2 — CI/CD & promotion sequence
+
+skinparam shadowing false
+actor Developer as Dev
+participant "GitHub Actions\n(project org)" as GHA
+participant "GitHub Bot" as Bot
+participant "ops repo\n(main)" as Main
+participant "ops repo\n(env/* branches)" as Env
+participant Reconciler as Rec
+participant "prod / private node" as Node
+
+== Stable deploy (automatic) ==
+Dev -> GHA : merge to main (app repo)
+GHA -> GHA : test + build image
+GHA -> Bot : webhook (org, app, digest)
+Bot -> Main : signed commit: stable overlay digest bump
+Bot -> Env : render PR -> env/stable\n(base ⊕ stable, validated)
+Bot -> Env : auto-merge render PR
+Env --> Bot : push webhook (env/stable)
+Bot -> Rec : notify (WireGuard API)
+Rec -> Bot : fetch rendered snapshot
+Rec -> Node : migrations (one-shot), then blue-green:\nstart new -> health check -> flip label -> stop old
+Rec --> Bot : deploy result (state API)
+
+== Promotion to production (gated) ==
+Dev -> Bot : promote (dashboard / CLI)
+Bot -> Main : commit digest -> production overlay
+Bot -> Env : render PR -> env/production\n(exact final diff)
+Dev -> Env : ADMIN reviews rendered diff + merges
+Env --> Bot : push webhook (env/production)
+Bot -> Rec : notify
+Rec -> Node : blue-green converge (prod node)
+
+== Ephemeral (PR preview) ==
+Dev -> GHA : open PR (app repo)
+GHA -> Bot : webhook (pr=N, digest)
+Bot -> Env : render PR -> env/ephemeral\n(app-prN.yaml, auto-merged)
+Rec -> Node : deploy <app>-prN.<project>.majksa.net (private node)
+Bot -> Dev : PR comment: preview URL
+Dev -> GHA : close PR
+Bot -> Env : remove app-prN.yaml (auto-merged)
+Rec -> Node : GC stack (48h grace, 7d hard TTL)
+@enduml

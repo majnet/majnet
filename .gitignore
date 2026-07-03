@@ -1,0 +1,6 @@
+/target
+/.direnv
+*.age
+*.pem
+*.key
+.DS_Store

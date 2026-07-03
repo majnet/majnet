@@ -1,0 +1,21 @@
+[package]
+name = "majnet-bot"
+description = "GitHub Bot — the liaison: GitHub App + Tailscale API, org reconciliation, digest bumps, manifest rendering, repo proxy, dashboard write API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+majnet-common = { path = "../common" }
+tokio.workspace = true
+axum.workspace = true
+octocrab.workspace = true
+gix.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

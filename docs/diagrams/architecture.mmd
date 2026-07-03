@@ -1,0 +1,45 @@
+graph TB
+    subgraph root["majksa-platform (root org)"]
+        PLAT["platform repo<br/>nodes · people · project registry · ACL tmpl"]
+    end
+    subgraph porg["Project org ×N"]
+        OPS["ops repo<br/>project.yaml · manifests · SOPS"]
+        APPR["app repos + GHA"]
+        PGHCR["GHCR (org-scoped)"]
+    end
+
+    subgraph main["MAIN node — control plane"]
+        BOT["GitHub Bot (Rust)<br/>GitHub App · Tailscale API<br/>org reconciliation · digest bumps · repo proxy"]
+        RECON["Reconciler (Rust)<br/>age keys · Docker APIs<br/>converge · blue-green · GC"]
+        DASH["Dashboard · Dozzle · Beszel"]
+    end
+
+    subgraph prod["PROD node — public"]
+        TM["Traefik edge-main"]
+        PRODAPPS["Production apps + DBs"]
+    end
+    subgraph priv["PRIVATE node — internal"]
+        TSI["Per-project ingress<br/>Traefik + tailscale sidecar"]
+        PAPPS["Stable + ephemeral apps + dev DBs"]
+    end
+
+    TSNET["Tailscale — humans"]
+    CF["Cloudflare"]
+    B2["Offsite storage (restic)"]
+
+    APPR --> PGHCR
+    APPR -->|digest webhook| BOT
+    BOT <-->|reconcile repos/teams/members| porg
+    BOT <-->|registry + platform config| PLAT
+    BOT -->|ACL sync| TSNET
+    BOT -->|notify + serve snapshots| RECON
+    RECON -->|Docker API over WireGuard| prod
+    RECON -->|Docker API over WireGuard| priv
+    PGHCR -->|pull by digest| prod
+    PGHCR -->|pull by digest| priv
+    CF -->|80/443, CF ranges| TM
+    TM --- PRODAPPS
+    TSNET -->|per-project ACL| TSI
+    TSI --- PAPPS
+    PRODAPPS -->|dumps| B2
+    PAPPS -->|dumps| B2

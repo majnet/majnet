@@ -1,0 +1,22 @@
+sequenceDiagram
+    participant Dev as Developer
+    participant GHA as GHA (project org)
+    participant Bot as Bot
+    participant Ops as project ops repo
+    participant Rec as Reconciler
+    participant N as prod / private node
+
+    Dev->>GHA: merge to main (app repo)
+    GHA->>GHA: test + build → GHCR
+    GHA->>Bot: webhook (org, app, digest)
+    Bot->>Ops: commit stable bump to main
+    Bot->>Ops: render PR → env/stable (auto-merged)
+    Ops-->>Bot: env/stable push
+    Bot->>Rec: notify (WG API)
+    Rec->>N: blue-green converge (private node)
+    Note over Dev,N: happy with stable?
+    Dev->>Bot: promote (dashboard/CLI)
+    Bot->>Ops: commit digest → production overlay (main)
+    Bot->>Ops: render PR → env/production
+    Dev->>Ops: admin reviews final diff + merges
+    Rec->>N: blue-green converge (prod node)

@@ -1,0 +1,6 @@
+stateDiagram-v2
+    [*] --> Deployed: PR opened → rendered onto env/ephemeral
+    Deployed --> Deployed: PR sync → digest update
+    Deployed --> Grace: PR closed → manifest removed
+    Grace --> [*]: GC (48 h after close)
+    Deployed --> [*]: hard TTL (7 d) or manual removal

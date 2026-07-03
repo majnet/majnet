@@ -1,0 +1,74 @@
+@startuml majnet-v2-architecture
+' MajNet v2 — System architecture (deployment view)
+' Render: plantuml architecture.puml
+
+skinparam componentStyle rectangle
+skinparam shadowing false
+
+cloud "GitHub" {
+  node "majksa-platform (root org)" as RootOrg {
+    artifact "platform repo\nnodes / people / project registry\nACL template / repo templates" as PlatformRepo
+  }
+  node "Project org ×N" as ProjOrg {
+    artifact "ops repo\nmain: sources (base+overlays, SOPS)\nenv/*: rendered manifests (render PRs)" as OpsRepo
+    artifact "app repos (bot-created from templates)" as AppRepos
+    component "GitHub Actions\ntest, build, push, notify bot" as GHA
+    artifact "GHCR\nimages by digest" as GHCR
+  }
+}
+
+cloud "Cloudflare\nproxied, origin certs, Full (strict)" as CF
+cloud "Tailscale\nhumans: groups + ACLs" as TS
+database "Offsite storage\nrestic backups" as B2
+
+node "MAIN node (control plane)" as Main {
+  component "GitHub Bot (Rust)\nGitHub App + Tailscale API keys\norg reconciliation, digest bumps,\nrendering, membership sync, repo proxy,\ndashboard write API" as Bot
+  component "Reconciler (Rust)\nage keys + Docker mTLS certs\nblue-green converge, provisioning, GC" as Recon
+  component "Dashboard\nGitOps UI (writes = commits via bot)" as Dash
+  component "Dozzle + Beszel" as Obs
+}
+
+node "PROD node (public zone)" as Prod {
+  component "Traefik edge-main\npublic 80/443, production only" as EdgeMain
+  component "Production apps" as ProdApps
+  database "Production databases\nDocker networks only, no VPN" as ProdDB
+}
+
+node "PRIVATE node (internal zone)" as Priv {
+  component "Per-project ingress ×N\nTraefik + tailscale sidecar (tag:proj-*)" as ProjIngress
+  component "Stable + ephemeral apps" as PrivApps
+  database "Dev databases\nDocker networks only, no VPN" as DevDB
+}
+
+' --- flows ---
+AppRepos --> GHA
+GHA --> GHCR : push image (digest)
+GHA --> Bot : webhook (org, app, digest)
+Bot <--> OpsRepo : commits main / render PRs\nwebhooks
+Bot <--> AppRepos : create from template,\nsettings, teams
+Bot <--> PlatformRepo : registry + platform config
+Bot --> TS : render + push ACLs,\ningress auth keys
+Bot --> Recon : notify + serve\nrendered snapshots (WG API)
+Recon --> Prod : Docker API over WireGuard (mTLS)
+Recon --> Priv : Docker API over WireGuard (mTLS)
+Recon --> Dash : state API (reads)
+Dash --> Bot : write API (actions -> commits)
+GHCR --> Prod : pull by digest
+GHCR --> Priv : pull by digest
+CF --> EdgeMain : 80/443, CF IP ranges only
+EdgeMain --> ProdApps
+ProdApps --> ProdDB
+TS --> ProjIngress : per-project ACL
+ProjIngress --> PrivApps
+PrivApps --> DevDB
+ProdDB --> B2 : nightly dumps
+DevDB --> B2 : nightly dumps
+Obs ..> Prod : logs/metrics over WG
+Obs ..> Priv : logs/metrics over WG
+
+note bottom of Main
+  Credential isolation:
+  Bot = GitHub App + Tailscale API keys only
+  Reconciler = age keys + Docker certs only
+end note
+@enduml
