@@ -23,7 +23,7 @@ green() { printf '\033[32m✓ %s\033[0m\n' "$*"; }
 step()  { printf '\033[1;34m── %s\033[0m\n' "$*"; }
 
 cleanup() {
-  [[ -n $RECON_PID ]] && kill "$RECON_PID" 2>/dev/null || true
+  if [[ -n $RECON_PID ]]; then kill "$RECON_PID" 2>/dev/null || true; fi
   docker ps -aq --filter "label=majnet.project=$PROJECT" | xargs -r docker rm -f >/dev/null 2>&1 || true
   docker network rm "proj-$PROJECT" >/dev/null 2>&1 || true
   rm -rf "$WORK"
