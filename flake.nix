@@ -27,6 +27,9 @@
             sops
             age
             plantuml
+
+            # lint parity with CI (version pinned there — keep in sync)
+            shellcheck
           ];
 
           env.RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";

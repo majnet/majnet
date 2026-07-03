@@ -26,6 +26,35 @@ services:
       - mariadb-data:/var/lib/mysql
       - /etc/majnet/db-root/mariadb:/run/secrets/mariadb-root:ro
 
+  valkey:
+    image: valkey/valkey:8
+    container_name: majnet-valkey
+    restart: unless-stopped
+    # aclfile persists reconciler-provisioned users across restarts. The
+    # default user's password must live IN the acl file (requirepass is
+    # silently ignored once --aclfile is set) — seeded on first boot only;
+    # after that, ACL SAVE owns the file.
+    command: >-
+      sh -c 'test -s /data/users.acl
+      || printf "user default on >%s ~* &* +@all\n" "$$(cat /run/secrets/valkey-root)" > /data/users.acl;
+      exec docker-entrypoint.sh valkey-server --aclfile /data/users.acl'
+    volumes:
+      - valkey-data:/data
+      - /etc/majnet/db-root/valkey:/run/secrets/valkey-root:ro
+
+  mongodb:
+    image: mongo:8
+    container_name: majnet-mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD_FILE: /run/secrets/mongodb-root
+    volumes:
+      - mongodb-data:/data/db
+      - /etc/majnet/db-root/mongodb:/run/secrets/mongodb-root:ro
+
 volumes:
   postgres-data:
   mariadb-data:
+  valkey-data:
+  mongodb-data:

@@ -21,6 +21,12 @@ fi
 if docker container inspect majnet-mariadb &>/dev/null; then
   docker exec majnet-mariadb sh -c 'mariadb-dump -uroot -p"$MARIADB_ROOT_PASSWORD" --all-databases' | gzip > "$DUMP_DIR/mariadb.sql.gz"
 fi
+if docker container inspect majnet-mongodb &>/dev/null; then
+  docker exec majnet-mongodb sh -c 'mongodump -u root -p "$(cat /run/secrets/mongodb-root)" --authenticationDatabase admin --archive' | gzip > "$DUMP_DIR/mongodb.archive.gz"
+fi
+if docker container inspect majnet-valkey &>/dev/null; then
+  docker exec majnet-valkey sh -c 'valkey-cli -a "$(cat /run/secrets/valkey-root)" --no-auth-warning --rdb /dev/stdout' | gzip > "$DUMP_DIR/valkey.rdb.gz"
+fi
 
 restic backup "$DUMP_DIR" --tag majnet --host "$(hostname)"
 restic forget --tag majnet --host "$(hostname)" --keep-daily 14 --keep-weekly 8 --prune

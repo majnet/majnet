@@ -9,12 +9,16 @@
 //! reproduces the same credentials. Master key: `db-master.key` next to the
 //! age keys, generated once at install.
 //!
-//! Engine containers (`majnet-postgres`, `majnet-mariadb`) are platform
-//! services (§10 `platform/` manifests) — provisioning execs into them and
-//! attaches them to the project's network so the app can resolve them by
-//! container name.
+//! Engine containers (`majnet-postgres`, `majnet-mariadb`, `majnet-valkey`,
+//! `majnet-mongodb`) are platform services (§10 `platform/` manifests) —
+//! provisioning execs into them and attaches them to the project's network
+//! so the app can resolve them by container name.
+//!
+//! Valkey has no per-user keyspace primitive, so its ACL users share one
+//! keyspace: the credential is authentication, not isolation (zone trust
+//! still applies, same as the design assumes for engines generally).
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use bollard::query_parameters as qp;
 use bollard::Docker;
 use hmac::{Hmac, Mac};
@@ -54,11 +58,20 @@ pub async fn ensure(
             "DATABASE_URL".into(),
             format!("mysql://{name}:{password}@{container}:3306/{name}"),
         )],
-        DbEngine::Valkey | DbEngine::Mongodb => {
-            bail!(
-                "engine {engine:?} provisioning is not implemented yet (roadmap phase 5 remainder)"
-            )
-        }
+        DbEngine::Valkey => vec![
+            (
+                "DATABASE_URL".into(),
+                format!("redis://{name}:{password}@{container}:6379/0"),
+            ),
+            (
+                "REDIS_URL".into(),
+                format!("redis://{name}:{password}@{container}:6379/0"),
+            ),
+        ],
+        DbEngine::Mongodb => vec![(
+            "DATABASE_URL".into(),
+            format!("mongodb://{name}:{password}@{container}:27017/{name}?authSource={name}"),
+        )],
     };
 
     if dry_run {
@@ -84,7 +97,14 @@ psql -U postgres -tc "SELECT 1 FROM pg_database WHERE datname='{name}'" | grep -
         DbEngine::Mariadb => format!(
             r#"mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" -e "CREATE DATABASE IF NOT EXISTS \`{name}\`; CREATE USER IF NOT EXISTS '{name}'@'%' IDENTIFIED BY '{password}'; ALTER USER '{name}'@'%' IDENTIFIED BY '{password}'; GRANT ALL ON \`{name}\`.* TO '{name}'@'%';""#
         ),
-        _ => unreachable!(),
+        DbEngine::Valkey => format!(
+            r#"AUTH="$(cat /run/secrets/valkey-root)"
+valkey-cli -a "$AUTH" --no-auth-warning ACL SETUSER {name} on '>{password}' '~*' '&*' '+@all' '-@admin'
+valkey-cli -a "$AUTH" --no-auth-warning ACL SAVE"#
+        ),
+        DbEngine::Mongodb => format!(
+            r#"mongosh --quiet -u root -p "$(cat /run/secrets/mongodb-root)" --authenticationDatabase admin --eval 'const d = db.getSiblingDB("{name}"); if (d.getUser("{name}")) {{ d.updateUser("{name}", {{ pwd: "{password}" }}); }} else {{ d.createUser({{ user: "{name}", pwd: "{password}", roles: [{{ role: "dbOwner", db: "{name}" }}] }}); }}'"#
+        ),
     };
     exec(docker, container, &script)
         .await
