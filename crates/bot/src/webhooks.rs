@@ -99,12 +99,16 @@ async fn on_push(state: &AppState, org: &str, payload: &serde_json::Value) -> an
 
     let is_env_branch = repo == "ops" && branch.starts_with("env/");
     let is_platform = org == state.config.root_org && repo == "platform" && branch == "main";
+    let is_ops_main = repo == "ops" && branch == "main";
     if is_env_branch || is_platform {
         tracing::info!(org, repo, branch, commit, "deployable push — notifying reconciler");
         state.store.log_event("push", Some(org), &format!("{repo}@{branch} {commit}"))?;
         crate::notify::notify_reconciler(state, org, repo, branch, commit).await;
+    } else if is_ops_main {
+        tracing::info!(org, commit, "ops main push — rendering");
+        crate::render::on_ops_main_push(state, org, commit).await?;
     } else {
-        tracing::debug!(org, repo, branch, "push ignored (not an env branch or platform config)");
+        tracing::debug!(org, repo, branch, "push ignored (not ops main/env or platform config)");
     }
     Ok(())
 }

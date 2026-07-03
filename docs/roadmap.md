@@ -28,13 +28,18 @@ Code ✅ / live wiring ⏳:
 - [ ] Register the GitHub App (key, webhook secret, events per `crates/bot/README.md`) and deploy the bot to the main node
 - [ ] Verify the `registry_package` payload digest path against a real delivery (ADR 0001 caveat)
 
-## Phase 2 — Reconciler MVP
+## Phase 2 — Reconciler MVP 🚧
 
-- [ ] Manifest schema v1 (`crates/common`)
-- [ ] Rendering: base ⊕ overlay → render PRs (bot side)
-- [ ] Single-app convergence to private node (bollard over WG)
-- [ ] Blue-green: start new → health check → flip Traefik label → stop old
-- [ ] SOPS decrypt → tmpfs-mounted secret files
+Code ✅ / live verification ⏳:
+
+- [x] Manifest schema v1 + strict validation + base ⊕ overlay merge (`common/src/{manifest,merge}.rs`)
+- [x] Rendering: ops `main` push → full-tree render PRs onto `env/*`; stable auto-merges, production waits for admin review (`bot/src/render.rs`)
+- [x] Convergence loop: platform + env snapshots → per-project networks → validate → decrypt → diff → deploy; ~5 min drift poll + `/notify` nudge (`reconciler/src/{converge,main}.rs`)
+- [x] Blue-green: migrations → health-gated rollout, old container survives failed deploys (ADR 0002, `reconciler/src/deploy.rs`)
+- [x] SOPS decrypt (sops subprocess + class age key) → tmpfs delivery via helper container, ro-mounted at `/run/secrets` (`reconciler/src/secrets.rs`)
+- [x] Removed-app GC (deletions only when config gone from git) + SQLite event log tagged with causing commit
+- [ ] End-to-end verification against a real node (needs phase 0 infra): render PR → merge → converge → hello-world serving
+- [ ] Private GHCR pull auth on nodes (bootstrap-level `docker login`; reconciler stays credential-free)
 
 ## Phase 3 — Org management
 

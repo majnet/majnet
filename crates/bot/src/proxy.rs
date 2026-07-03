@@ -35,7 +35,7 @@ pub async fn snapshot(
     }
 }
 
-async fn fetch_snapshot(state: &AppState, org: &str, repo: &str, branch: &str) -> Result<(String, Vec<u8>)> {
+pub(crate) async fn fetch_snapshot(state: &AppState, org: &str, repo: &str, branch: &str) -> Result<(String, Vec<u8>)> {
     let (client, token) = state.github.org_client_and_token(org).await?;
 
     // Resolve branch → commit SHA (also the cache key).

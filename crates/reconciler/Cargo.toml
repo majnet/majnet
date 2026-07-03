@@ -11,10 +11,15 @@ majnet-common = { path = "../common" }
 tokio.workspace = true
 axum.workspace = true
 bollard.workspace = true
+futures-util.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+hex.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
 serde_json.workspace = true
 rusqlite.workspace = true
+tar.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
