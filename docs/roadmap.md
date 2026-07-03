@@ -75,7 +75,7 @@ Code ✅ / remaining ⏳:
 - [x] Dashboard MVP: events + promote/rollback/restart (`dashboard/`)
 - [x] Runbooks: node-recovery, bad-deploy, db-break-glass, secret-rotation, restore-test, github-outage
 - [x] Valkey + MongoDB provisioning (ACL user / dbOwner user; engines + nightly dumps included)
-- [ ] Full dashboard: manifest editing, member management, TTL extension, role-based authorization from `people.yaml`
+- [x] Full dashboard: manifest editing (validated, committed by the bot), member management (admin-only), ephemeral TTL extension, role-based authorization from `people.yaml` + `project.yaml` (`common/src/authz.rs`; `tailscale serve` is the identity trust anchor)
 - [ ] Self-update story (open question §20.3)
 - [ ] First weekly restore test actually performed
 

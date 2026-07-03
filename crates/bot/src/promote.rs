@@ -8,8 +8,9 @@
 
 use anyhow::{Context, Result};
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use base64::Engine;
+use majnet_common::project::Role;
 use std::sync::Arc;
 
 use crate::AppState;
@@ -17,13 +18,18 @@ use crate::AppState;
 pub async fn promote(
     State(state): State<Arc<AppState>>,
     Path((org, app)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Result<String, (StatusCode, String)> {
-    do_promote(&state, &org, &app)
+    // Promotion is a production action (§9) — project admins only.
+    let actor = crate::authz::require(&state, &headers, &org, Role::Admin)
+        .await
+        .map_err(|e| (StatusCode::FORBIDDEN, format!("{e:#}")))?;
+    do_promote(&state, &org, &app, &actor)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))
 }
 
-async fn do_promote(state: &AppState, org: &str, app: &str) -> Result<String> {
+async fn do_promote(state: &AppState, org: &str, app: &str, actor: &str) -> Result<String> {
     anyhow::ensure!(
         app.chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
@@ -77,8 +83,8 @@ async fn do_promote(state: &AppState, org: &str, app: &str) -> Result<String> {
     }
     state
         .store
-        .log_event("promote", Some(org), &format!("{app} → {image}"))?;
-    tracing::info!(org, app, %image, "promoted — env/production render PR will follow");
+        .log_event("promote", Some(org), &format!("{app} → {image} by {actor}"))?;
+    tracing::info!(org, app, %image, actor, "promoted — env/production render PR will follow");
     Ok(format!(
         "{app}: promotion committed; review the env/production render PR to deploy"
     ))
@@ -90,13 +96,18 @@ async fn do_promote(state: &AppState, org: &str, app: &str) -> Result<String> {
 pub async fn rollback(
     State(state): State<Arc<AppState>>,
     Path(org): Path<String>,
+    headers: HeaderMap,
 ) -> Result<String, (StatusCode, String)> {
-    do_rollback(&state, &org)
+    // Reverting ops main can touch production overlays — admins only.
+    let actor = crate::authz::require(&state, &headers, &org, Role::Admin)
+        .await
+        .map_err(|e| (StatusCode::FORBIDDEN, format!("{e:#}")))?;
+    do_rollback(&state, &org, &actor)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))
 }
 
-async fn do_rollback(state: &AppState, org: &str) -> Result<String> {
+async fn do_rollback(state: &AppState, org: &str, actor: &str) -> Result<String> {
     let client = state.github.org_client(org).await?;
     let repo = format!("/repos/{org}/ops");
 
@@ -121,15 +132,22 @@ async fn do_rollback(state: &AppState, org: &str) -> Result<String> {
         crate::git::create_commit(&client, &repo, &parent_tree, &[&head], &message).await?;
     crate::git::force_update_ref(&client, &repo, "main", &revert).await?;
 
-    state
-        .store
-        .log_event("rollback", Some(org), &format!("reverted {head}"))?;
-    tracing::info!(org, head, "rolled back — render pipeline will propagate");
+    state.store.log_event(
+        "rollback",
+        Some(org),
+        &format!("reverted {head} by {actor}"),
+    )?;
+    tracing::info!(
+        org,
+        head,
+        actor,
+        "rolled back — render pipeline will propagate"
+    );
     Ok(format!("reverted {short}; render PRs will follow"))
 }
 
 /// (content, blob_sha) of a file on ops main, or None if absent.
-async fn read_file(
+pub(crate) async fn read_file(
     repos: &octocrab::repos::RepoHandler<'_>,
     path: &str,
 ) -> Result<Option<(String, String)>> {

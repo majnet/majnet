@@ -11,7 +11,9 @@
 //!
 //! Credentials held: GitHub App key + Tailscale API key. Nothing else.
 
+mod authz;
 mod config;
+mod dashboard_api;
 mod digest;
 mod ephemeral;
 mod git;
@@ -72,6 +74,18 @@ async fn main() -> Result<()> {
         .route("/api/rollback/{org}", post(promote::rollback))
         .route("/api/platform/seed", post(platform_api::seed))
         .route("/api/platform/node", post(platform_api::upsert_node))
+        .route(
+            "/api/manifest/{org}/{app}",
+            get(dashboard_api::manifest_get),
+        )
+        .route(
+            "/api/manifest/{org}/{app}/{file}",
+            axum::routing::put(dashboard_api::manifest_put),
+        )
+        .route(
+            "/api/members/{org}",
+            get(dashboard_api::members_get).post(dashboard_api::members_post),
+        )
         .with_state(state.clone());
 
     // Org reconciliation: hourly, plus webhook-triggered on config pushes (§11.2).

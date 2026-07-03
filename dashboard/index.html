@@ -18,7 +18,7 @@
 </style>
 </head>
 <body>
-<h1>MajNet <small>— GitOps dashboard (phase-5 MVP; writes go through git, never around it)</small></h1>
+<h1>MajNet <small>— GitOps dashboard (writes go through git, never around it)</small></h1>
 
 <div>
   <form data-api="/api/bot/api/promote/{org}/{app}" data-fields="org,app"><b>promote</b>
@@ -32,8 +32,38 @@
   <form data-api="/api/bot/api/rollback/{org}" data-fields="org"><b>rollback</b>
     <input name="org" placeholder="org" required><button>revert last</button>
   </form>
+  <form data-api="/api/recon/api/ephemeral/extend/{project}/{app}" data-fields="project,app"
+        data-json="days:number"><b>extend&nbsp;TTL</b>
+    <input name="project" placeholder="project" required><input name="app" placeholder="app-pr12" required>
+    <input name="days" type="number" value="2" min="1" max="7" style="width:4rem" required>
+    <button>+days</button>
+  </form>
 </div>
 <div id="msg"></div>
+
+<details>
+  <summary><b>Manifest editor</b> — apps/&lt;app&gt;/*.yaml on ops main (validated, committed by the bot)</summary>
+  <form id="mload">
+    <input name="org" placeholder="org" required><input name="app" placeholder="app" required>
+    <button>load</button>
+  </form>
+  <form id="msave" hidden>
+    <select name="file"></select>
+    <button>validate + commit</button>
+  </form>
+  <textarea id="mbody" rows="16" style="width:100%;font:inherit" hidden></textarea>
+</details>
+
+<details>
+  <summary><b>Members</b> — project.yaml (admin-only; org sync propagates teams + ACLs)</summary>
+  <form id="mem-load"><input name="org" placeholder="org" required><button>load</button></form>
+  <table id="members" hidden><thead><tr><th>user</th><th>role</th><th></th></tr></thead><tbody></tbody></table>
+  <form id="mem-add" hidden>
+    <input name="user" placeholder="github user" required>
+    <select name="role"><option>developer</option><option>admin</option></select>
+    <button>upsert</button>
+  </form>
+</details>
 
 <h2 style="font-size:1rem">Events</h2>
 <table id="events"><thead><tr>
@@ -42,20 +72,102 @@
 
 <script>
 const msg = (t, bad) => { const el = document.getElementById('msg'); el.textContent = t; el.className = bad ? 'failed' : ''; };
+const call = async (url, opts) => {
+  msg('…');
+  const r = await fetch(url, opts);
+  const text = await r.text();
+  msg(`${r.status}: ${text}`, !r.ok);
+  loadEvents();
+  return r.ok ? text : Promise.reject(text);
+};
 
-for (const form of document.querySelectorAll('form')) {
+for (const form of document.querySelectorAll('form[data-api]')) {
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     let url = form.dataset.api;
     for (const f of form.dataset.fields.split(',')) url = url.replace(`{${f}}`, encodeURIComponent(form[f].value.trim()));
-    msg('…');
-    try {
-      const r = await fetch(url, { method: 'POST' });
-      msg(`${r.status}: ${await r.text()}`, !r.ok);
-      loadEvents();
-    } catch (err) { msg(String(err), true); }
+    const opts = { method: 'POST' };
+    if (form.dataset.json) {              // e.g. "days:number"
+      const body = {};
+      for (const spec of form.dataset.json.split(',')) {
+        const [name, type] = spec.split(':');
+        body[name] = type === 'number' ? Number(form[name].value) : form[name].value;
+      }
+      opts.headers = { 'content-type': 'application/json' };
+      opts.body = JSON.stringify(body);
+    }
+    try { await call(url, opts); } catch {}
   });
 }
+
+// ── manifest editor ────────────────────────────────────────────────────────
+const mfiles = {};
+const $ = (id) => document.getElementById(id);
+$('mload').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const org = e.target.org.value.trim(), app = e.target.app.value.trim();
+  try {
+    const files = JSON.parse(await call(`/api/bot/api/manifest/${org}/${app}`, {}));
+    Object.assign(mfiles, { org, app });
+    const sel = $('msave').file;
+    sel.innerHTML = '';
+    for (const f of ['base.yaml', 'stable.yaml', 'production.yaml', 'ephemeral.yaml']) {
+      sel.add(new Option(files[f] === undefined ? `${f} (new)` : f, f));
+      mfiles[f] = files[f] ?? '';
+    }
+    $('msave').hidden = $('mbody').hidden = false;
+    $('mbody').value = mfiles[sel.value];
+    msg(`loaded ${Object.keys(files).length} file(s) for ${org}/${app}`);
+  } catch {}
+});
+$('msave').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const file = e.target.file.value;
+  try {
+    await call(`/api/bot/api/manifest/${mfiles.org}/${mfiles.app}/${file}`,
+      { method: 'PUT', body: $('mbody').value });
+    mfiles[file] = $('mbody').value;
+  } catch {}
+});
+$('msave').addEventListener('change', (e) => {
+  if (e.target.name === 'file') $('mbody').value = mfiles[e.target.value];
+});
+
+// ── members ────────────────────────────────────────────────────────────────
+let memOrg = '';
+async function loadMembers() {
+  const members = JSON.parse(await call(`/api/bot/api/members/${memOrg}`, {}));
+  document.querySelector('#members tbody').innerHTML = members.map(m => `
+    <tr><td>${m.user}</td><td>${m.role}</td>
+    <td><button data-remove="${m.user}">remove</button></td></tr>`).join('');
+  $('members').hidden = $('mem-add').hidden = false;
+}
+$('mem-load').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  memOrg = e.target.org.value.trim();
+  try { await loadMembers(); } catch {}
+});
+$('members').addEventListener('click', async (e) => {
+  const user = e.target.dataset?.remove;
+  if (!user || !confirm(`Remove ${user}?`)) return;
+  try {
+    await call(`/api/bot/api/members/${memOrg}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ user, role: 'remove' }),
+    });
+    await loadMembers();
+  } catch {}
+});
+$('mem-add').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  try {
+    await call(`/api/bot/api/members/${memOrg}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ user: e.target.user.value.trim(), role: e.target.role.value }),
+    });
+    await loadMembers();
+  } catch {}
+});
 
 async function loadEvents() {
   try {

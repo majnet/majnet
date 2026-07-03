@@ -15,38 +15,85 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/notify", post(notify))
         .route("/api/events", get(events))
         .route("/api/restart/{project}/{class}/{app}", post(restart))
+        .route("/api/ephemeral/extend/{project}/{app}", post(extend))
         .with_state(state)
 }
 
 /// The one imperative escape hatch (§16): restart isn't a state change, so it
-/// can't be a commit. Audit-logged with the acting identity (Tailscale serve
-/// injects `Tailscale-User-Login` when fronted by it). Nothing else is
-/// imperative.
+/// can't be a commit. Role-gated (production = project admin, the rest =
+/// developer) and audit-logged. Nothing else is imperative.
 async fn restart(
     State(state): State<Arc<AppState>>,
     axum::extract::Path((project, class, app)): axum::extract::Path<(String, String, String)>,
     headers: axum::http::HeaderMap,
 ) -> Result<String, (StatusCode, String)> {
-    let actor = headers
-        .get("tailscale-user-login")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("unknown")
-        .to_string();
-    do_restart(&state, &project, &class, &app, &actor)
+    let class: majnet_common::EnvClass = serde_yaml::from_str(&class).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "class must be production|stable|ephemeral".into(),
+        )
+    })?;
+    let min_role = if class == majnet_common::EnvClass::Production {
+        majnet_common::project::Role::Admin
+    } else {
+        majnet_common::project::Role::Developer
+    };
+    let actor = crate::authz::require(&state, &headers, &project, min_role)
+        .await
+        .map_err(|e| (StatusCode::FORBIDDEN, format!("{e:#}")))?;
+    do_restart(&state, &project, class, &app, &actor)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))
+}
+
+/// Dashboard TTL extension (§8): postpone a preview's GC. State-adjacent but
+/// not config — the manifest still owns existence; this only defers cleanup.
+async fn extend(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path((project, app)): axum::extract::Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+    body: Json<ExtendRequest>,
+) -> Result<String, (StatusCode, String)> {
+    let days = body.days.clamp(1, 7);
+    let actor = crate::authz::require(
+        &state,
+        &headers,
+        &project,
+        majnet_common::project::Role::Developer,
+    )
+    .await
+    .map_err(|e| (StatusCode::FORBIDDEN, format!("{e:#}")))?;
+    let until = state
+        .store
+        .ephemeral_extend(&project, &app, days)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("{e:#}")))?;
+    state
+        .store
+        .record(
+            "imperative",
+            &project,
+            "-",
+            &format!("extend-ttl {app} +{days}d"),
+            &format!("until {until} by {actor}"),
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    tracing::info!(project, app, days, actor, "ephemeral TTL extended");
+    Ok(format!("{project}/{app} protected from GC until {until}"))
+}
+
+#[derive(serde::Deserialize)]
+struct ExtendRequest {
+    days: u32,
 }
 
 async fn do_restart(
     state: &AppState,
     project: &str,
-    class: &str,
+    class: majnet_common::EnvClass,
     app: &str,
     actor: &str,
 ) -> anyhow::Result<String> {
     use anyhow::Context;
-    let class: majnet_common::EnvClass = serde_yaml::from_str(class)
-        .map_err(|_| anyhow::anyhow!("class must be production|stable|ephemeral"))?;
 
     // Resolve the node the same way convergence does.
     let platform = crate::snapshot::fetch(

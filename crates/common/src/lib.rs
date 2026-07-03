@@ -5,6 +5,7 @@
 //! `people.yaml`, `projects.yaml`) and strict validation used by both the
 //! bot (at render time) and the reconciler (defensively at deploy time).
 
+pub mod authz;
 pub mod manifest;
 pub mod merge;
 pub mod platform;

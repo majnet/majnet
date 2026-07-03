@@ -34,6 +34,8 @@ The liaison (design doc §11). Phase-1 MVP: GitHub App auth, webhook intake, dig
 | `POST /api/rollback/{org}` | internal: revert the ops `main` head (§16) |
 | `POST /api/platform/seed` | internal: create the `platform` repo from a posted tree (setup wizard, ADR 0004) |
 | `POST /api/platform/node` | internal: upsert one `nodes.yaml` entry (node enrollment, ADR 0004) |
+| `GET/PUT /api/manifest/{org}/{app}[/{file}]` | internal: read / validate+commit app manifest files on ops `main` (dashboard) |
+| `GET/POST /api/members/{org}` | internal: read / change `project.yaml` members (project admins only) |
 | `GET /healthz` | on both listeners |
 
 ## Org reconciliation (phase 3)

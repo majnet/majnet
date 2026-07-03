@@ -15,6 +15,7 @@
 //!
 //! Credentials held: age keys + Docker API mTLS certs. Nothing else.
 
+mod authz;
 mod config;
 mod converge;
 mod db;
