@@ -96,6 +96,28 @@ pub async fn converge_app(
     Ok(format!("deployed {} ({})", manifest.image, &config_hash[..8]))
 }
 
+/// Remove all containers of one app (project + class scoped).
+pub async fn remove_app(ctx: &DeployCtx<'_>, app: &str) -> Result<()> {
+    for container in list_app_containers(ctx, app).await? {
+        if let Some(name) = container_name(&container) {
+            remove_container_if_exists(ctx.docker, &name).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Distinct app names with live containers in this project/class.
+pub async fn list_class_apps(ctx: &DeployCtx<'_>) -> Result<Vec<String>> {
+    let mut apps: Vec<String> = list_class_containers(ctx)
+        .await?
+        .iter()
+        .filter_map(|c| label(c, LABEL_APP).map(String::from))
+        .collect();
+    apps.sort();
+    apps.dedup();
+    Ok(apps)
+}
+
 /// Remove every majnet container of this project/class whose app is NOT in
 /// the rendered set — deletions only when config is gone from git (§12).
 pub async fn gc_removed_apps(ctx: &DeployCtx<'_>, rendered_apps: &[String]) -> Result<Vec<String>> {

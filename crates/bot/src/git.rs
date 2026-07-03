@@ -27,6 +27,34 @@ pub async fn create_tree(client: &octocrab::Octocrab, repo: &str, files: &BTreeM
     Ok(tree["sha"].as_str().context("tree response has no sha")?.to_string())
 }
 
+/// Incremental tree on top of `base_tree`: `Some(content)` adds/updates a
+/// file, `None` deletes it.
+pub async fn create_tree_incremental(
+    client: &octocrab::Octocrab,
+    repo: &str,
+    base_tree: &str,
+    changes: &BTreeMap<String, Option<String>>,
+) -> Result<String> {
+    let items: Vec<_> = changes
+        .iter()
+        .map(|(path, content)| match content {
+            Some(content) => json!({ "path": path, "mode": "100644", "type": "blob", "content": content }),
+            None => json!({ "path": path, "mode": "100644", "type": "blob", "sha": null }),
+        })
+        .collect();
+    let tree: serde_json::Value = client
+        .post(format!("{repo}/git/trees"), Some(&json!({ "base_tree": base_tree, "tree": items })))
+        .await
+        .context("creating incremental tree")?;
+    Ok(tree["sha"].as_str().context("tree response has no sha")?.to_string())
+}
+
+/// The tree SHA a commit points at.
+pub async fn commit_tree(client: &octocrab::Octocrab, repo: &str, commit: &str) -> Result<String> {
+    let c: serde_json::Value = client.get(format!("{repo}/git/commits/{commit}"), None::<&()>).await?;
+    Ok(c["tree"]["sha"].as_str().context("commit has no tree sha")?.to_string())
+}
+
 pub async fn create_commit(client: &octocrab::Octocrab, repo: &str, tree: &str, parents: &[&str], message: &str) -> Result<String> {
     let commit: serde_json::Value = client
         .post(format!("{repo}/git/commits"), Some(&json!({ "message": message, "tree": tree, "parents": parents })))

@@ -84,7 +84,14 @@ async fn dispatch(state: &AppState, event: &str, payload: serde_json::Value) -> 
         "pull_request" => {
             let action = payload["action"].as_str().unwrap_or_default();
             let number = payload["number"].as_u64().unwrap_or_default();
-            tracing::info!(org, action, number, "pull_request event (phase 4: ephemeral lifecycle)");
+            let repo = payload["repository"]["name"].as_str().unwrap_or_default();
+            // Deploys are driven by pr-<N> package publishes (the digest
+            // arrives there); closing removes the preview manifest.
+            if action == "closed" && repo != "ops" && number > 0 {
+                crate::ephemeral::on_pr_closed(state, &org, repo, number).await?;
+            } else {
+                tracing::debug!(org, repo, action, number, "pull_request event ignored");
+            }
         }
         other => tracing::debug!(event = other, "ignoring event"),
     }

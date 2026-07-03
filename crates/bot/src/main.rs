@@ -13,10 +13,12 @@
 
 mod config;
 mod digest;
+mod ephemeral;
 mod git;
 mod github;
 mod notify;
 mod org_sync;
+mod promote;
 mod proxy;
 mod render;
 mod state;
@@ -63,6 +65,7 @@ async fn main() -> Result<()> {
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/snapshot/{org}/{repo}/{branch}", get(proxy::snapshot))
         .route("/api/tailscale-authkey/{project}", post(tailscale::authkey))
+        .route("/api/promote/{org}/{app}", post(promote::promote))
         .with_state(state.clone());
 
     // Org reconciliation: hourly, plus webhook-triggered on config pushes (§11.2).

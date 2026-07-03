@@ -23,8 +23,7 @@ use std::collections::BTreeMap;
 use crate::deploy::{self, DeployCtx};
 use crate::AppState;
 
-/// Classes converged in phase 2 (ephemeral joins in phase 4).
-const CLASSES: [EnvClass; 2] = [EnvClass::Stable, EnvClass::Production];
+const CLASSES: [EnvClass; 3] = [EnvClass::Stable, EnvClass::Production, EnvClass::Ephemeral];
 
 pub async fn converge_all(state: &AppState) -> Result<()> {
     let platform = crate::snapshot::fetch(&state.http, &state.config, &state.config.root_org, "platform", "main")
@@ -89,12 +88,27 @@ async fn converge_project_class(
 
     let mut converged_apps = Vec::new();
     for (app, content) in &manifests {
+        // Hard TTL (§8): an ephemeral stack dies at 7 days even if its
+        // manifest lingers (safety net for PRs that never close).
+        if class == EnvClass::Ephemeral && state.store.ephemeral_ttl_expired(project, app)? {
+            if !state.config.dry_run {
+                deploy::remove_app(&ctx, app).await?;
+                state.store.ephemeral_forget(project, app)?;
+            }
+            state.store.record(&snapshot.commit, project, &node.name, &format!("gc {app}"), "7 d hard TTL")?;
+            tracing::info!(project, app, "ephemeral stack hit 7 d hard TTL");
+            continue; // deliberately not in the keep-list
+        }
+
         let result = converge_one(state, &ctx, &snapshot, app, content).await;
         match result {
             Ok(summary) => {
                 tracing::info!(project, class = class.as_str(), app, %summary, "converged");
                 state.store.record(&snapshot.commit, project, &node.name, &format!("converge {app}"), &summary)?;
                 converged_apps.push(app.to_string());
+                if class == EnvClass::Ephemeral {
+                    state.store.ephemeral_mark_seen(project, app)?;
+                }
             }
             Err(e) => {
                 // Loud abort for this app; the rest continue. The app stays
@@ -107,10 +121,16 @@ async fn converge_project_class(
         }
     }
 
-    // Deletions only when config is gone from git (§12).
-    for removed in deploy::gc_removed_apps(&ctx, &converged_apps).await? {
-        state.store.record(&snapshot.commit, project, &node.name, "gc", &removed)?;
-        tracing::info!(project, class = class.as_str(), removed, "removed (config gone from git)");
+    // Deletions only when config is gone from git (§12); ephemeral gets the
+    // 48 h grace instead of immediate removal.
+    let removed = if class == EnvClass::Ephemeral {
+        crate::gc::ephemeral_gc(state, &ctx, &converged_apps).await?
+    } else {
+        deploy::gc_removed_apps(&ctx, &converged_apps).await?
+    };
+    for entry in removed {
+        state.store.record(&snapshot.commit, project, &node.name, "gc", &entry)?;
+        tracing::info!(project, class = class.as_str(), entry, "removed");
     }
     Ok(())
 }

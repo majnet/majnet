@@ -52,10 +52,16 @@ Code ✅ / live wiring ⏳:
 - [ ] Split DNS for `*.<project>.majksa.net` on the tailnet (Tailscale admin: DNS → split DNS pointing at the project ingress IPs; automate later)
 - [ ] Live verification: real org onboarding end-to-end (create org → install App → registry line → repos/teams/ACLs appear)
 
-## Phase 4 — Environment classes
+## Phase 4 — Environment classes 🚧
 
-- [ ] Production class: promote PRs, `env/production` render-PR review gate, `age-production` key
-- [ ] Ephemeral lifecycle: PR-scoped deploys, preview-URL comments, 48 h grace / 7 d hard TTL GC
+Code ✅ / live wiring ⏳:
+
+- [x] Promote flow: `POST /api/promote/{org}/{app}` copies the stable digest into the production overlay on ops `main`; the gated `env/production` render PR follows automatically (`bot/src/promote.rs`)
+- [x] Ephemeral lifecycle: `pr-N` GHCR build → generated manifest (base ⊕ ephemeral overlay ⊕ PR patch) committed directly onto `env/ephemeral` (ADR 0003) → preview-URL PR comment (updated in place); PR close removes the manifest (`bot/src/ephemeral.rs`)
+- [x] Ephemeral GC: 48 h grace after manifest removal, 7 d hard TTL enforced even while a manifest lingers; SQLite tracking (`reconciler/src/gc.rs`)
+- [x] Reconciler converges all three classes; `age-production`/`age-stable` class keys already wired (§14)
+- [ ] Generate the two class age keys + distribute (`age-keygen`; reconciler `MAJNET_AGE_KEY_DIR`)
+- [ ] Live verification: PR → preview URL → close → grace GC observed end-to-end
 
 ## Phase 5 — Data & polish
 

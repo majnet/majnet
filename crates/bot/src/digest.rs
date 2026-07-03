@@ -31,11 +31,10 @@ pub async fn on_package_published(state: &AppState, org: &str, payload: &serde_j
         .or_else(|| version["version"].as_str().filter(|v| v.starts_with("sha256:")))
         .context("package payload carries no sha256 digest")?;
 
-    // Only builds of main move stable; PR builds are tagged pr-<N> and are
-    // handled by the ephemeral flow (phase 4).
-    if tag.starts_with("pr-") {
-        tracing::info!(org, app, tag, "PR build — ephemeral flow (phase 4), skipping stable bump");
-        return Ok(());
+    // Builds of main move stable; pr-<N> builds feed the ephemeral flow.
+    if let Some(pr) = tag.strip_prefix("pr-").and_then(|n| n.parse::<u64>().ok()) {
+        let image = format!("ghcr.io/{org}/{app}@{digest}");
+        return crate::ephemeral::on_pr_build(state, org, app, pr, &image).await;
     }
 
     let image = format!("ghcr.io/{org}/{app}@{digest}");
@@ -85,7 +84,7 @@ async fn bump_stable_digest(state: &AppState, org: &str, app: &str, image: &str)
 
 /// Replace the value of the top-level `image:` line, leaving everything else
 /// (comments, other keys) untouched. Appends the key if absent.
-fn replace_image_line(content: &str, image: &str) -> Result<String> {
+pub(crate) fn replace_image_line(content: &str, image: &str) -> Result<String> {
     let mut out = Vec::new();
     let mut replaced = false;
     for line in content.lines() {
