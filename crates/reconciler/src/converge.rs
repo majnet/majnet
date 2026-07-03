@@ -63,7 +63,8 @@ async fn converge_project_class(
     ensure_network(&docker, project, state.config.dry_run).await?;
 
     // VPN-only classes are served through the project's tailnet ingress (§7).
-    if class.node_role() == "private" {
+    // Local smoke tests have no tailnet — skip.
+    if class.node_role() == "private" && !state.config.docker_local {
         if let Err(e) = crate::ingress::ensure_ingress(state, &docker, project).await {
             // Ingress trouble must not block app convergence — apps still
             // deploy; access returns when the ingress recovers.

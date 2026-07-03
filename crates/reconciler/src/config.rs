@@ -22,6 +22,12 @@ pub struct Config {
     pub poll_interval_secs: u64,
     /// Log planned actions without touching Docker (§12 principles).
     pub dry_run: bool,
+    /// DEV: use the local Docker socket for every node and skip the tailnet
+    /// ingress. For the smoke-test harness — never in production.
+    pub docker_local: bool,
+    /// DEV: read snapshots from `<dir>/<org>/<repo>/<branch>/` instead of
+    /// the bot. For the smoke-test harness — never in production.
+    pub snapshot_dir: Option<PathBuf>,
 }
 
 impl Config {
@@ -38,6 +44,8 @@ impl Config {
             data_dir: std::env::var("MAJNET_DATA_DIR").unwrap_or_else(|_| "/var/lib/majnet-reconciler".into()).into(),
             poll_interval_secs: std::env::var("MAJNET_POLL_INTERVAL_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(300),
             dry_run: std::env::var("MAJNET_DRY_RUN").is_ok_and(|v| v == "1" || v == "true"),
+            docker_local: std::env::var("MAJNET_DOCKER_LOCAL").is_ok_and(|v| v == "1" || v == "true"),
+            snapshot_dir: std::env::var("MAJNET_SNAPSHOT_DIR").ok().map(Into::into),
         })
     }
 }

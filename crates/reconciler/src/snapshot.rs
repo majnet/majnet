@@ -14,6 +14,9 @@ pub struct Snapshot {
 /// Fetch `<org>/<repo>@<branch>`. Ok(None) = branch/repo doesn't exist
 /// (e.g. a project with no `env/production` yet).
 pub async fn fetch(http: &reqwest::Client, config: &Config, org: &str, repo: &str, branch: &str) -> Result<Option<Snapshot>> {
+    if let Some(dir) = &config.snapshot_dir {
+        return fetch_local(&dir.join(org).join(repo).join(branch));
+    }
     let url = format!("{}/api/snapshot/{org}/{repo}/{}", config.bot_url, urlencode(branch));
     let response = http.get(&url).send().await.context("bot snapshot API unreachable")?;
     match response.status() {
@@ -36,4 +39,36 @@ pub async fn fetch(http: &reqwest::Client, config: &Config, org: &str, repo: &st
 
 fn urlencode(s: &str) -> String {
     s.replace('/', "%2F")
+}
+
+/// Smoke-test mode: a snapshot is a plain directory tree. The "commit" is a
+/// hash of the contents so config changes register as new commits.
+fn fetch_local(dir: &std::path::Path) -> Result<Option<Snapshot>> {
+    use sha2::Digest;
+    if !dir.is_dir() {
+        return Ok(None);
+    }
+    let mut files = BTreeMap::new();
+    collect(dir, dir, &mut files)?;
+    let mut hasher = sha2::Sha256::new();
+    for (path, content) in &files {
+        hasher.update(path);
+        hasher.update([0]);
+        hasher.update(content);
+    }
+    let commit = format!("local-{}", &hex::encode(hasher.finalize())[..12]);
+    return Ok(Some(Snapshot { commit, files }));
+
+    fn collect(root: &std::path::Path, dir: &std::path::Path, out: &mut BTreeMap<String, Vec<u8>>) -> Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                collect(root, &path, out)?;
+            } else {
+                let rel = path.strip_prefix(root)?.to_string_lossy().replace('\\', "/");
+                out.insert(rel, std::fs::read(&path)?);
+            }
+        }
+        Ok(())
+    }
 }

@@ -1,0 +1,14 @@
+# Smoke fixture: every role resolves to the local Docker daemon
+# (MAJNET_DOCKER_LOCAL=1 ignores the IPs).
+wireguard_subnet: 10.88.0.0/24
+docker_api_port: 2376
+nodes:
+  - name: local-prod
+    role: prod
+    wireguard_ip: 127.0.0.1
+  - name: local-private
+    role: private
+    wireguard_ip: 127.0.0.1
+  - name: local-main
+    role: main
+    wireguard_ip: 127.0.0.1
