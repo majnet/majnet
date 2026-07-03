@@ -156,7 +156,15 @@ async fn converge_one(
         }
     };
 
-    deploy::converge_app(ctx, &manifest, secrets.as_ref()).await
+    // Managed database (§15): provision before the app (and its migrations) run.
+    let extra_env = match &manifest.database {
+        Some(db) => {
+            crate::db::ensure(&state.config, ctx.docker, ctx.project, app, ctx.class, db.engine, ctx.dry_run).await?
+        }
+        None => Vec::new(),
+    };
+
+    deploy::converge_app(ctx, &manifest, secrets.as_ref(), &extra_env).await
 }
 
 async fn ensure_network(docker: &bollard::Docker, project: &str, dry_run: bool) -> Result<()> {

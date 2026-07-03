@@ -1,0 +1,15 @@
+# Dashboard — main node, reachable via Tailscale only (§16).
+# nginx serves the static UI and proxies /api/* to the bot's and
+# reconciler's WG-internal APIs. Front with `tailscale serve` (or a
+# tailscale sidecar) so Tailscale-User-Login headers reach the reconciler's
+# audit log.
+services:
+  dashboard:
+    image: nginx:alpine
+    container_name: majnet-dashboard
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8090:80"   # tailscale serve --bg --http 80 http://127.0.0.1:8090
+    volumes:
+      - ./index.html:/usr/share/nginx/html/index.html:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro

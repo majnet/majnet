@@ -14,7 +14,49 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/healthz", get(|| async { "ok" }))
         .route("/notify", post(notify))
         .route("/api/events", get(events))
+        .route("/api/restart/{project}/{class}/{app}", post(restart))
         .with_state(state)
+}
+
+/// The one imperative escape hatch (§16): restart isn't a state change, so it
+/// can't be a commit. Audit-logged with the acting identity (Tailscale serve
+/// injects `Tailscale-User-Login` when fronted by it). Nothing else is
+/// imperative.
+async fn restart(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path((project, class, app)): axum::extract::Path<(String, String, String)>,
+    headers: axum::http::HeaderMap,
+) -> Result<String, (StatusCode, String)> {
+    let actor = headers
+        .get("tailscale-user-login")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown")
+        .to_string();
+    do_restart(&state, &project, &class, &app, &actor)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))
+}
+
+async fn do_restart(state: &AppState, project: &str, class: &str, app: &str, actor: &str) -> anyhow::Result<String> {
+    use anyhow::Context;
+    let class: majnet_common::EnvClass =
+        serde_yaml::from_str(class).map_err(|_| anyhow::anyhow!("class must be production|stable|ephemeral"))?;
+
+    // Resolve the node the same way convergence does.
+    let platform = crate::snapshot::fetch(&state.http, &state.config, &state.config.root_org, "platform", "main")
+        .await?
+        .context("platform snapshot unavailable")?;
+    let nodes = majnet_common::platform::NodesFile::parse(platform.files.get("nodes.yaml").context("no nodes.yaml")?)?;
+    let node = nodes.by_role(class.node_role()).context("no node for class")?;
+    let docker = state.nodes(&nodes).client_for(node).await?;
+
+    let ctx = crate::deploy::DeployCtx { docker: &docker, project, class, commit: "imperative", dry_run: false };
+    let restarted = crate::deploy::restart_app(&ctx, app).await?;
+    anyhow::ensure!(restarted > 0, "no containers found for {project}/{app} ({})", class.as_str());
+
+    state.store.record("imperative", project, &node.name, &format!("restart {app}"), &format!("by {actor}"))?;
+    tracing::info!(project, app, actor, "restarted (imperative escape hatch)");
+    Ok(format!("restarted {restarted} container(s)"))
 }
 
 /// The bot's nudge — payload is informational; convergence always reconciles

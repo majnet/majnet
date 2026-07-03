@@ -63,13 +63,21 @@ Code ✅ / live wiring ⏳:
 - [ ] Generate the two class age keys + distribute (`age-keygen`; reconciler `MAJNET_AGE_KEY_DIR`)
 - [ ] Live verification: PR → preview URL → close → grace GC observed end-to-end
 
-## Phase 5 — Data & polish
+## Phase 5 — Data & polish 🚧
 
-- [ ] DB provisioning (per-project logical DBs/users) + migrations as one-shot containers
-- [ ] restic backups + weekly restore tests
-- [ ] Dashboard (reads: reconciler state API; writes: bot → commits/PRs)
-- [ ] Runbooks (`docs/runbooks/`)
-- [ ] Self-update story
+Code ✅ / remaining ⏳:
+
+- [x] DB provisioning: `database: {engine}` in manifests → logical DB + user on the zone's engine container, deterministic HMAC-derived passwords (no state), engine attached to project network, `DATABASE_URL` injected (`reconciler/src/db.rs`; postgres + mariadb — valkey/mongodb TODO)
+- [x] Engine platform manifests (`platform-seed/platform/databases/`)
+- [x] Backups: nightly dumps → restic → offsite + retention, systemd timer (`bootstrap/steps/60-backups.sh`)
+- [x] Restart escape hatch: `POST /api/restart/{project}/{class}/{app}`, audit-logged with Tailscale identity (§16)
+- [x] Rollback: `POST /api/rollback/{org}` — revert of ops `main` head, propagates via render PRs
+- [x] Dashboard MVP: events + promote/rollback/restart (`dashboard/`)
+- [x] Runbooks: node-recovery, bad-deploy, db-break-glass, secret-rotation, restore-test, github-outage
+- [ ] Full dashboard: manifest editing, member management, TTL extension, role-based authorization from `people.yaml`
+- [ ] Valkey + MongoDB provisioning
+- [ ] Self-update story (open question §20.3)
+- [ ] First weekly restore test actually performed
 
 ## Phase 6 — One-line auto-provisioning (Coolify-style install)
 

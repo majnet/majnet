@@ -13,6 +13,7 @@ axum.workspace = true
 bollard.workspace = true
 futures-util.workspace = true
 reqwest.workspace = true
+hmac.workspace = true
 sha2.workspace = true
 hex.workspace = true
 serde.workspace = true

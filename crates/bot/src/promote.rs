@@ -64,6 +64,39 @@ async fn do_promote(state: &AppState, org: &str, app: &str) -> Result<String> {
     Ok(format!("{app}: promotion committed; review the env/production render PR to deploy"))
 }
 
+/// Rollback (§16): `git revert` of the latest change on ops `main` — a new
+/// commit restoring the previous tree, so history stays append-only and the
+/// render pipeline propagates the rollback like any other change.
+pub async fn rollback(
+    State(state): State<Arc<AppState>>,
+    Path(org): Path<String>,
+) -> Result<String, (StatusCode, String)> {
+    do_rollback(&state, &org)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))
+}
+
+async fn do_rollback(state: &AppState, org: &str) -> Result<String> {
+    let client = state.github.org_client(org).await?;
+    let repo = format!("/repos/{org}/ops");
+
+    let head = crate::git::get_branch_head(&client, &repo, "main").await?.context("ops has no main branch")?;
+    let commit: serde_json::Value = client.get(format!("{repo}/git/commits/{head}"), None::<&()>).await?;
+    let parents = commit["parents"].as_array().cloned().unwrap_or_default();
+    anyhow::ensure!(parents.len() == 1, "head commit has {} parents — rollback needs a linear history step", parents.len());
+    let parent = parents[0]["sha"].as_str().context("parent has no sha")?;
+    let parent_tree = crate::git::commit_tree(&client, &repo, parent).await?;
+
+    let short = &head[..12.min(head.len())];
+    let message = format!("revert: roll back {short}");
+    let revert = crate::git::create_commit(&client, &repo, &parent_tree, &[&head], &message).await?;
+    crate::git::force_update_ref(&client, &repo, "main", &revert).await?;
+
+    state.store.log_event("rollback", Some(org), &format!("reverted {head}"))?;
+    tracing::info!(org, head, "rolled back — render pipeline will propagate");
+    Ok(format!("reverted {short}; render PRs will follow"))
+}
+
 /// (content, blob_sha) of a file on ops main, or None if absent.
 async fn read_file(
     repos: &octocrab::repos::RepoHandler<'_>,

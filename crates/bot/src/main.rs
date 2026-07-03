@@ -66,6 +66,7 @@ async fn main() -> Result<()> {
         .route("/api/snapshot/{org}/{repo}/{branch}", get(proxy::snapshot))
         .route("/api/tailscale-authkey/{project}", post(tailscale::authkey))
         .route("/api/promote/{org}/{app}", post(promote::promote))
+        .route("/api/rollback/{org}", post(promote::rollback))
         .with_state(state.clone());
 
     // Org reconciliation: hourly, plus webhook-triggered on config pushes (§11.2).

@@ -1,0 +1,31 @@
+# Managed DB engines (§15) — one copy per data zone: run on the prod node
+# for production data and on the private node for dev data. No published
+# ports: engines are reachable only via the project networks the reconciler
+# attaches them to. Container names are the contract (`reconciler/src/db.rs`).
+services:
+  postgres:
+    image: postgres:17
+    container_name: majnet-postgres
+    restart: unless-stopped
+    environment:
+      # Superuser access stays inside the container (peer auth via exec);
+      # per-app users are provisioned by the reconciler.
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres-root
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - /etc/majnet/db-root/postgres:/run/secrets/postgres-root:ro
+
+  mariadb:
+    image: mariadb:11
+    container_name: majnet-mariadb
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD_FILE: /run/secrets/mariadb-root
+    volumes:
+      - mariadb-data:/var/lib/mysql
+      - /etc/majnet/db-root/mariadb:/run/secrets/mariadb-root:ro
+
+volumes:
+  postgres-data:
+  mariadb-data:

@@ -38,12 +38,14 @@ pub fn network_name(project: &str) -> String {
 }
 
 /// Converge one app to its rendered manifest. Returns a human summary.
+/// `extra_env` carries injected platform values (DB connection, §15).
 pub async fn converge_app(
     ctx: &DeployCtx<'_>,
     manifest: &AppManifest,
     secrets: Option<&BTreeMap<String, String>>,
+    extra_env: &[(String, String)],
 ) -> Result<String> {
-    let config_hash = config_hash(manifest, secrets);
+    let config_hash = config_hash(manifest, secrets, extra_env);
     let existing = list_app_containers(ctx, &manifest.name).await?;
 
     let current = existing.iter().find(|c| {
@@ -66,13 +68,13 @@ pub async fn converge_app(
 
     // Migrations: one-shot, must exit 0 before the rollout (§12.6).
     if let Some(migration) = &manifest.migration {
-        run_migration(ctx, manifest, secrets.is_some(), &secrets_dir, &migration.command).await?;
+        run_migration(ctx, manifest, secrets.is_some(), &secrets_dir, extra_env, &migration.command).await?;
     }
 
     let name = format!("{}-{}-{}-{}", ctx.project, manifest.name, ctx.class.as_str(), &config_hash[..8]);
     remove_container_if_exists(ctx.docker, &name).await?; // crashed previous attempt
 
-    let body = container_spec(ctx, manifest, secrets.is_some(), &secrets_dir, &config_hash);
+    let body = container_spec(ctx, manifest, secrets.is_some(), &secrets_dir, extra_env, &config_hash);
     ctx.docker
         .create_container(Some(qp::CreateContainerOptions { name: Some(name.clone()), ..Default::default() }), body)
         .await
@@ -94,6 +96,23 @@ pub async fn converge_app(
         }
     }
     Ok(format!("deployed {} ({})", manifest.image, &config_hash[..8]))
+}
+
+/// Restart all running containers of one app (the §16 escape hatch —
+/// same digest, same config, just a bounce). Returns how many.
+pub async fn restart_app(ctx: &DeployCtx<'_>, app: &str) -> Result<usize> {
+    let containers = list_app_containers(ctx, app).await?;
+    let mut restarted = 0;
+    for container in &containers {
+        if let Some(name) = container_name(container) {
+            ctx.docker
+                .restart_container(&name, None::<qp::RestartContainerOptions>)
+                .await
+                .with_context(|| format!("restarting {name}"))?;
+            restarted += 1;
+        }
+    }
+    Ok(restarted)
 }
 
 /// Remove all containers of one app (project + class scoped).
@@ -140,18 +159,25 @@ pub async fn gc_removed_apps(ctx: &DeployCtx<'_>, rendered_apps: &[String]) -> R
     Ok(removed)
 }
 
-fn config_hash(manifest: &AppManifest, secrets: Option<&BTreeMap<String, String>>) -> String {
+fn config_hash(manifest: &AppManifest, secrets: Option<&BTreeMap<String, String>>, extra_env: &[(String, String)]) -> String {
     let mut hasher = sha2::Sha256::new();
     hasher.update(serde_yaml::to_string(manifest).expect("manifest serializes"));
-    if let Some(secrets) = secrets {
-        for (k, v) in secrets {
-            hasher.update(k);
-            hasher.update([0]);
-            hasher.update(v);
-            hasher.update([0]);
-        }
+    for (k, v) in secrets.into_iter().flatten().map(|(k, v)| (k.as_str(), v.as_str())).chain(extra_env.iter().map(|(k, v)| (k.as_str(), v.as_str()))) {
+        hasher.update(k);
+        hasher.update([0]);
+        hasher.update(v);
+        hasher.update([0]);
     }
     hex::encode(hasher.finalize())
+}
+
+fn env_list(manifest: &AppManifest, extra_env: &[(String, String)]) -> Vec<String> {
+    manifest
+        .env
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .chain(extra_env.iter().map(|(k, v)| format!("{k}={v}")))
+        .collect()
 }
 
 fn container_spec(
@@ -159,6 +185,7 @@ fn container_spec(
     manifest: &AppManifest,
     with_secrets: bool,
     secrets_dir: &str,
+    extra_env: &[(String, String)],
     config_hash: &str,
 ) -> ContainerCreateBody {
     let mut labels = HashMap::from([
@@ -195,7 +222,7 @@ fn container_spec(
 
     ContainerCreateBody {
         image: Some(manifest.image.clone()),
-        env: Some(manifest.env.iter().map(|(k, v)| format!("{k}={v}")).collect()),
+        env: Some(env_list(manifest, extra_env)),
         labels: Some(labels),
         healthcheck: health,
         host_config: Some(HostConfig {
@@ -216,6 +243,7 @@ async fn run_migration(
     manifest: &AppManifest,
     with_secrets: bool,
     secrets_dir: &str,
+    extra_env: &[(String, String)],
     command: &[String],
 ) -> Result<()> {
     let name = format!("{}-{}-{}-migrate", ctx.project, manifest.name, ctx.class.as_str());
@@ -224,7 +252,7 @@ async fn run_migration(
     let body = ContainerCreateBody {
         image: Some(manifest.image.clone()),
         cmd: Some(command.to_vec()),
-        env: Some(manifest.env.iter().map(|(k, v)| format!("{k}={v}")).collect()),
+        env: Some(env_list(manifest, extra_env)),
         labels: Some(HashMap::from([(LABEL_PROJECT.to_string(), ctx.project.to_string())])),
         host_config: Some(HostConfig {
             network_mode: Some(network_name(ctx.project)),

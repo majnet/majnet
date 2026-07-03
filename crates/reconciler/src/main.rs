@@ -17,6 +17,7 @@
 
 mod config;
 mod converge;
+mod db;
 mod deploy;
 mod docker;
 mod gc;

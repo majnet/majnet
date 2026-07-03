@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MajNet</title>
+<style>
+  :root { color-scheme: light dark; font-family: ui-monospace, monospace; }
+  body { margin: 2rem auto; max-width: 72rem; padding: 0 1rem; }
+  h1 { font-size: 1.2rem; } h1 small { opacity: .6; font-weight: normal; }
+  table { border-collapse: collapse; width: 100%; font-size: .85rem; }
+  th, td { text-align: left; padding: .3rem .6rem; border-bottom: 1px solid color-mix(in srgb, currentColor 15%, transparent); }
+  .failed { color: #d33; }
+  form { display: inline-flex; gap: .4rem; margin: 1rem 1rem 1rem 0; }
+  input { font: inherit; width: 9rem; }
+  button { font: inherit; cursor: pointer; }
+  #msg { padding: .5rem 0; min-height: 1.5rem; opacity: .8; }
+</style>
+</head>
+<body>
+<h1>MajNet <small>— GitOps dashboard (phase-5 MVP; writes go through git, never around it)</small></h1>
+
+<div>
+  <form data-api="/api/bot/api/promote/{org}/{app}" data-fields="org,app"><b>promote</b>
+    <input name="org" placeholder="org" required><input name="app" placeholder="app" required>
+    <button>→ production</button>
+  </form>
+  <form data-api="/api/recon/api/restart/{project}/{class}/{app}" data-fields="project,class,app"><b>restart</b>
+    <input name="project" placeholder="project" required><input name="class" placeholder="class" value="stable" required>
+    <input name="app" placeholder="app" required><button>bounce</button>
+  </form>
+  <form data-api="/api/bot/api/rollback/{org}" data-fields="org"><b>rollback</b>
+    <input name="org" placeholder="org" required><button>revert last</button>
+  </form>
+</div>
+<div id="msg"></div>
+
+<h2 style="font-size:1rem">Events</h2>
+<table id="events"><thead><tr>
+  <th>at</th><th>project</th><th>node</th><th>action</th><th>result</th><th>commit</th>
+</tr></thead><tbody></tbody></table>
+
+<script>
+const msg = (t, bad) => { const el = document.getElementById('msg'); el.textContent = t; el.className = bad ? 'failed' : ''; };
+
+for (const form of document.querySelectorAll('form')) {
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    let url = form.dataset.api;
+    for (const f of form.dataset.fields.split(',')) url = url.replace(`{${f}}`, encodeURIComponent(form[f].value.trim()));
+    msg('…');
+    try {
+      const r = await fetch(url, { method: 'POST' });
+      msg(`${r.status}: ${await r.text()}`, !r.ok);
+      loadEvents();
+    } catch (err) { msg(String(err), true); }
+  });
+}
+
+async function loadEvents() {
+  try {
+    const events = await (await fetch('/api/recon/api/events?limit=100')).json();
+    document.querySelector('#events tbody').innerHTML = events.map(e => `
+      <tr class="${e.result.startsWith('FAILED') ? 'failed' : ''}">
+        <td>${e.at}</td><td>${e.project}</td><td>${e.node}</td>
+        <td>${e.action}</td><td>${e.result}</td><td>${e.commit.slice(0, 12)}</td>
+      </tr>`).join('');
+  } catch (err) { msg(`events: ${err}`, true); }
+}
+loadEvents();
+setInterval(loadEvents, 15000);
+</script>
+</body>
+</html>

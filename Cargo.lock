@@ -986,6 +986,7 @@ dependencies = [
  "bollard",
  "futures-util",
  "hex",
+ "hmac",
  "majnet-common",
  "reqwest",
  "rusqlite",

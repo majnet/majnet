@@ -24,6 +24,25 @@ pub struct AppManifest {
     pub health: Option<HealthCheck>,
     #[serde(default)]
     pub migration: Option<Migration>,
+    /// Managed database (§15): the reconciler provisions a logical DB + user
+    /// on the class-appropriate engine instance and injects connection env.
+    #[serde(default)]
+    pub database: Option<Database>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Database {
+    pub engine: DbEngine,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DbEngine {
+    Postgres,
+    Mariadb,
+    Valkey,
+    Mongodb,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
