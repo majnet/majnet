@@ -32,6 +32,7 @@ pub async fn ensure_domains(state: &AppState, rendered: &BTreeMap<String, String
         .await
         .context("resolving prod public IP for Cloudflare DNS")?;
     let cf = Cloudflare::new(state.http.clone(), token);
+    let mut zones: std::collections::BTreeMap<String, Zone> = Default::default();
     for host in hosts {
         match cf.zone_for(&host).await {
             Err(e) => tracing::warn!(host, error = format!("{e:#}"), "skipping (no Cloudflare zone)"),
@@ -42,11 +43,102 @@ pub async fn ensure_domains(state: &AppState, rendered: &BTreeMap<String, String
                     tracing::error!(zone = zone.name, error = format!("{e:#}"), "Cloudflare SSL mode failed");
                 } else {
                     tracing::info!(host, ip = prod_ip, "Cloudflare edge ensured");
+                    zones.entry(zone.name.clone()).or_insert(zone);
                 }
             }
         }
     }
+
+    // Ensure an Origin CA cert exists (committed to git, key age-encrypted) for
+    // each touched zone, so the reconciler can serve TLS on brand-new zones.
+    if let Some(recipient) = state.config.age_production_recipient.clone() {
+        for zone in zones.into_values() {
+            if let Err(e) = ensure_origin_cert(state, &cf, &zone, &recipient).await {
+                tracing::error!(zone = zone.name, error = format!("{e:#}"), "origin cert ensure failed");
+            }
+        }
+    } else {
+        tracing::debug!("MAJNET_AGE_PRODUCTION_RECIPIENT unset — skipping origin-cert issuance");
+    }
     Ok(())
+}
+
+/// Issue + commit a Cloudflare Origin CA certificate for `zone` if one isn't
+/// already in the platform repo. The cert lands plaintext, the private key
+/// age-encrypted to the production recipient — only the reconciler decrypts it.
+async fn ensure_origin_cert(
+    state: &AppState,
+    cf: &Cloudflare,
+    zone: &Zone,
+    recipient: &str,
+) -> Result<()> {
+    let org = &state.config.root_org;
+    let client = state.github.org_client(org).await?;
+    let repo = format!("/repos/{org}/platform");
+    let crt_path = format!("platform/edge-main/certs/{}.crt", zone.name);
+    let key_path = format!("platform/edge-main/certs/{}.key.age", zone.name);
+
+    if crate::platform_api::read_platform_file(&client, org, &crt_path)
+        .await
+        .is_ok()
+    {
+        return Ok(()); // already issued
+    }
+
+    tracing::info!(zone = zone.name, "issuing Cloudflare Origin CA certificate");
+    let cert = cf.issue_origin_cert(&zone.name).await?;
+    let key_enc = age_encrypt(recipient, &cert.key_pem)
+        .await
+        .context("age-encrypting origin key")?;
+
+    let head = crate::git::get_branch_head(&client, &repo, "main")
+        .await?
+        .context("platform repo has no main")?;
+    let base_tree = crate::git::commit_tree(&client, &repo, &head).await?;
+    let changes = std::collections::BTreeMap::from([
+        (crt_path, Some(cert.cert_pem)),
+        (key_path, Some(key_enc)),
+    ]);
+    let tree = crate::git::create_tree_incremental(&client, &repo, &base_tree, &changes).await?;
+    let commit = crate::git::create_commit(
+        &client,
+        &repo,
+        &tree,
+        &[&head],
+        &format!("edge: origin certificate for {}", zone.name),
+    )
+    .await?;
+    crate::git::force_update_ref(&client, &repo, "main", &commit).await?;
+    state
+        .store
+        .log_event("origin-cert", Some(org), &zone.name)?;
+    tracing::info!(zone = zone.name, "origin certificate committed");
+    Ok(())
+}
+
+/// Encrypt `plaintext` to an age recipient (armored), via the `age` binary.
+async fn age_encrypt(recipient: &str, plaintext: &str) -> Result<String> {
+    use tokio::io::AsyncWriteExt;
+    let mut child = tokio::process::Command::new("age")
+        .args(["-a", "-r", recipient])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("spawning age (is it installed?)")?;
+    child
+        .stdin
+        .take()
+        .context("no stdin")?
+        .write_all(plaintext.as_bytes())
+        .await?;
+    let out = child.wait_with_output().await?;
+    anyhow::ensure!(
+        out.status.success(),
+        "age encrypt failed: {}",
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    Ok(String::from_utf8(out.stdout)?)
 }
 
 /// Production hostnames declared by ingress across the rendered app manifests
@@ -180,6 +272,36 @@ impl Cloudflare {
         .context("setting SSL mode to Full (strict)")
     }
 
+    /// Issue a Cloudflare Origin CA certificate covering `zone` and `*.zone`.
+    /// Generates an EC keypair + CSR locally (openssl); the private key is
+    /// returned and never leaves the caller except age-encrypted into git.
+    pub async fn issue_origin_cert(&self, zone: &str) -> Result<OriginCert> {
+        let (key_pem, csr_pem) = generate_csr(zone).await?;
+        #[derive(Deserialize)]
+        struct CertResult {
+            certificate: String,
+        }
+        let resp = self
+            .http
+            .post(format!("{API}/certificates"))
+            .bearer_auth(&self.token)
+            .json(&serde_json::json!({
+                "hostnames": [zone, format!("*.{zone}")],
+                "requested_validity": 5475,
+                "request_type": "origin-ecc",
+                "csr": csr_pem,
+            }))
+            .send()
+            .await?;
+        let result: CertResult = unwrap_envelope(resp)
+            .await
+            .context("issuing Cloudflare Origin CA certificate")?;
+        Ok(OriginCert {
+            cert_pem: result.certificate,
+            key_pem,
+        })
+    }
+
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
         let resp = self
             .http
@@ -226,6 +348,60 @@ async fn unwrap_envelope<T: serde::de::DeserializeOwned>(resp: reqwest::Response
     }
     env.result
         .context("Cloudflare response had success=true but no result")
+}
+
+/// A freshly issued origin certificate and its private key (both PEM).
+pub struct OriginCert {
+    pub cert_pem: String,
+    pub key_pem: String,
+}
+
+/// Generate an EC (P-256) keypair + CSR for `zone` and `*.zone` via openssl.
+/// Returns (private key PEM, CSR PEM).
+async fn generate_csr(zone: &str) -> Result<(String, String)> {
+    let dir = std::env::temp_dir().join(format!(
+        "majnet-csr-{}-{}",
+        zone.replace('.', "_"),
+        std::process::id()
+    ));
+    tokio::fs::create_dir_all(&dir).await?;
+    let key = dir.join("key.pem");
+    let csr = dir.join("csr.pem");
+    let out = tokio::process::Command::new("openssl")
+        .args([
+            "req",
+            "-new",
+            "-newkey",
+            "ec",
+            "-pkeyopt",
+            "ec_paramgen_curve:prime256v1",
+            "-nodes",
+            "-keyout",
+            key.to_str().context("non-utf8 temp path")?,
+            "-out",
+            csr.to_str().context("non-utf8 temp path")?,
+            "-subj",
+            &format!("/CN={zone}"),
+            "-addext",
+            &format!("subjectAltName=DNS:{zone},DNS:*.{zone}"),
+        ])
+        .output()
+        .await
+        .context("spawning openssl (is it installed?)")?;
+    let result = async {
+        anyhow::ensure!(
+            out.status.success(),
+            "openssl req failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        Ok::<_, anyhow::Error>((
+            tokio::fs::read_to_string(&key).await?,
+            tokio::fs::read_to_string(&csr).await?,
+        ))
+    }
+    .await;
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+    result
 }
 
 /// Longest-suffix zone match for a hostname. `app.majksa.cz` → `majksa.cz`.

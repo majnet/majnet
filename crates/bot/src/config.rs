@@ -31,6 +31,12 @@ pub struct Config {
     /// 0007): Zone→DNS→Edit + Zone→SSL and Certificates→Edit. `None` = custom
     /// domains stay a manual step (no automated DNS / origin certs).
     pub cloudflare_token: Option<String>,
+    /// The `age-production` *public* recipient (ADR 0007). The bot encrypts
+    /// issued origin-cert private keys to it before committing them to git;
+    /// only the reconciler (holding the private key) can decrypt. `None`
+    /// disables origin-cert issuance (DNS-only). Get it with
+    /// `age-keygen -y /etc/majnet/age/age-production.key`.
+    pub age_production_recipient: Option<String>,
 }
 
 impl Config {
@@ -56,6 +62,9 @@ impl Config {
             tailscale_api_key: std::env::var("MAJNET_TAILSCALE_API_KEY").ok(),
             tailnet: std::env::var("MAJNET_TAILNET").ok(),
             cloudflare_token: std::env::var("MAJNET_CLOUDFLARE_TOKEN")
+                .ok()
+                .filter(|v| !v.is_empty()),
+            age_production_recipient: std::env::var("MAJNET_AGE_PRODUCTION_RECIPIENT")
                 .ok()
                 .filter(|v| !v.is_empty()),
         })
