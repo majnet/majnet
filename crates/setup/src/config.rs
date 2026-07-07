@@ -16,6 +16,10 @@ pub struct Config {
     pub repo_dir: PathBuf,
     /// Bot WG-internal API (platform seed + node upsert, ADR 0004).
     pub bot_url: String,
+    /// Public base URL when Caddy terminates TLS in front of the node
+    /// (ADR 0006), e.g. `https://majnet.example.com` — webhook + wizard
+    /// callbacks are path-routed behind it. Unset = plain HTTP on 8080/7600.
+    pub public_base_url: Option<String>,
 }
 
 impl Config {
@@ -30,6 +34,10 @@ impl Config {
             bot_url: var("MAJNET_BOT_INTERNAL_URL", "http://10.88.0.1:8081")
                 .trim_end_matches('/')
                 .to_string(),
+            public_base_url: std::env::var("MAJNET_PUBLIC_BASE_URL")
+                .ok()
+                .map(|v| v.trim_end_matches('/').to_string())
+                .filter(|v| !v.is_empty()),
         }
     }
 

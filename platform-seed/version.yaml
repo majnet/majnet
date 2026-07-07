@@ -1,0 +1,6 @@
+# Control-plane version pin (ADR 0005) — converged hourly by `majnet-update`
+# on the main node. Branch, tag, or full commit SHA of the majnet source repo;
+# tags or SHAs recommended (a branch pin means auto-deploy-on-push).
+# The setup wizard seeds this with the exact commit the installer built.
+control_plane:
+  ref: main

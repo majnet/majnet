@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# majnet-update — converge the control-plane binaries to the version pinned
+# in the platform repo's version.yaml (ADR 0005). Runs hourly from
+# majnet-update.timer; `majnet-update <ref>` is the break-glass path when the
+# bot is down. Main node only.
+#
+# Failure is safe by ordering: a failed fetch or build aborts before any
+# `install`, so the running binaries are untouched and the timer retries.
+set -euo pipefail
+
+DIR=${MAJNET_REPO_DIR:-/opt/majnet}
+BOT_URL=${MAJNET_BOT_INTERNAL_URL:-http://10.88.0.1:8081}
+
+log() { printf '[majnet-update] %s\n' "$*"; }
+
+# The whole body lives in main() so replacing this script mid-run (it
+# installs itself) can never confuse bash's incremental file reads.
+main() {
+  local ref=${1:-}
+  if [[ -z $ref ]]; then
+    if ! ref=$(curl -fsS --max-time 10 "$BOT_URL/api/platform/version"); then
+      log "bot unreachable — skipping (break-glass: majnet-update <ref>)"
+      return 0
+    fi
+  fi
+  [[ -n $ref ]] || { log "empty version pin — skipping"; return 0; }
+
+  git -C "$DIR" fetch --depth 1 -q origin "$ref"
+  local current target
+  current=$(git -C "$DIR" rev-parse HEAD)
+  target=$(git -C "$DIR" rev-parse FETCH_HEAD)
+  if [[ $current == "$target" ]]; then
+    log "already at $ref ($current)"
+    return 0
+  fi
+
+  log "updating $current → $target ($ref)"
+  git -C "$DIR" checkout -q "$target"
+  export PATH="$HOME/.cargo/bin:$PATH"
+  (cd "$DIR" && cargo build --release -p majnet-bot -p majnet-reconciler -p majnet-setup)
+  install -m 0755 "$DIR/target/release/majnet-bot"        /usr/local/bin/
+  install -m 0755 "$DIR/target/release/majnet-reconciler" /usr/local/bin/
+  install -m 0755 "$DIR/target/release/majnet-setup"      /usr/local/bin/
+  install -m 0755 "$DIR/bootstrap/majnet-update"          /usr/local/bin/
+  systemctl restart majnet-bot majnet-reconciler majnet-setup
+  log "control plane updated to $target"
+}
+
+main "$@"

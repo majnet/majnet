@@ -136,7 +136,7 @@ pub async fn github_start(State(app): State<Arc<AppState>>) -> PageResult {
     if !state.configured() {
         return Err((StatusCode::BAD_REQUEST, "complete step 1 first".into()));
     }
-    let manifest = github_app::manifest(&state, &app.token);
+    let manifest = github_app::manifest(&state, app.config.public_base_url.as_deref(), &app.token);
     let body = format!(
         r#"<p>Redirecting to GitHub to create the App…</p>
 <form id="f" method="post" action="{action}">

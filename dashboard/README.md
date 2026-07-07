@@ -2,7 +2,9 @@
 
 Web UI on the main node, reachable via Tailscale (admin + per-project ACLs).
 
-**Phase-5 MVP shipped here:** a static page (`index.html`) + nginx proxy (`compose.yaml`, `nginx.conf`) exposing the event log and the three write actions that exist so far — promote, rollback (both → bot → commits), restart (→ reconciler, the imperative exception). Run on the main node: `docker compose up -d`, then `tailscale serve --bg --http 80 http://127.0.0.1:8090`. The full read-write UI (manifest editing, member management, TTL extension, per-project role mapping from `people.yaml`) is the remaining phase-5 work.
+A static page (`index.html`) + nginx proxy (`compose.yaml`, `nginx.conf`): event log, manifest editing, member management, TTL extension, promote/rollback (→ bot → commits) and restart (→ reconciler, the imperative exception), role-gated via `people.yaml`.
+
+**Deploying:** on the main node, `tailscale up` (interactive login — the one manual step), then `bootstrap.sh 70` (`steps/70-dashboard.sh`, also suggested by `install.sh`): installs Tailscale + the compose plugin, runs `docker compose up -d`, and fronts it with `tailscale serve --bg --http 80 http://127.0.0.1:8090`. Manual equivalent: those last two commands.
 
 - **Reads** come from the reconciler's state API: per-project deploys, env inventory, health, events, diffs.
 - **Writes go through git, never around it** — every mutating action is sent to the bot's write API, which turns it into a validated commit or PR on the relevant `ops` repo with the acting user attributed (`Co-authored-by`). The dashboard holds no GitHub credentials.

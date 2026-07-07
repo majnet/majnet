@@ -8,6 +8,8 @@ Phase 0 tooling — idempotent bash bootstrap for the three Debian nodes (evolve
 
 ```
 bootstrap.sh          # entry point: runs all steps, or selected by prefix
+install.sh            # one-line MAIN-node installer (ADR 0004) — runs all of this
+majnet-update         # control-plane self-update, driven by the version.yaml pin (ADR 0005)
 node.env.example      # per-node config → /etc/majnet/node.env
 lib/common.sh         # helpers (idempotent file install, apt, logging)
 steps/
@@ -15,7 +17,9 @@ steps/
 ├── 20-wireguard.sh   # cluster mesh: wg0, key generated on-node, 3 static peers
 ├── 30-docker.sh      # Docker CE; API bound ONLY to the WG IP, mTLS required
 ├── 40-firewall.sh    # nftables per role; prod: 80/443 from Cloudflare ranges only
-└── 50-agents.sh      # Beszel agent (on WG IP); restic installed in 10-base
+├── 50-agents.sh      # Beszel agent (on WG IP); restic installed in 10-base
+├── 60-backups.sh     # nightly engine dumps → restic (needs restic.env)
+└── 70-dashboard.sh   # main only: Tailscale + dashboard compose + tailscale serve
 pki/gen-certs.sh      # CA + per-node server certs + reconciler client cert
 ```
 

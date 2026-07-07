@@ -13,12 +13,27 @@ use crate::state::SetupState;
 /// The manifest posted to GitHub. Permissions/events must match what the bot
 /// handles (`crates/bot/README.md`): contents/PRs/administration/members RW,
 /// packages R; push, pull_request, registry_package.
-pub fn manifest(state: &SetupState, nonce: &str) -> serde_json::Value {
+pub fn manifest(state: &SetupState, public_base: Option<&str>, nonce: &str) -> serde_json::Value {
+    // Behind Caddy (ADR 0006) both endpoints share one https host, path-routed;
+    // without it they are the raw per-service ports.
+    let (hook_url, redirect_url) = match public_base {
+        Some(base) => (
+            format!("{base}/webhook"),
+            format!("{base}/github/callback?token={nonce}"),
+        ),
+        None => (
+            format!("http://{}:8080/webhook", state.public_host),
+            format!(
+                "http://{}:7600/github/callback?token={nonce}",
+                state.public_host
+            ),
+        ),
+    };
     json!({
         "name": format!("majnet-{}", state.root_org),
         "url": format!("https://github.com/{}", state.root_org),
-        "hook_attributes": { "url": format!("http://{}:8080/webhook", state.public_host) },
-        "redirect_url": format!("http://{}:7600/github/callback?token={nonce}", state.public_host),
+        "hook_attributes": { "url": hook_url },
+        "redirect_url": redirect_url,
         "public": false,
         "default_permissions": {
             "contents": "write",
@@ -159,7 +174,7 @@ mod tests {
             public_host: "203.0.113.1".into(),
             ..Default::default()
         };
-        let m = manifest(&state, "tok");
+        let m = manifest(&state, None, "tok");
         assert_eq!(m["default_permissions"]["contents"], "write");
         assert_eq!(m["default_permissions"]["packages"], "read");
         assert!(m["default_events"]
@@ -174,6 +189,17 @@ mod tests {
         assert_eq!(
             submit_url(&state),
             "https://github.com/organizations/majksa-platform/settings/apps/new"
+        );
+
+        // Behind Caddy (ADR 0006): one https host, path-routed.
+        let m = manifest(&state, Some("https://majnet.example.com"), "tok");
+        assert_eq!(
+            m["hook_attributes"]["url"],
+            "https://majnet.example.com/webhook"
+        );
+        assert_eq!(
+            m["redirect_url"],
+            "https://majnet.example.com/github/callback?token=tok"
         );
     }
 }

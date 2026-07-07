@@ -16,6 +16,7 @@ Docker client certs — the fourth disjoint credential class (§6).
 | `MAJNET_ETC_DIR` | `/etc/majnet` | token, state, bot.env, PEM, PKI CA, done marker |
 | `MAJNET_REPO_DIR` | `/opt/majnet` | majnet checkout (`bootstrap/` payload + `platform-seed/`) |
 | `MAJNET_BOT_INTERNAL_URL` | `http://10.88.0.1:8081` | bot platform API (seed, node upsert) |
+| `MAJNET_PUBLIC_BASE_URL` | *(unset)* | `https://<domain>` when Caddy fronts the node (ADR 0006) — used for the App webhook + callback URLs; unset = plain `http://<host>:8080/7600` |
 
 ## Flow
 

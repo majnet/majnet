@@ -8,12 +8,14 @@
 # material, and prints the setup-wizard URL. Worker nodes are enrolled from
 # the wizard — never run this on them. Idempotent; safe to re-run.
 #
-# Env overrides: MAJNET_REPO_URL, MAJNET_REF, MAJNET_PUBLIC_IP.
+# Env overrides: MAJNET_REPO_URL, MAJNET_REF, MAJNET_PUBLIC_IP, MAJNET_DOMAIN
+# (a DNS name already pointing at this node — enables Caddy TLS, ADR 0006).
 
 set -euo pipefail
 
 REPO_URL=${MAJNET_REPO_URL:-https://github.com/maxa-ondrej/majnet}
 REF=${MAJNET_REF:-main}
+DOMAIN=${MAJNET_DOMAIN:-}
 DIR=/opt/majnet
 ETC=/etc/majnet
 
@@ -27,7 +29,7 @@ log "installing build + runtime dependencies"
 apt-get update -q
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
   git curl ca-certificates build-essential pkg-config libssl-dev \
-  age openssl openssh-client
+  age openssl openssh-client gnupg
 
 if ! command -v cargo &>/dev/null && [[ ! -x $HOME/.cargo/bin/cargo ]]; then
   log "installing Rust (rustup, minimal profile)"
@@ -72,6 +74,11 @@ RESTIC_REPOSITORY=
 EOF
   )
 fi
+# TLS proxy flag (ADR 0006) — read by the firewall step; also on re-runs
+# where node.env predates the domain.
+if [[ -n $DOMAIN ]] && ! grep -q '^MAIN_TLS_PROXY=1$' "$ETC/node.env"; then
+  echo 'MAIN_TLS_PROXY=1' >> "$ETC/node.env"
+fi
 
 # --- key material (before bootstrap: step 30 points dockerd at the certs) -
 log "generating key material"
@@ -95,12 +102,46 @@ install -d -m 0700 "$ETC/age"
 log "bootstrapping node 'main' (WireGuard, Docker, firewall)"
 bash "$DIR/bootstrap/bootstrap.sh"
 
+# --- TLS proxy (ADR 0006) --------------------------------------------------
+# After the firewall step: 80/443 are open, so the ACME challenge can pass.
+if [[ -n $DOMAIN ]]; then
+  if ! command -v caddy &>/dev/null; then
+    log "installing Caddy (ACME TLS for webhooks + wizard)"
+    curl -1fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key |
+      gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+    curl -1fsSL https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt \
+      > /etc/apt/sources.list.d/caddy-stable.list
+    apt-get update -q
+    DEBIAN_FRONTEND=noninteractive apt-get install -y caddy
+  fi
+  log "writing /etc/caddy/Caddyfile for $DOMAIN"
+  cat > /etc/caddy/Caddyfile <<EOF
+# Managed by majnet install.sh (ADR 0006) — do not edit by hand.
+# /webhook + /healthz → bot; everything else → setup wizard. The wizard
+# listener closes at /finish; 502 on those paths afterwards is expected.
+$DOMAIN {
+	handle /webhook* {
+		reverse_proxy 127.0.0.1:8080
+	}
+	handle /healthz {
+		reverse_proxy 127.0.0.1:8080
+	}
+	handle {
+		reverse_proxy 127.0.0.1:7600
+	}
+}
+EOF
+  systemctl enable --now caddy
+  systemctl reload caddy
+fi
+
 # --- build + install the control plane -------------------------------------
 log "building the control plane (release — several minutes on a small VPS)"
 (cd "$DIR" && cargo build --release -p majnet-bot -p majnet-reconciler -p majnet-setup)
 install -m 0755 "$DIR/target/release/majnet-bot"        /usr/local/bin/
 install -m 0755 "$DIR/target/release/majnet-reconciler" /usr/local/bin/
 install -m 0755 "$DIR/target/release/majnet-setup"      /usr/local/bin/
+install -m 0755 "$DIR/bootstrap/majnet-update"          /usr/local/bin/
 
 # --- service config + units ------------------------------------------------
 # bot.env is written by the wizard (App credentials); reconciler + setup are
@@ -122,6 +163,9 @@ MAJNET_ETC_DIR=/etc/majnet
 MAJNET_REPO_DIR=/opt/majnet
 EOF
 )
+if [[ -n $DOMAIN ]]; then
+  echo "MAJNET_PUBLIC_BASE_URL=https://$DOMAIN" >> "$ETC/setup.env"
+fi
 
 unit() { # unit <name> <extra-unit-lines>
   local name=$1 extra=$2
@@ -145,16 +189,43 @@ EOF
 unit bot "ConditionPathExists=$ETC/github-app.pem"
 unit reconciler ""
 unit setup ""
-systemctl daemon-reload
-systemctl enable --now majnet-bot majnet-reconciler majnet-setup
 
+# Self-update: converge the binaries to the version.yaml pin hourly (ADR 0005).
+cat > /etc/systemd/system/majnet-update.service <<'EOF'
+[Unit]
+Description=MajNet control-plane update (ADR 0005)
+After=network-online.target majnet-bot.service
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/majnet-update
+EOF
+cat > /etc/systemd/system/majnet-update.timer <<'EOF'
+[Unit]
+Description=Hourly MajNet control-plane update check
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=300
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now majnet-bot majnet-reconciler majnet-setup majnet-update.timer
+
+if [[ -n $DOMAIN ]]; then
+  WIZARD_URL="https://$DOMAIN/?token=$(cat "$ETC/setup-token")"
+else
+  WIZARD_URL="http://$PUBLIC_IP:7600/?token=$(cat "$ETC/setup-token")"
+fi
 log "install complete"
 echo
 echo "  ┌──────────────────────────────────────────────────────────────┐"
 echo "    Open the setup wizard to finish (GitHub App, nodes):"
 echo
-echo "    http://$PUBLIC_IP:7600/?token=$(cat "$ETC/setup-token")"
+echo "    $WIZARD_URL"
 echo "  └──────────────────────────────────────────────────────────────┘"
 echo
 echo "  Prerequisite for the wizard: the root GitHub org must already exist."
-echo "  Dashboard (optional, after Tailscale is up): see dashboard/README.md."
+echo "  Dashboard: run 'tailscale up', then '$DIR/bootstrap/bootstrap.sh 70'."

@@ -145,6 +145,7 @@ graph TB
 | Zone | Who | How |
 |---|---|---|
 | Production apps | public internet | Cloudflare → `edge-main` (80/443, CF ranges only) |
+| Control plane (webhooks, wizard) | GitHub / installing operator | Caddy on main (80/443, ACME — ADR 0006); plain 8080/7600 only on domain-less installs |
 | Stable + ephemeral | project members | Tailscale ACL → that project's ingress (private node) |
 | Dashboards, logs, metrics | admins | Tailscale ACL (admin group) → main node |
 | Databases | services only | per-project Docker networks — no VPN listener; break-glass = node SSH |
@@ -368,6 +369,6 @@ Main node, Tailscale ACL. Dozzle (over node Docker APIs), Beszel (agents on all 
 
 1. Backup target: Backblaze B2 vs Hetzner Storage Box.
 2. Per-project ingress footprint if projects multiply (full Traefik vs lighter proxy).
-3. Reconciler self-update via ops repo vs manual bump.
+3. ~~Reconciler self-update via ops repo vs manual bump.~~ Resolved — ADR 0005: version pinned in the platform repo's `version.yaml`, converged by a `majnet-update` timer on the main node.
 4. Whether `people.yaml` drives Tailscale user invitations or only ACLs.
 5. GHCR scope: per-org packages (default) vs central registry org.

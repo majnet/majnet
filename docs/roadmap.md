@@ -76,7 +76,7 @@ Code ✅ / remaining ⏳:
 - [x] Runbooks: node-recovery, bad-deploy, db-break-glass, secret-rotation, restore-test, github-outage
 - [x] Valkey + MongoDB provisioning (ACL user / dbOwner user; engines + nightly dumps included)
 - [x] Full dashboard: manifest editing (validated, committed by the bot), member management (admin-only), ephemeral TTL extension, role-based authorization from `people.yaml` + `project.yaml` (`common/src/authz.rs`; `tailscale serve` is the identity trust anchor)
-- [ ] Self-update story (open question §20.3)
+- [x] Self-update: control-plane version pinned in the platform repo's `version.yaml` (seeded to the exact installed commit), converged hourly by `majnet-update` on the main node via the bot's `GET /api/platform/version`; break-glass = `majnet-update <ref>` (**ADR 0005**)
 - [ ] First weekly restore test actually performed
 
 ## Phase 6 — One-line auto-provisioning (Coolify-style install) 🚧
@@ -87,9 +87,9 @@ Code ✅ / live verification ⏳ (architecture: **ADR 0004** — the `majnet-set
 - [x] **Web-based setup wizard** (`crates/setup`, one-time token): GitHub App via the [manifest flow](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app-from-a-manifest) → bot.env written + bot started; platform repo seeded from `platform-seed/` **committed by the bot** (writes-through-git); public listener closes permanently at /finish
 - [x] **Node enrollment through the brain** (`POST /enroll`, wizard + WG-internal): bootstrap payload over SSH (root first contact, `majnet`+sudo after hardening), PKI server certs issued from the CA, WG pubkey collected, peers re-rendered on every node, `nodes.yaml` updated via the bot
 - [x] The manual `bootstrap/` scripts remain the underlying payload — setup only executes them; standalone break-glass unchanged
-- [ ] Live verification on a real Debian VPS: install → wizard → App → seed → enroll 2 workers → hello-world serving
-- [ ] TLS in front of webhooks + wizard (currently plain HTTP on 8080/7600; Cloudflare or caddy — follow-up)
-- [ ] Dashboard deployment in the installer (needs Tailscale up first; manual per `dashboard/README.md` for now)
+- [x] TLS in front of webhooks + wizard: Caddy on the main node with ACME certs (`MAJNET_DOMAIN` at install; `/webhook` → bot, rest → wizard; firewall admits 80/443 instead of 8080/7600) — **ADR 0006**; domain-less installs keep plain HTTP
+- [x] Dashboard deployment: `steps/70-dashboard.sh` (main only — installs Tailscale + compose plugin; after the interactive `tailscale up`, `bootstrap.sh 70` brings up compose + `tailscale serve`)
+- [ ] Live verification on a real Debian VPS: install (with `MAJNET_DOMAIN` → real ACME issuance) → wizard → App → seed → enroll 2 workers → hello-world serving → `tailscale up` + dashboard step → first `majnet-update` convergence against the seeded pin
 
 > Origin: requirement added 2026-07-03 — the whole setup must be auto-provisioned like Coolify: one command on the master, continue in the web UI, add nodes by handing the brain SSH access.
 

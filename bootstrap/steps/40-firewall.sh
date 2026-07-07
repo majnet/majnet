@@ -3,8 +3,10 @@
 #   all nodes : SSH (22) + WireGuard (51820) from anywhere; Docker API +
 #               everything else only over wg0
 #   prod      : additionally 80/443, restricted to Cloudflare ranges
-#   main      : additionally 8080 (GitHub webhooks) + 7600 (setup wizard —
-#               nothing listens there after setup completes, ADR 0004)
+#   main      : additionally the control-plane ports — 80/443 when Caddy
+#               terminates TLS (MAIN_TLS_PROXY=1, ADR 0006), else raw
+#               8080 (GitHub webhooks) + 7600 (setup wizard — nothing
+#               listens there after setup completes, ADR 0004)
 #   private   : no public service ports at all
 
 WG_PORT=${WG_LISTEN_PORT:-51820}
@@ -49,12 +51,18 @@ $( [[ $NODE_ROLE == prod ]] && cat <<'PROD'
     ip  saddr @cloudflare4 tcp dport { 80, 443 } accept
     ip6 saddr @cloudflare6 tcp dport { 80, 443 } accept
 PROD
-)$( [[ $NODE_ROLE == main ]] && cat <<'MAIN'
+)$( if [[ $NODE_ROLE == main && ${MAIN_TLS_PROXY:-} == 1 ]]; then cat <<'MAINTLS'
+
+    # Control plane behind Caddy: ACME challenges + proxied webhooks/wizard
+    # (ADR 0006). The raw 8080/7600 stay unreachable from outside.
+    tcp dport { 80, 443 } accept
+MAINTLS
+elif [[ $NODE_ROLE == main ]]; then cat <<'MAIN'
 
     # Control plane: GitHub webhooks (bot) + first-run setup wizard.
     tcp dport { 8080, 7600 } accept
 MAIN
-)
+fi )
   }
 
   chain forward {

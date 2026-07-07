@@ -3,7 +3,7 @@
 //! hand the tree to the bot to commit (writes-through-git, ADR 0004).
 
 use anyhow::{Context, Result};
-use majnet_common::platform::NodesFile;
+use majnet_common::platform::{NodesFile, VersionFile};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -20,7 +20,46 @@ pub fn build_tree(seed_dir: &Path, state: &SetupState) -> Result<BTreeMap<String
     );
     let rendered = render_nodes(&files["nodes.yaml"], state)?;
     files.insert("nodes.yaml".into(), rendered);
+    anyhow::ensure!(
+        files.contains_key("version.yaml"),
+        "platform-seed has no version.yaml at {}",
+        seed_dir.display()
+    );
+    match checkout_head(seed_dir) {
+        Some(sha) => {
+            let pinned = render_version(&files["version.yaml"], &sha)?;
+            files.insert("version.yaml".into(), pinned);
+        }
+        // No git checkout around the seed (dev fixtures) — the seed's own
+        // `ref` stands; a real install always pins the built commit.
+        None => tracing::warn!("seed dir is not inside a git checkout — version.yaml not pinned"),
+    }
     Ok(files)
+}
+
+/// The commit the installer checked out — `platform-seed/` sits at the repo
+/// root, so its parent is the checkout.
+fn checkout_head(seed_dir: &Path) -> Option<String> {
+    let repo = seed_dir.parent()?;
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+    let sha = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    (out.status.success() && !sha.is_empty()).then_some(sha)
+}
+
+/// Pin the control plane to the exact commit the installer built (ADR 0005).
+fn render_version(seed_yaml: &str, sha: &str) -> Result<String> {
+    let mut pin = VersionFile::parse(seed_yaml.as_bytes()).context("parsing seed version.yaml")?;
+    pin.control_plane.git_ref = sha.to_string();
+    Ok(format!(
+        "# Control-plane version pin (ADR 0005) — converged by majnet-update.\n\
+         # Branch, tag, or full commit SHA; bump via commit, rollback = pin an older ref.\n{}",
+        serde_yaml::to_string(&pin)?
+    ))
 }
 
 fn walk(root: &Path, dir: &Path, files: &mut BTreeMap<String, String>) -> Result<()> {
@@ -81,5 +120,12 @@ mod tests {
         assert_eq!(parsed.nodes[0].wireguard_pubkey, "PUBKEY");
         assert_eq!(parsed.nodes[0].public_endpoint, "203.0.113.1:51820");
         assert_eq!(parsed.nodes[1].wireguard_pubkey, ""); // prod not enrolled yet
+    }
+
+    #[test]
+    fn pins_version_to_the_built_commit() {
+        let out = render_version("control_plane:\n  ref: main\n", "0123abcd").unwrap();
+        let parsed = VersionFile::parse(out.as_bytes()).unwrap();
+        assert_eq!(parsed.control_plane.git_ref, "0123abcd");
     }
 }

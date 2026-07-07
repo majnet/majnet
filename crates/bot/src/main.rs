@@ -74,6 +74,7 @@ async fn main() -> Result<()> {
         .route("/api/rollback/{org}", post(promote::rollback))
         .route("/api/platform/seed", post(platform_api::seed))
         .route("/api/platform/node", post(platform_api::upsert_node))
+        .route("/api/platform/version", get(platform_api::version))
         .route(
             "/api/manifest/{org}/{app}",
             get(dashboard_api::manifest_get),

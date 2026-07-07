@@ -33,6 +33,26 @@ impl NodesFile {
     }
 }
 
+/// `version.yaml` — the control-plane version pin (ADR 0005), converged by
+/// `majnet-update` on the main node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VersionFile {
+    pub control_plane: ControlPlanePin,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ControlPlanePin {
+    /// Branch, tag, or full commit SHA of the majnet source repo.
+    #[serde(rename = "ref")]
+    pub git_ref: String,
+}
+
+impl VersionFile {
+    pub fn parse(yaml: &[u8]) -> anyhow::Result<Self> {
+        Ok(serde_yaml::from_slice(yaml)?)
+    }
+}
+
 /// `people.yaml` — GitHub username ↔ Tailscale identity mapping.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeopleFile {
