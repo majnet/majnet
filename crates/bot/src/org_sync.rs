@@ -339,20 +339,21 @@ async fn sync_teams(client: &octocrab::Octocrab, org: &str, project: &ProjectCon
 }
 
 async fn ensure_team(client: &octocrab::Octocrab, org: &str, team: &str) -> Result<()> {
-    let exists: Result<serde_json::Value, _> = client
-        .get(format!("/orgs/{org}/teams/{team}"), None::<&()>)
-        .await;
-    if exists.is_ok() {
-        return Ok(());
-    }
-    let _: serde_json::Value = client
+    // Attempt creation and tolerate 422 ("Name/Slug must be unique") — the
+    // team already exists. A read-then-create raced (and missed pre-existing
+    // teams whose slug differs from the name), same class as the repo/ node
+    // upsert fixes.
+    match client
         .post(
             format!("/orgs/{org}/teams"),
             Some(&json!({ "name": team, "privacy": "closed" })),
         )
         .await
-        .with_context(|| format!("creating team {team}"))?;
-    Ok(())
+    {
+        Ok::<serde_json::Value, _>(_) => Ok(()),
+        Err(octocrab::Error::GitHub { source, .. }) if source.status_code == 422 => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("creating team {team}")),
+    }
 }
 
 /// name → archived, for all repos in the org.

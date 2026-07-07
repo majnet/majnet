@@ -74,7 +74,6 @@ async fn ensure_origin_cert(
 ) -> Result<()> {
     let org = &state.config.root_org;
     let client = state.github.org_client(org).await?;
-    let repo = format!("/repos/{org}/platform");
     let crt_path = format!("platform/edge-main/certs/{}.crt", zone.name);
     let key_path = format!("platform/edge-main/certs/{}.key.age", zone.name);
 
@@ -91,28 +90,54 @@ async fn ensure_origin_cert(
         .await
         .context("age-encrypting origin key")?;
 
-    let head = crate::git::get_branch_head(&client, &repo, "main")
-        .await?
-        .context("platform repo has no main")?;
-    let base_tree = crate::git::commit_tree(&client, &repo, &head).await?;
-    let changes = std::collections::BTreeMap::from([
-        (crt_path, Some(cert.cert_pem)),
-        (key_path, Some(key_enc)),
-    ]);
-    let tree = crate::git::create_tree_incremental(&client, &repo, &base_tree, &changes).await?;
-    let commit = crate::git::create_commit(
-        &client,
-        &repo,
-        &tree,
-        &[&head],
-        &format!("edge: origin certificate for {}", zone.name),
-    )
-    .await?;
-    crate::git::force_update_ref(&client, &repo, "main", &commit).await?;
+    // Commit via the Contents API, not git-data: the App's git-data writes to
+    // the platform repo 403 as "not accessible by integration" (unlike the ops
+    // repo), while the Contents API works — it's the same path node enrollment
+    // uses for nodes.yaml. Key first, then cert, so the reconciler (which keys
+    // on the .crt) only acts once both files exist.
+    put_platform_file(&client, org, &key_path, &key_enc, &format!("edge: origin key for {}", zone.name)).await?;
+    put_platform_file(&client, org, &crt_path, &cert.cert_pem, &format!("edge: origin cert for {}", zone.name)).await?;
     state
         .store
         .log_event("origin-cert", Some(org), &zone.name)?;
     tracing::info!(zone = zone.name, "origin certificate committed");
+    Ok(())
+}
+
+/// Create-or-update a file on the platform repo's `main` via the Contents API.
+async fn put_platform_file(
+    client: &octocrab::Octocrab,
+    org: &str,
+    path: &str,
+    content: &str,
+    message: &str,
+) -> Result<()> {
+    let repos = client.repos(org, "platform");
+    match repos.get_content().path(path).r#ref("main").send().await {
+        Ok(c) => {
+            let sha = c
+                .items
+                .into_iter()
+                .next()
+                .context("empty contents response")?
+                .sha;
+            repos
+                .update_file(path, message, content, &sha)
+                .branch("main")
+                .send()
+                .await
+                .with_context(|| format!("updating {path}"))?;
+        }
+        Err(octocrab::Error::GitHub { source, .. }) if source.status_code == 404 => {
+            repos
+                .create_file(path, message, content)
+                .branch("main")
+                .send()
+                .await
+                .with_context(|| format!("creating {path}"))?;
+        }
+        Err(e) => return Err(anyhow::Error::new(e).context(format!("reading {path}"))),
+    }
     Ok(())
 }
 
