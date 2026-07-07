@@ -62,23 +62,49 @@ async fn do_seed(state: &AppState, req: SeedRequest) -> Result<String> {
         }
         Err(e) => return Err(e).context("creating platform repo"),
     }
-    if crate::git::get_branch_head(&client, &repo, "main")
-        .await?
-        .is_some()
-    {
+    // Already seeded? A representative seed file on `main` means yes — stay a
+    // one-shot (matches the original contract).
+    if file_on_main(&client, org, "nodes.yaml").await? {
         return Ok("platform repo already seeded — nothing done".into());
     }
 
+    // The Git Data API (blobs/trees/commits) refuses to write to a repo with
+    // zero commits — it returns 409 "Git Repository is empty". A repo created
+    // with auto_init:false is exactly that, so bootstrap the first commit +
+    // `main` via the Contents API (which *can* initialize an empty repo). The
+    // placeholder is thrown away by the full-snapshot seed commit below.
+    let parent = match crate::git::get_branch_head(&client, &repo, "main").await? {
+        Some(head) => head,
+        None => {
+            tracing::info!(org, "initializing empty platform repo via contents API");
+            client
+                .repos(org, "platform")
+                .create_file(
+                    ".majnet-init",
+                    "chore: initialize platform repo",
+                    "placeholder — replaced by the seed commit\n",
+                )
+                .send()
+                .await
+                .context("initializing empty platform repo")?;
+            crate::git::get_branch_head(&client, &repo, "main")
+                .await?
+                .context("main branch missing after initialization")?
+        }
+    };
+
+    // Full-snapshot seed commit on top of the bootstrap commit (no base tree →
+    // the tree is exactly the seed files, so the placeholder is dropped).
     let tree = crate::git::create_tree(&client, &repo, &req.files).await?;
     let commit = crate::git::create_commit(
         &client,
         &repo,
         &tree,
-        &[],
+        &[&parent],
         "chore: seed platform repo (setup wizard)",
     )
     .await?;
-    crate::git::create_ref(&client, &repo, "main", &commit).await?;
+    crate::git::force_update_ref(&client, &repo, "main", &commit).await?;
     state.store.log_event(
         "platform-seeded",
         Some(org),
@@ -86,6 +112,27 @@ async fn do_seed(state: &AppState, req: SeedRequest) -> Result<String> {
     )?;
     tracing::info!(org, files = req.files.len(), "platform repo seeded");
     Ok(format!("seeded {org}/platform ({} files)", req.files.len()))
+}
+
+/// Whether `path` exists on `platform`'s `main` branch. False for a missing
+/// file (404) or an empty repo (409).
+async fn file_on_main(client: &octocrab::Octocrab, org: &str, path: &str) -> Result<bool> {
+    match client
+        .repos(org, "platform")
+        .get_content()
+        .path(path)
+        .r#ref("main")
+        .send()
+        .await
+    {
+        Ok(_) => Ok(true),
+        Err(octocrab::Error::GitHub { source, .. })
+            if source.status_code == 404 || source.status_code == 409 =>
+        {
+            Ok(false)
+        }
+        Err(e) => Err(e).context("checking seed state"),
+    }
 }
 
 /// `GET /api/platform/version` — the control-plane version pin from
