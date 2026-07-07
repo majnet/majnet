@@ -20,7 +20,14 @@ pub async fn get_branch_head(
                 .context("ref has no sha")?
                 .to_string(),
         )),
-        Err(octocrab::Error::GitHub { source, .. }) if source.status_code == 404 => Ok(None),
+        // 404 = branch absent; 409 = repository is empty (no commits yet, e.g.
+        // a freshly created `platform` repo before the seed commit). Both mean
+        // "no head" — let the caller create the first ref.
+        Err(octocrab::Error::GitHub { source, .. })
+            if source.status_code == 404 || source.status_code == 409 =>
+        {
+            Ok(None)
+        }
         Err(e) => Err(e).context("resolving branch head"),
     }
 }
