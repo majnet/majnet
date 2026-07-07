@@ -15,6 +15,7 @@ use bollard::Docker;
 use majnet_common::platform::NodesFile;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 
 use crate::snapshot::Snapshot;
 use crate::AppState;
@@ -43,7 +44,7 @@ pub async fn converge_platform(state: &AppState, nodes: &NodesFile, platform: &S
             return;
         }
     };
-    if let Err(e) = converge_edge_main(&docker, platform).await {
+    if let Err(e) = converge_edge_main(&docker, platform, &state.config.age_key_dir).await {
         tracing::error!(error = format!("{e:#}"), "edge-main convergence failed");
         let _ = state.store.record(
             &platform.commit,
@@ -55,10 +56,10 @@ pub async fn converge_platform(state: &AppState, nodes: &NodesFile, platform: &S
     }
 }
 
-async fn converge_edge_main(docker: &Docker, platform: &Snapshot) -> Result<()> {
+async fn converge_edge_main(docker: &Docker, platform: &Snapshot, age_key_dir: &Path) -> Result<()> {
     // Traefik's config from the platform repo (platform/edge-main/traefik/*).
     let prefix = "platform/edge-main/traefik/";
-    let config: BTreeMap<String, Vec<u8>> = platform
+    let mut config: BTreeMap<String, Vec<u8>> = platform
         .files
         .iter()
         .filter_map(|(p, c)| p.strip_prefix(prefix).map(|rel| (rel.to_string(), c.clone())))
@@ -68,9 +69,43 @@ async fn converge_edge_main(docker: &Docker, platform: &Snapshot) -> Result<()> 
         "platform/edge-main/traefik/traefik.yaml missing from the platform repo"
     );
 
-    // Image + files → hash. A change (new cert, config edit, image bump) forces
-    // a recreate; an unchanged, running edge-main is left alone.
-    let hash = config_hash(&config);
+    // Origin certs the bot issued + committed (ADR 0007): `<zone>.crt` plus the
+    // age-encrypted `<zone>.key.age`. Decrypt each key and stage cert+key for
+    // the /certs mount; generate a dynamic TLS file so Traefik serves the right
+    // cert per SNI.
+    let cert_prefix = "platform/edge-main/certs/";
+    let zones: Vec<String> = platform
+        .files
+        .keys()
+        .filter_map(|p| p.strip_prefix(cert_prefix)?.strip_suffix(".crt"))
+        .map(String::from)
+        .collect();
+    let mut cert_files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    for zone in &zones {
+        cert_files.insert(
+            format!("{zone}.crt"),
+            platform.files[&format!("{cert_prefix}{zone}.crt")].clone(),
+        );
+        if let Some(enc) = platform.files.get(&format!("{cert_prefix}{zone}.key.age")) {
+            let key = age_decrypt(age_key_dir, enc)
+                .await
+                .with_context(|| format!("decrypting origin key for {zone}"))?;
+            cert_files.insert(format!("{zone}.key"), key.into_bytes());
+        }
+    }
+    if !zones.is_empty() {
+        let mut tls = String::from("tls:\n  certificates:\n");
+        for zone in &zones {
+            tls.push_str(&format!(
+                "    - certFile: /certs/{zone}.crt\n      keyFile: /certs/{zone}.key\n"
+            ));
+        }
+        config.insert("dynamic/majnet-certs.yaml".into(), tls.into_bytes());
+    }
+
+    // Image + all config + certs → hash. Any change forces a recreate; an
+    // unchanged, running edge-main is left alone.
+    let hash = config_hash(&config, &cert_files);
     if running_with_hash(docker, "edge-main", &hash).await? {
         return Ok(());
     }
@@ -79,6 +114,9 @@ async fn converge_edge_main(docker: &Docker, platform: &Snapshot) -> Result<()> 
     ensure_image(docker, EDGE_IMAGE).await?;
     ensure_image(docker, HELPER_IMAGE).await?;
     deliver_files(docker, EDGE_CONFIG_DIR, &config).await?;
+    if !cert_files.is_empty() {
+        deliver_files(docker, ORIGIN_CERTS_DIR, &cert_files).await?;
+    }
     remove_container(docker, "edge-main").await;
 
     let binds = vec![
@@ -129,16 +167,48 @@ async fn converge_edge_main(docker: &Docker, platform: &Snapshot) -> Result<()> 
     Ok(())
 }
 
-fn config_hash(config: &BTreeMap<String, Vec<u8>>) -> String {
+fn config_hash(config: &BTreeMap<String, Vec<u8>>, certs: &BTreeMap<String, Vec<u8>>) -> String {
     let mut h = Sha256::new();
     h.update(EDGE_IMAGE.as_bytes());
-    for (path, content) in config {
-        h.update(path.as_bytes());
-        h.update([0]);
-        h.update(content);
-        h.update([0]);
+    for map in [config, certs] {
+        for (path, content) in map {
+            h.update(path.as_bytes());
+            h.update([0]);
+            h.update(content);
+            h.update([0]);
+        }
     }
     hex::encode(h.finalize())[..16].to_string()
+}
+
+/// Decrypt an age ciphertext with the `age-production` key via the `age` binary.
+async fn age_decrypt(age_key_dir: &Path, ciphertext: &[u8]) -> Result<String> {
+    use tokio::io::AsyncWriteExt;
+    let key = age_key_dir.join("age-production.key");
+    let mut child = tokio::process::Command::new("age")
+        .args([
+            "-d",
+            "-i",
+            key.to_str().context("non-utf8 age key path")?,
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("spawning age (is it installed?)")?;
+    child
+        .stdin
+        .take()
+        .context("no stdin")?
+        .write_all(ciphertext)
+        .await?;
+    let out = child.wait_with_output().await?;
+    anyhow::ensure!(
+        out.status.success(),
+        "age decrypt failed: {}",
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    Ok(String::from_utf8(out.stdout)?)
 }
 
 /// True if a container named `name` is running with a matching config-hash
