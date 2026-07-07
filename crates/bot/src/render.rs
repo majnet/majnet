@@ -37,6 +37,13 @@ pub async fn on_ops_main_push(state: &AppState, org: &str, commit: &str) -> Resu
             .with_context(|| format!("rendering {}", class.as_str()))?
         {
             Some(rendered) => {
+                // Production domains get their Cloudflare edge wiring ensured
+                // before the render PR (ADR 0007). Non-fatal.
+                if class == EnvClass::Production {
+                    if let Err(e) = crate::cloudflare::ensure_domains(state, &rendered).await {
+                        tracing::error!(org, error = format!("{e:#}"), "Cloudflare ensure failed");
+                    }
+                }
                 push_render_pr(state, org, class, commit, rendered).await?;
             }
             None => tracing::debug!(org, class = class.as_str(), "no apps opt into this class"),

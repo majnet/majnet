@@ -16,6 +16,7 @@ The liaison (design doc §11). Phase-1 MVP: GitHub App auth, webhook intake, dig
 | `MAJNET_ROOT_ORG` | | `majksa-platform` | root platform org |
 | `MAJNET_TAILSCALE_API_KEY` | | *(empty = TS sync off)* | the bot's second credential (§6) |
 | `MAJNET_TAILNET` | | — | tailnet name (e.g. `example.com`) |
+| `MAJNET_CLOUDFLARE_TOKEN` | | *(empty = custom domains manual)* | the bot's third credential (ADR 0007): Zone→DNS→Edit + Zone→SSL and Certificates→Edit. Automates proxied DNS + Full-strict for production domains |
 
 ## GitHub App settings
 

@@ -152,7 +152,11 @@ async fn do_version(state: &AppState) -> Result<String> {
     Ok(pin.control_plane.git_ref)
 }
 
-async fn read_platform_file(client: &octocrab::Octocrab, org: &str, path: &str) -> Result<String> {
+pub(crate) async fn read_platform_file(
+    client: &octocrab::Octocrab,
+    org: &str,
+    path: &str,
+) -> Result<String> {
     let content = client
         .repos(org, "platform")
         .get_content()

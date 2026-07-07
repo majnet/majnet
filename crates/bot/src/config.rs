@@ -27,6 +27,10 @@ pub struct Config {
     pub tailscale_api_key: Option<String>,
     /// Tailnet name, e.g. `example.com` or `tail1234.ts.net`.
     pub tailnet: Option<String>,
+    /// Cloudflare API token (the bot's third external credential, §6 / ADR
+    /// 0007): Zone→DNS→Edit + Zone→SSL and Certificates→Edit. `None` = custom
+    /// domains stay a manual step (no automated DNS / origin certs).
+    pub cloudflare_token: Option<String>,
 }
 
 impl Config {
@@ -51,6 +55,9 @@ impl Config {
             root_org: std::env::var("MAJNET_ROOT_ORG").unwrap_or_else(|_| "majksa-platform".into()),
             tailscale_api_key: std::env::var("MAJNET_TAILSCALE_API_KEY").ok(),
             tailnet: std::env::var("MAJNET_TAILNET").ok(),
+            cloudflare_token: std::env::var("MAJNET_CLOUDFLARE_TOKEN")
+                .ok()
+                .filter(|v| !v.is_empty()),
         })
     }
 }
