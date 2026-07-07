@@ -176,7 +176,8 @@ async fn read_platform_file(client: &octocrab::Octocrab, org: &str, path: &str) 
 }
 
 /// `POST /api/platform/node` — upsert one entry in `nodes.yaml` on platform
-/// `main` (node enrollment / WG pubkey + endpoint updates). Keyed by name.
+/// `main` (node enrollment / WG pubkey + endpoint updates). Keyed by role
+/// (one node per role — static placement, §4).
 pub async fn upsert_node(
     State(state): State<Arc<AppState>>,
     Json(node): Json<Node>,
@@ -234,7 +235,12 @@ async fn do_upsert_node(state: &AppState, node: Node) -> Result<String> {
         "{} ({}) wg={} endpoint={}",
         node.name, node.role, node.wireguard_ip, node.public_endpoint
     );
-    match nodes.nodes.iter_mut().find(|n| n.name == node.name) {
+    // One node per role (static placement, §4), so the role identifies the
+    // slot — not the operator-supplied name. Matching by name let a
+    // non-canonical name (e.g. "node-2" for the prod role) append a second,
+    // conflicting entry sharing the role's WG IP; keying on role fills the
+    // canonical slot instead.
+    match nodes.nodes.iter_mut().find(|n| n.role == node.role) {
         Some(existing) => *existing = node,
         None => nodes.nodes.push(node),
     }
