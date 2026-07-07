@@ -22,9 +22,9 @@ const ADMIN_USER: &str = "majnet";
 
 #[derive(Debug, Deserialize)]
 pub struct EnrollRequest {
-    /// Node name — by convention the role name (single node per role).
-    pub name: String,
-    /// `prod` | `private` (main enrolls itself at install).
+    /// `prod` | `private` (main enrolls itself at install). The role *is* the
+    /// node's name — one node per role (§4), so there's nothing else to pick,
+    /// and a non-canonical name can't create a duplicate entry.
     pub role: String,
     /// SSH destination: the node's public IP or hostname, with the
     /// enrollment pubkey authorized for root (fresh) or majnet (re-run).
@@ -58,7 +58,7 @@ pub async fn run(
     push_payload(config, &req.ssh_host).await?;
 
     writeln!(log, "→ writing node.env + PKI server certs").ok();
-    let node_env = render_node_env(&req.name, &req.role, wg_ip, state, &enroll_key);
+    let node_env = render_node_env(&req.role, &req.role, wg_ip, state, &enroll_key);
     write_file(config, &req.ssh_host, "/etc/majnet/node.env", &node_env).await?;
     for (local, remote) in [
         ("ca.pem", "ca.pem"),
@@ -113,11 +113,11 @@ pub async fn run(
         public_endpoint: format!("{}:51820", req.ssh_host),
         wireguard_pubkey: pubkey,
     };
-    state.nodes.insert(req.name.clone(), entry.clone());
+    state.nodes.insert(req.role.clone(), entry.clone());
 
     writeln!(log, "→ re-rendering WireGuard peers on all nodes").ok();
     for (name, node) in state.nodes.clone() {
-        if name == req.name {
+        if name == req.role {
             continue;
         }
         let env = render_node_env(&name, &node.role, &node.wireguard_ip, state, &enroll_key);
@@ -151,14 +151,9 @@ pub async fn run(
     }
 
     writeln!(log, "→ registering in nodes.yaml (via the bot)").ok();
-    register_node(config, http, &req.name, &entry).await?;
+    register_node(config, http, &req.role, &entry).await?;
 
-    writeln!(
-        log,
-        "✓ {} enrolled ({} @ {})",
-        req.name, req.role, entry.wireguard_ip
-    )
-    .ok();
+    writeln!(log, "✓ enrolled {} node @ {}", req.role, entry.wireguard_ip).ok();
     Ok(log)
 }
 
@@ -219,14 +214,6 @@ fn validate(req: &EnrollRequest) -> Result<()> {
     anyhow::ensure!(
         matches!(req.role.as_str(), "prod" | "private"),
         "role must be prod|private (main enrolls itself at install)"
-    );
-    anyhow::ensure!(
-        !req.name.is_empty()
-            && req
-                .name
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
-        "invalid node name"
     );
     anyhow::ensure!(
         !req.ssh_host.is_empty()
@@ -502,13 +489,12 @@ mod tests {
 
     #[test]
     fn rejects_bad_input() {
-        for (name, role, host) in [
-            ("prod", "main", "1.2.3.4"),        // can't enroll main
-            ("Prod", "prod", "1.2.3.4"),        // uppercase name
-            ("prod", "prod", "host; rm -rf /"), // shell metacharacters
+        for (role, host) in [
+            ("main", "1.2.3.4"),        // can't enroll main
+            ("prod", "host; rm -rf /"), // shell metacharacters
+            ("prod", ""),               // empty host
         ] {
             assert!(validate(&EnrollRequest {
-                name: name.into(),
                 role: role.into(),
                 ssh_host: host.into(),
             })
