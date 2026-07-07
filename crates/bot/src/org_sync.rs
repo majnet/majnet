@@ -143,9 +143,7 @@ async fn ensure_ops_repo(state: &AppState, client: &octocrab::Octocrab, org: &st
         .await
     {
         Ok::<serde_json::Value, _>(_) => tracing::info!(org, "created ops repo"),
-        Err(octocrab::Error::GitHub { source, .. }) if source.status_code == 422 => {
-            return Ok(())
-        }
+        Err(octocrab::Error::GitHub { source, .. }) if source.status_code == 422 => return Ok(()),
         Err(e) => return Err(e).context("creating ops repo"),
     }
 
@@ -169,10 +167,33 @@ async fn ensure_ops_repo(state: &AppState, client: &octocrab::Octocrab, org: &st
         ),
     ]);
     let repo = format!("/repos/{org}/ops");
+    // The Git Data API can't write to a zero-commit repo (409 "empty"), so
+    // initialize the freshly created repo via the Contents API first, then lay
+    // the scaffold on top and force-update main (same approach as
+    // platform_api::do_seed). The placeholder is dropped by the scaffold tree.
+    client
+        .repos(org, "ops")
+        .create_file(
+            ".majnet-init",
+            "chore: initialize ops repo",
+            "placeholder — replaced by the scaffold commit\n",
+        )
+        .send()
+        .await
+        .context("initializing empty ops repo")?;
+    let parent = crate::git::get_branch_head(client, &repo, "main")
+        .await?
+        .context("ops main missing after initialization")?;
     let tree = crate::git::create_tree(client, &repo, &scaffold).await?;
-    let commit =
-        crate::git::create_commit(client, &repo, &tree, &[], "chore: initial ops scaffold").await?;
-    crate::git::create_ref(client, &repo, "main", &commit).await?;
+    let commit = crate::git::create_commit(
+        client,
+        &repo,
+        &tree,
+        &[&parent],
+        "chore: initial ops scaffold",
+    )
+    .await?;
+    crate::git::force_update_ref(client, &repo, "main", &commit).await?;
     state.store.log_event("repo-created", Some(org), "ops")?;
     Ok(())
 }
