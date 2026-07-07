@@ -100,7 +100,10 @@ pub async fn sync_org(
         protect_app_main(&client, org, &app.name).await?;
     }
     for (repo, archived) in &existing {
-        if repo == "ops" || *archived {
+        // Never touch the ops repo, the platform config repo (only present
+        // when the root org is mistakenly registered as a project — archiving
+        // it takes the whole platform read-only), or already-archived repos.
+        if repo == "ops" || repo == "platform" || *archived {
             continue;
         }
         if !project.apps.iter().any(|a| &a.name == repo) {
@@ -256,7 +259,7 @@ async fn protect_ops_production(client: &octocrab::Octocrab, org: &str) -> Resul
     {
         return Ok(()); // branch appears with the first production render
     }
-    let _: serde_json::Value = client
+    match client
         .put(
             format!("/repos/{org}/ops/branches/env%2Fproduction/protection"),
             Some(&json!({
@@ -269,7 +272,20 @@ async fn protect_ops_production(client: &octocrab::Octocrab, org: &str) -> Resul
             })),
         )
         .await
-        .context("protecting env/production")?;
+    {
+        Ok::<serde_json::Value, _>(_) => {}
+        // Branch protection needs a paid plan (private repos on Free 403).
+        // Don't fail the whole sync — warn that the production gate isn't
+        // enforced at the branch level (the render-PR review still applies).
+        Err(octocrab::Error::GitHub { source, .. }) if source.status_code == 403 => {
+            tracing::warn!(
+                org,
+                "branch protection unavailable (paid GitHub plan required) — \
+                 env/production is NOT branch-protected"
+            );
+        }
+        Err(e) => return Err(e).context("protecting env/production"),
+    }
     Ok(())
 }
 
