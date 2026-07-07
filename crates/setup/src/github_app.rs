@@ -34,7 +34,11 @@ pub fn manifest(state: &SetupState, public_base: Option<&str>, nonce: &str) -> s
         "url": format!("https://github.com/{}", state.root_org),
         "hook_attributes": { "url": hook_url },
         "redirect_url": redirect_url,
-        "public": false,
+        // Public so it can be installed on each project org (§2); a private
+        // App installs only on its owning org. The projects.yaml registry —
+        // not installability — is the discovery gate, so a stray install is
+        // inert.
+        "public": true,
         "default_permissions": {
             "contents": "write",
             "pull_requests": "write",
