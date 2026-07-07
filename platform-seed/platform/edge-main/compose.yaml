@@ -4,7 +4,10 @@
 # phase 2 the reconciler owns it.
 services:
   traefik:
-    image: traefik:v3.5
+    # v3.6+ required: it auto-negotiates the Docker API version. Docker Engine
+    # 29 dropped the old API floor (1.24) Traefik <=3.5 hard-coded, so <=3.5
+    # can't reach the Docker socket ("client version 1.24 is too old").
+    image: traefik:v3.6
     container_name: edge-main
     restart: unless-stopped
     ports:
