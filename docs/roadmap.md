@@ -12,7 +12,7 @@ Tooling ✅ / infra provisioning ⏳:
 - [x] Platform repo seed: nodes.yaml, people.yaml, projects.yaml, ACL template (`platform-seed/`)
 - [ ] Provision the 3 Debian nodes + run bootstrap (needs servers, WG pubkey exchange, Docker PKI distribution)
 - [ ] Tailscale org + paste rendered base ACL
-- [ ] Create root org `majksa-platform` on GitHub + push `platform-seed/` as the `platform` repo
+- [x] Create root org `majksa-platform` on GitHub (done 2026-07-07, id 300856753 — the one manual §2 step; the wizard's seed step pushes `platform-seed/` as the `platform` repo)
 - [ ] Cloudflare: origin cert on prod node, proxied DNS record → hello-world reachable publicly
 
 ## Phase 1 — Bot MVP 🚧
