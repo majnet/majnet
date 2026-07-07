@@ -54,7 +54,7 @@ the tailnet ingress name as today (no Cloudflare).
 
 The bot is already the sole external-API liaison (GitHub, Tailscale);
 Cloudflare joins that class. A scoped token
-`MAJNET_CLOUDFLARE_TOKEN` (permissions: **Zone → DNS → Edit** and **Zone →
+`MAJNET_CLOUDFLARE_TOKEN` (permissions: **Zone → DNS → Edit**, **Zone → Zone Settings → Edit**, and **Zone →
 SSL and Certificates → Edit** / Origin CA) goes in the bot's config. A new
 `bot/src/cloudflare.rs` module owns all CF API calls. The reconciler never
 sees the token — credential isolation (§6) holds.
@@ -78,11 +78,11 @@ repo:
 
 ```
 platform/edge-main/certs/<zone>.crt        # public cert, plaintext
-platform/edge-main/certs/<zone>.key.sops   # private key, age-encrypted
+platform/edge-main/certs/<zone>.key.age    # private key, age-encrypted
 ```
 
 The **reconciler** — which holds `age-production` — fetches the platform
-snapshot, decrypts each zone key (its existing SOPS path), and places
+snapshot, decrypts each zone key (via the age binary), and places
 `cert.pem`/`key.pem` per zone on prod for Traefik. So the private key only
 ever exists **encrypted in git** or **decrypted on the prod node**; the bot
 touches Cloudflare + git, the reconciler touches age + Docker. Neither crosses
