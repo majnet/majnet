@@ -48,8 +48,36 @@ pub enum DbEngine {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Ingress {
+    /// Primary public hostname. For `production` this drives Cloudflare + edge
+    /// routing (ADR 0007); for stable/ephemeral it is the tailnet ingress name.
     pub host: String,
+    /// Container port the ingress forwards to.
     pub port: u16,
+    /// Additional public hostnames, possibly across several Cloudflare zones
+    /// (ADR 0007). The full set the router serves is `[host] + domains`.
+    #[serde(default)]
+    pub domains: Vec<String>,
+}
+
+impl Ingress {
+    /// Every public hostname this ingress serves — primary first.
+    pub fn hosts(&self) -> Vec<&str> {
+        std::iter::once(self.host.as_str())
+            .chain(self.domains.iter().map(String::as_str))
+            .collect()
+    }
+}
+
+fn is_valid_hostname(h: &str) -> bool {
+    // A DNS name (labels of alphanumerics/hyphens). FQDN-ness is not required
+    // here — stable/ephemeral tailnet ingress names can be single-label;
+    // production domains are checked for a real zone by the bot (ADR 0007).
+    !h.is_empty()
+        && h.len() <= 253
+        && h.chars().all(|c| c.is_ascii_alphanumeric() || ".-".contains(c))
+        && !h.starts_with(['.', '-'])
+        && !h.ends_with(['.', '-'])
+        && !h.contains("..")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,15 +135,12 @@ impl AppManifest {
             "image digest '{digest}' is not a valid sha256 digest"
         );
         if let Some(ingress) = &self.ingress {
-            ensure!(
-                !ingress.host.is_empty()
-                    && ingress
-                        .host
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || ".-".contains(c)),
-                "ingress host '{}' is invalid",
-                ingress.host
-            );
+            for host in ingress.hosts() {
+                ensure!(
+                    is_valid_hostname(host),
+                    "ingress hostname '{host}' is not a valid DNS name"
+                );
+            }
             ensure!(ingress.port != 0, "ingress port must be non-zero");
         }
         if let Some(health) = &self.health {
@@ -182,6 +207,27 @@ mod tests {
     #[test]
     fn rejects_unknown_fields() {
         let yaml = format!("name: api\nimage: r@{DIGEST}\nreplica: 2\n");
+        assert!(AppManifest::parse(&yaml).is_err());
+    }
+
+    #[test]
+    fn parses_and_orders_ingress_domains() {
+        let yaml = format!(
+            "name: api\nimage: ghcr.io/org/api@{DIGEST}\ningress:\n  host: app.majksa.cz\n  port: 8080\n  domains:\n    - www.majksa.cz\n    - app.majksa.net\n"
+        );
+        let m = AppManifest::parse(&yaml).unwrap();
+        let ingress = m.ingress.unwrap();
+        assert_eq!(
+            ingress.hosts(),
+            vec!["app.majksa.cz", "www.majksa.cz", "app.majksa.net"]
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_domain() {
+        let yaml = format!(
+            "name: api\nimage: ghcr.io/org/api@{DIGEST}\ningress:\n  host: app.majksa.cz\n  port: 8080\n  domains:\n    - 'bad host'\n"
+        );
         assert!(AppManifest::parse(&yaml).is_err());
     }
 

@@ -262,10 +262,15 @@ fn container_spec(
     if let Some(ingress) = &manifest.ingress {
         let router = format!("{}-{}-{}", ctx.project, manifest.name, ctx.class.as_str());
         labels.insert("traefik.enable".into(), "true".into());
-        labels.insert(
-            format!("traefik.http.routers.{router}.rule"),
-            format!("Host(`{}`)", ingress.host),
-        );
+        // OR every hostname the ingress serves (primary + custom domains,
+        // possibly across several Cloudflare zones) — ADR 0007.
+        let rule = ingress
+            .hosts()
+            .iter()
+            .map(|h| format!("Host(`{h}`)"))
+            .collect::<Vec<_>>()
+            .join(" || ");
+        labels.insert(format!("traefik.http.routers.{router}.rule"), rule);
         labels.insert(
             format!("traefik.http.routers.{router}.entrypoints"),
             "websecure".into(),
