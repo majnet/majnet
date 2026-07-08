@@ -3,13 +3,21 @@
 # reconciler's WG-internal APIs. Front with `tailscale serve` (or a
 # tailscale sidecar) so Tailscale-User-Login headers reach the reconciler's
 # audit log.
+#
+# Host networking (not a bridge): the bot + reconciler bind to the WireGuard
+# IP (10.88.0.1), and a bridged container's packets to that IP arrive on the
+# docker bridge interface — which the firewall drops (it only admits wg0 +
+# lo). On the host netns, a connection to a local IP is delivered via lo, so
+# the existing `iif lo accept` rule covers it — no firewall change needed.
+# nginx therefore listens on 127.0.0.1:8090 itself (see nginx.conf), so it
+# neither collides with Caddy's :80/:443 nor is reachable except via
+# `tailscale serve`.
 services:
   dashboard:
     image: nginx:alpine
     container_name: majnet-dashboard
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:8090:80"   # tailscale serve --bg --http 80 http://127.0.0.1:8090
+    network_mode: host          # reach 10.88.0.1:{8081,9090} via lo; see above
     volumes:
       - ./index.html:/usr/share/nginx/html/index.html:ro
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
