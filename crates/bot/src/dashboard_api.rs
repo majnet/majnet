@@ -276,27 +276,32 @@ pub struct WhoAmI {
 }
 
 /// `GET /api/whoami` — the acting identity, for the dashboard sidebar + gating.
-pub async fn whoami(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Result<Json<WhoAmI>, ApiError> {
+/// Infallible: an unmapped login (or a transient snapshot hiccup) reports the
+/// raw identity as unprivileged rather than 502-ing the whole shell — the
+/// gated endpoints still enforce real authorization.
+pub async fn whoami(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Json<WhoAmI> {
     use majnet_common::authz::Actor;
-    let actor = crate::authz::actor(&state, &headers)
-        .await
-        .map_err(bad_gateway)?;
-    Ok(Json(match actor {
-        Actor::Infra => WhoAmI {
+    match crate::authz::actor(&state, &headers).await {
+        Ok(Actor::Infra) => Json(WhoAmI {
             login: None,
             admin: true,
-        },
-        Actor::Human {
+        }),
+        Ok(Actor::Human {
             github,
             platform_admin,
-        } => WhoAmI {
+        }) => Json(WhoAmI {
             login: Some(github),
             admin: platform_admin,
-        },
-    }))
+        }),
+        Err(e) => {
+            let login = headers
+                .get("tailscale-user-login")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            tracing::warn!(error = format!("{e:#}"), ?login, "whoami: unresolved identity");
+            Json(WhoAmI { login, admin: false })
+        }
+    }
 }
 
 // ── projects ─────────────────────────────────────────────────────────────────
