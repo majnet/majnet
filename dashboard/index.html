@@ -143,6 +143,23 @@ const h = (html) => { const t = document.createElement('template'); t.innerHTML 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const short = (img) => String(img ?? '').replace(/(@sha256:[0-9a-f]{8})[0-9a-f]+/, '$1…');
 
+// Latest deploy event for one app in a project (events are newest-first).
+const latestEventFor = (events, project, app) =>
+  (events || []).find((e) => e.project === project && (e.action || '').trim().split(/\s+/).pop() === app);
+// Map an event to a status pill.
+function deployStatus(ev) {
+  if (!ev) return { cls: 'dim', label: 'no deploys', title: '' };
+  const r = ev.result || '', act = (ev.action || '').trim().split(/\s+/)[0];
+  const title = `${ev.action} → ${r}  ·  ${ev.at}  ·  ${String(ev.commit).slice(0, 12)}`;
+  if (r.startsWith('FAILED')) return { cls: 'err', label: 'failed', title };
+  if (act === 'gc') return { cls: 'dim', label: 'removed', title };
+  if (r.startsWith('deployed')) return { cls: 'ok', label: 'deployed', title };
+  if (r === 'in sync') return { cls: 'ok', label: 'healthy', title };
+  return { cls: 'dim', label: (r || act).slice(0, 20), title };
+}
+const statusPill = (st) =>
+  `<span class="pill ${st.cls}" title="${esc(st.title)}">${st.cls === 'ok' ? '<span class="dot"></span>' : ''}${esc(st.label)}</span>`;
+
 let toastTimer;
 function toast(msg, bad) {
   const t = $('#toast'); $('#toast-msg').textContent = msg;
@@ -245,7 +262,10 @@ routes.newproject = async () => {
 
 // ── Project detail ───────────────────────────────────────────────────────────
 routes.project = async (p) => {
-  const apps = await api(`${BOT}/apps/${encodeURIComponent(p.org)}`);
+  const [apps, events] = await Promise.all([
+    api(`${BOT}/apps/${encodeURIComponent(p.org)}`),
+    api(`${RECON}/events?limit=300`).catch(() => []),
+  ]);
   const view = h('<div></div>');
   view.appendChild(h(`<div class="crumb"><a data-back>Projects</a> / ${esc(p.name)}</div>`));
   const head = h(`<div class="head"><h1>${esc(p.name)}</h1><span class="head sub" style="font-family:var(--mono)">${esc(p.org)}</span><span class="grow"></span></div>`);
@@ -262,9 +282,10 @@ routes.project = async (p) => {
     const classes = a.classes.map((c) => `<span class="pill cls">${esc(c)}</span>`).join(' ');
     const dm = [short(a.image), a.database].filter(Boolean).map(esc).join(' &nbsp;·&nbsp; ');
     const host = a.host ? `<span style="font-family:var(--mono);font-size:12px;color:var(--muted)">${esc(a.host)}</span>` : '';
+    const st = statusPill(deployStatus(latestEventFor(events, p.name, a.name)));
     const row = h(`<div class="row link">
       <div><div class="nm">${esc(a.name)} ${classes}</div><div class="dm">${dm || '—'}</div></div>
-      <div class="rt">${host}<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--faint)" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></div></div>`);
+      <div class="rt">${host}${st}<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--faint)" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></div></div>`);
     row.onclick = () => render('app', p, a);
     rows.appendChild(row);
   }
@@ -477,7 +498,12 @@ function manifestForm(app, file, data) {
 }
 
 routes.app = async (p, a) => {
-  const files = await api(`${BOT}/manifest/${encodeURIComponent(p.org)}/${encodeURIComponent(a.name)}`);
+  const [files, events] = await Promise.all([
+    api(`${BOT}/manifest/${encodeURIComponent(p.org)}/${encodeURIComponent(a.name)}`),
+    api(`${RECON}/events?limit=300`).catch(() => []),
+  ]);
+  const appEvents = (events || []).filter(
+    (e) => e.project === p.name && (e.action || '').trim().split(/\s+/).pop() === a.name);
 
   const view = h('<div></div>');
   view.appendChild(h(`<div class="crumb"><a data-projects>Projects</a> / <a data-back>${esc(p.name)}</a> / ${esc(a.name)}</div>`));
@@ -516,12 +542,28 @@ routes.app = async (p, a) => {
 
   // summary
   const dbrow = a.database ? `<div class="kv"><span class="k">Database</span><span class="v">${esc(a.database)}</span></div>` : '';
+  const latest = appEvents[0];
+  const statusRow = `<div class="kv"><span class="k">Deploy status</span><span class="v">${statusPill(deployStatus(latest))}${latest ? ` &nbsp;<span style="color:var(--muted)">${esc(latest.result)} · ${esc(latest.at)}</span>` : ''}</span></div>`;
   view.appendChild(h(`<div class="panel"><div class="panel-b" style="gap:10px">
+    ${statusRow}
     <div class="kv"><span class="k">Classes</span><span class="v">${a.classes.map(esc).join(', ') || '—'}</span></div>
     <div class="kv"><span class="k">Domains</span><span class="v">${a.domains.map(esc).join(', ') || '—'}</span></div>
     <div class="kv"><span class="k">Image</span><span class="v">${esc(short(a.image))}</span></div>
     ${dbrow}
   </div></div>`));
+
+  // recent deploy activity for this app
+  if (appEvents.length) {
+    const rowsHtml = appEvents.slice(0, 8).map((e) => {
+      const bad = String(e.result).startsWith('FAILED');
+      return `<tr><td>${esc(e.at)}</td><td>${esc(e.node)}</td><td>${esc(e.action)}</td>
+        <td style="color:${bad ? 'var(--bad)' : 'inherit'}">${esc(e.result)}</td><td>${esc(String(e.commit).slice(0, 12))}</td></tr>`;
+    }).join('');
+    view.appendChild(h(`<div class="panel"><div class="panel-h"><h2>Recent deploys</h2></div>
+      <div class="panel-b" style="padding:6px 18px 14px">
+      <table class="ev"><thead><tr><th>time</th><th>node</th><th>action</th><th>result</th><th>commit</th></tr></thead>
+      <tbody>${rowsHtml}</tbody></table></div></div>`));
+  }
 
   // manifest editor — file tabs + Form (default) / YAML mode
   let curFile = 'base.yaml', curMode = 'form';
