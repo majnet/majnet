@@ -1,0 +1,8 @@
+/target
+/.direnv
+/.git
+**/node_modules
+dashboard/web/dist
+*.age
+*.key
+*.pem
