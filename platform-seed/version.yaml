@@ -1,6 +1,13 @@
-# Control-plane version pin (ADR 0005) — converged hourly by `majnet-update`
-# on the main node. Branch, tag, or full commit SHA of the majnet source repo;
-# tags or SHAs recommended (a branch pin means auto-deploy-on-push).
-# The setup wizard seeds this with the exact commit the installer built.
+# Control-plane version pin (ADR 0005 + 0008) — converged hourly by
+# `majnet-update` on the main node.
+#
+# - ref:  branch/tag/SHA of the majnet source repo. Drives the `setup` binary +
+#         the bootstrap/compose payload the node checks out (setup is not
+#         containerized — it drives systemctl/wireguard on the host).
+# - image / dashboard:  CI-built GHCR images (ADR 0008). The node pulls these
+#         instead of compiling. Pin to an `@sha256:…` digest for production
+#         stability; the `:latest` defaults below auto-deploy on every push.
 control_plane:
   ref: main
+  image: ghcr.io/maxa-ondrej/majnet/control-plane:latest
+  dashboard: ghcr.io/maxa-ondrej/majnet/dashboard:latest

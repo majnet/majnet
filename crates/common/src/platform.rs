@@ -42,9 +42,17 @@ pub struct VersionFile {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ControlPlanePin {
-    /// Branch, tag, or full commit SHA of the majnet source repo.
+    /// Branch, tag, or full commit SHA of the majnet source repo. Drives the
+    /// `setup` binary + the bootstrap/compose payload the node checks out.
     #[serde(rename = "ref")]
     pub git_ref: String,
+    /// GHCR control-plane image (bot + reconciler), digest-pinned (ADR 0008).
+    /// `None` on the legacy ref-only schema (build-on-box).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    /// GHCR dashboard image, digest-pinned (ADR 0008).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dashboard: Option<String>,
 }
 
 impl VersionFile {

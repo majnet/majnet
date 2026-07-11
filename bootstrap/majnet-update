@@ -1,49 +1,80 @@
 #!/usr/bin/env bash
-# majnet-update — converge the control-plane binaries to the version pinned
-# in the platform repo's version.yaml (ADR 0005). Runs hourly from
-# majnet-update.timer; `majnet-update <ref>` is the break-glass path when the
-# bot is down. Main node only.
+# majnet-update (v2, ADR 0008) — converge the control plane to the pin in the
+# platform repo's version.yaml. Runs hourly from majnet-update.timer;
+# `majnet-update <ref>` is the break-glass path when the bot is down. Main only.
 #
-# Failure is safe by ordering: a failed fetch or build aborts before any
-# `install`, so the running binaries are untouched and the timer retries.
+# The bot + reconciler + dashboard now run as CI-built GHCR images (pulled, not
+# compiled). `setup` stays a native host binary (it drives systemctl/wireguard)
+# and is the only thing still built on-box — small, and only when the pinned
+# ref changes.
+#
+# Failure is safe by ordering: images are pulled BEFORE the running services are
+# touched, so a bad pin or an unreachable registry aborts with the old control
+# plane still up.
 set -euo pipefail
 
 DIR=${MAJNET_REPO_DIR:-/opt/majnet}
 BOT_URL=${MAJNET_BOT_INTERNAL_URL:-http://10.88.0.1:8081}
+COMPOSE="$DIR/deploy/compose.yaml"
+LEGACY_DASHBOARD="$DIR/dashboard/compose.yaml"
 
 log() { printf '[majnet-update] %s\n' "$*"; }
 
-# The whole body lives in main() so replacing this script mid-run (it
-# installs itself) can never confuse bash's incremental file reads.
+# The whole body lives in main() so replacing this script mid-run (it installs
+# itself) can never confuse bash's incremental file reads.
 main() {
-  local ref=${1:-}
-  if [[ -z $ref ]]; then
-    if ! ref=$(curl -fsS --max-time 10 "$BOT_URL/api/platform/version"); then
-      log "bot unreachable — skipping (break-glass: majnet-update <ref>)"
-      return 0
-    fi
-  fi
-  [[ -n $ref ]] || { log "empty version pin — skipping"; return 0; }
+  local ref_override=${1:-}
 
-  git -C "$DIR" fetch --depth 1 -q origin "$ref"
-  local current target
-  current=$(git -C "$DIR" rev-parse HEAD)
-  target=$(git -C "$DIR" rev-parse FETCH_HEAD)
-  if [[ $current == "$target" ]]; then
-    log "already at $ref ($current)"
+  # 1. Pin: the raw version.yaml from the bot (ref + image digests).
+  local pin ref image dashboard
+  if ! pin=$(curl -fsS --max-time 10 "$BOT_URL/api/platform/version"); then
+    log "bot unreachable — skipping (break-glass: majnet-update <ref>)"
+    return 0
+  fi
+  extract() { printf '%s\n' "$pin" | sed -n "s/^[[:space:]]*$1:[[:space:]]*//p" | head -n1; }
+  ref=${ref_override:-$(extract ref)}
+  image=$(extract image)
+  dashboard=$(extract dashboard)
+  [[ -n $ref ]] || { log "empty ref in version.yaml — skipping"; return 0; }
+  if [[ -z $image || -z $dashboard ]]; then
+    log "version.yaml has no image/dashboard pin — not on the ADR 0008 schema yet; skipping"
     return 0
   fi
 
-  log "updating $current → $target ($ref)"
-  git -C "$DIR" checkout -q "$target"
-  export PATH="$HOME/.cargo/bin:$PATH"
-  (cd "$DIR" && cargo build --release -p majnet-bot -p majnet-reconciler -p majnet-setup)
-  install -m 0755 "$DIR/target/release/majnet-bot"        /usr/local/bin/
-  install -m 0755 "$DIR/target/release/majnet-reconciler" /usr/local/bin/
-  install -m 0755 "$DIR/target/release/majnet-setup"      /usr/local/bin/
-  install -m 0755 "$DIR/bootstrap/majnet-update"          /usr/local/bin/
-  systemctl restart majnet-bot majnet-reconciler majnet-setup
-  log "control plane updated to $target"
+  # 2. Source checkout (compose file + bootstrap + setup source) → ref.
+  git -C "$DIR" fetch --depth 1 -q origin "$ref"
+  local current target changed=0
+  current=$(git -C "$DIR" rev-parse HEAD)
+  target=$(git -C "$DIR" rev-parse FETCH_HEAD)
+  if [[ $current != "$target" ]]; then
+    log "source $current → $target ($ref)"
+    git -C "$DIR" checkout -q "$target"
+    changed=1
+  fi
+
+  # 3. Pull the pinned images FIRST — fails safe (nothing swapped yet).
+  export MAJNET_CONTROL_PLANE_IMAGE="$image" MAJNET_DASHBOARD_IMAGE="$dashboard"
+  log "pulling $image"
+  docker compose -f "$COMPOSE" pull -q
+
+  # 4. Retire any pre-cutover runtimes (idempotent): the native bot/reconciler
+  #    systemd services and the standalone dashboard container.
+  systemctl disable --now majnet-bot majnet-reconciler 2>/dev/null || true
+  [[ -f $LEGACY_DASHBOARD ]] && docker compose -f "$LEGACY_DASHBOARD" down 2>/dev/null || true
+
+  # 5. Converge the control-plane compose (recreates only what changed).
+  docker compose -f "$COMPOSE" up -d --remove-orphans
+
+  # 6. setup: native host binary, rebuilt only when the source moved.
+  if [[ $changed == 1 ]]; then
+    export PATH="$HOME/.cargo/bin:$PATH"
+    (cd "$DIR" && cargo build --release -p majnet-setup)
+    install -m 0755 "$DIR/target/release/majnet-setup" /usr/local/bin/
+    install -m 0755 "$DIR/bootstrap/majnet-update"     /usr/local/bin/
+    systemctl restart majnet-setup
+  fi
+
+  log "converged: control plane on ${image##*@}, setup @ $target"
 }
 
 main "$@"

@@ -135,9 +135,9 @@ async fn file_on_main(client: &octocrab::Octocrab, org: &str, path: &str) -> Res
     }
 }
 
-/// `GET /api/platform/version` — the control-plane version pin from
-/// `version.yaml` on platform `main` (ADR 0005). Plain text: the consumer
-/// is `majnet-update`, a shell script.
+/// `GET /api/platform/version` — the control-plane pin: the raw `version.yaml`
+/// from platform `main` (ADR 0005/0008). Plain text; the consumer is
+/// `majnet-update`, which parses `ref` + the image digests from it.
 pub async fn version(State(state): State<Arc<AppState>>) -> Result<String, (StatusCode, String)> {
     do_version(&state)
         .await
@@ -148,8 +148,9 @@ async fn do_version(state: &AppState) -> Result<String> {
     let org = &state.config.root_org;
     let client = state.github.org_client(org).await?;
     let yaml = read_platform_file(&client, org, "version.yaml").await?;
-    let pin = VersionFile::parse(yaml.as_bytes()).context("parsing version.yaml")?;
-    Ok(pin.control_plane.git_ref)
+    // Validate it parses, but return the raw YAML for the shell consumer.
+    VersionFile::parse(yaml.as_bytes()).context("parsing version.yaml")?;
+    Ok(yaml)
 }
 
 pub(crate) async fn read_platform_file(
