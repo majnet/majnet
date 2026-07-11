@@ -74,7 +74,8 @@ fn is_valid_hostname(h: &str) -> bool {
     // production domains are checked for a real zone by the bot (ADR 0007).
     !h.is_empty()
         && h.len() <= 253
-        && h.chars().all(|c| c.is_ascii_alphanumeric() || ".-".contains(c))
+        && h.chars()
+            .all(|c| c.is_ascii_alphanumeric() || ".-".contains(c))
         && !h.starts_with(['.', '-'])
         && !h.ends_with(['.', '-'])
         && !h.contains("..")

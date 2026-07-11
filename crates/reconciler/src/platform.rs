@@ -42,7 +42,10 @@ pub async fn converge_platform(state: &AppState, nodes: &NodesFile, platform: &S
     let docker = match state.nodes(nodes).client_for(prod).await {
         Ok(d) => d,
         Err(e) => {
-            tracing::error!(error = format!("{e:#}"), "prod Docker unavailable for edge-main");
+            tracing::error!(
+                error = format!("{e:#}"),
+                "prod Docker unavailable for edge-main"
+            );
             return;
         }
     };
@@ -58,13 +61,20 @@ pub async fn converge_platform(state: &AppState, nodes: &NodesFile, platform: &S
     }
 }
 
-async fn converge_edge_main(docker: &Docker, platform: &Snapshot, age_key_dir: &Path) -> Result<()> {
+async fn converge_edge_main(
+    docker: &Docker,
+    platform: &Snapshot,
+    age_key_dir: &Path,
+) -> Result<()> {
     // Traefik's config from the platform repo (platform/edge-main/traefik/*).
     let prefix = "platform/edge-main/traefik/";
     let mut config: BTreeMap<String, Vec<u8>> = platform
         .files
         .iter()
-        .filter_map(|(p, c)| p.strip_prefix(prefix).map(|rel| (rel.to_string(), c.clone())))
+        .filter_map(|(p, c)| {
+            p.strip_prefix(prefix)
+                .map(|rel| (rel.to_string(), c.clone()))
+        })
         .collect();
     ensure!(
         config.contains_key("traefik.yaml"),
@@ -405,11 +415,7 @@ async fn age_decrypt(age_key_dir: &Path, ciphertext: &[u8]) -> Result<String> {
     use tokio::io::AsyncWriteExt;
     let key = age_key_dir.join("age-production.key");
     let mut child = tokio::process::Command::new("age")
-        .args([
-            "-d",
-            "-i",
-            key.to_str().context("non-utf8 age key path")?,
-        ])
+        .args(["-d", "-i", key.to_str().context("non-utf8 age key path")?])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -492,7 +498,11 @@ async fn ensure_image(docker: &Docker, image: &str) -> Result<()> {
 
 /// Deliver `files` (relative paths, may include subdirs) into host `dir` on the
 /// node via a short-lived helper container (same mechanism as secrets).
-async fn deliver_files(docker: &Docker, dir: &str, files: &BTreeMap<String, Vec<u8>>) -> Result<()> {
+async fn deliver_files(
+    docker: &Docker,
+    dir: &str,
+    files: &BTreeMap<String, Vec<u8>>,
+) -> Result<()> {
     let helper = docker
         .create_container(
             None::<qp::CreateContainerOptions>,

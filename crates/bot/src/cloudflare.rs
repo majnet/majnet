@@ -35,12 +35,24 @@ pub async fn ensure_domains(state: &AppState, rendered: &BTreeMap<String, String
     let mut zones: std::collections::BTreeMap<String, Zone> = Default::default();
     for host in hosts {
         match cf.zone_for(&host).await {
-            Err(e) => tracing::warn!(host, error = format!("{e:#}"), "skipping (no Cloudflare zone)"),
+            Err(e) => tracing::warn!(
+                host,
+                error = format!("{e:#}"),
+                "skipping (no Cloudflare zone)"
+            ),
             Ok(zone) => {
                 if let Err(e) = cf.ensure_dns_a(&zone, &host, &prod_ip).await {
-                    tracing::error!(host, error = format!("{e:#}"), "Cloudflare DNS ensure failed");
+                    tracing::error!(
+                        host,
+                        error = format!("{e:#}"),
+                        "Cloudflare DNS ensure failed"
+                    );
                 } else if let Err(e) = cf.ensure_ssl_strict(&zone).await {
-                    tracing::error!(zone = zone.name, error = format!("{e:#}"), "Cloudflare SSL mode failed");
+                    tracing::error!(
+                        zone = zone.name,
+                        error = format!("{e:#}"),
+                        "Cloudflare SSL mode failed"
+                    );
                 } else {
                     tracing::info!(host, ip = prod_ip, "Cloudflare edge ensured");
                     zones.entry(zone.name.clone()).or_insert(zone);
@@ -54,7 +66,11 @@ pub async fn ensure_domains(state: &AppState, rendered: &BTreeMap<String, String
     if let Some(recipient) = state.config.age_production_recipient.clone() {
         for zone in zones.into_values() {
             if let Err(e) = ensure_origin_cert(state, &cf, &zone, &recipient).await {
-                tracing::error!(zone = zone.name, error = format!("{e:#}"), "origin cert ensure failed");
+                tracing::error!(
+                    zone = zone.name,
+                    error = format!("{e:#}"),
+                    "origin cert ensure failed"
+                );
             }
         }
     } else {
@@ -95,8 +111,22 @@ async fn ensure_origin_cert(
     // repo), while the Contents API works — it's the same path node enrollment
     // uses for nodes.yaml. Key first, then cert, so the reconciler (which keys
     // on the .crt) only acts once both files exist.
-    put_platform_file(&client, org, &key_path, &key_enc, &format!("edge: origin key for {}", zone.name)).await?;
-    put_platform_file(&client, org, &crt_path, &cert.cert_pem, &format!("edge: origin cert for {}", zone.name)).await?;
+    put_platform_file(
+        &client,
+        org,
+        &key_path,
+        &key_enc,
+        &format!("edge: origin key for {}", zone.name),
+    )
+    .await?;
+    put_platform_file(
+        &client,
+        org,
+        &crt_path,
+        &cert.cert_pem,
+        &format!("edge: origin cert for {}", zone.name),
+    )
+    .await?;
     state
         .store
         .log_event("origin-cert", Some(org), &zone.name)?;
@@ -174,7 +204,12 @@ fn production_hosts(rendered: &BTreeMap<String, String>) -> Vec<String> {
         .filter(|(path, _)| !path.contains('/') && path.ends_with(".yaml"))
         .filter_map(|(_, yaml)| AppManifest::parse(yaml).ok())
         .filter_map(|m| m.ingress)
-        .flat_map(|ing| ing.hosts().into_iter().map(String::from).collect::<Vec<_>>())
+        .flat_map(|ing| {
+            ing.hosts()
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        })
         .collect();
     hosts.sort();
     hosts.dedup();
@@ -188,7 +223,9 @@ async fn prod_public_ip(state: &AppState) -> Result<String> {
         crate::platform_api::read_platform_file(&client, &state.config.root_org, "nodes.yaml")
             .await?;
     let nodes = NodesFile::parse(yaml.as_bytes())?;
-    let prod = nodes.by_role("prod").context("no prod node in nodes.yaml")?;
+    let prod = nodes
+        .by_role("prod")
+        .context("no prod node in nodes.yaml")?;
     let ip = prod
         .public_endpoint
         .rsplit_once(':')

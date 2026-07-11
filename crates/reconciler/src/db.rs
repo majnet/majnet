@@ -254,7 +254,10 @@ mod tests {
         let root_pg = hmac16_with(master, "root:Postgres");
         assert_ne!(root_pg, hmac16_with(master, "Postgres:proj:app:production"));
         assert_ne!(root_pg, hmac16_with(master, "root:Mariadb"));
-        assert_ne!(root_pg, hmac16_with(b"a-different-master-key-32-bytes!", "root:Postgres"));
+        assert_ne!(
+            root_pg,
+            hmac16_with(b"a-different-master-key-32-bytes!", "root:Postgres")
+        );
         assert_eq!(root_pg.len(), 32); // 16 bytes hex
     }
 

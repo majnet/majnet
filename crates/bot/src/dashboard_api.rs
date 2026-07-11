@@ -330,8 +330,15 @@ pub async fn whoami(State(state): State<Arc<AppState>>, headers: HeaderMap) -> J
                 .get("tailscale-user-login")
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_string);
-            tracing::warn!(error = format!("{e:#}"), ?login, "whoami: unresolved identity");
-            Json(WhoAmI { login, admin: false })
+            tracing::warn!(
+                error = format!("{e:#}"),
+                ?login,
+                "whoami: unresolved identity"
+            );
+            Json(WhoAmI {
+                login,
+                admin: false,
+            })
         }
     }
 }
@@ -413,7 +420,10 @@ pub async fn projects_post(
         "# Managed by the platform — project registry (§2).\n{}",
         serde_yaml::to_string(&registry).map_err(|e| bad_gateway(e.into()))?
     );
-    let message = format!("projects: register {} ({}) via dashboard by {actor}", req.name, req.org);
+    let message = format!(
+        "projects: register {} ({}) via dashboard by {actor}",
+        req.name, req.org
+    );
     commit_platform_file(&state, "projects.yaml", &yaml, &message)
         .await
         .map_err(bad_gateway)?;
@@ -473,7 +483,12 @@ pub async fn apps_get(
     for name in names {
         match summarize_app(&name, &text) {
             Ok(summary) => out.push(summary),
-            Err(e) => tracing::warn!(org, name, error = format!("{e:#}"), "skipping unparsable app"),
+            Err(e) => tracing::warn!(
+                org,
+                name,
+                error = format!("{e:#}"),
+                "skipping unparsable app"
+            ),
         }
     }
     Ok(Json(out))
@@ -506,7 +521,12 @@ pub async fn apps_post(
 ) -> Result<String, ApiError> {
     check_name(&req.name)?;
     let valid_classes = ["stable", "production", "ephemeral"];
-    if req.classes.is_empty() || !req.classes.iter().all(|c| valid_classes.contains(&c.as_str())) {
+    if req.classes.is_empty()
+        || !req
+            .classes
+            .iter()
+            .all(|c| valid_classes.contains(&c.as_str()))
+    {
         return Err(bad_request(
             "classes must be a non-empty subset of stable|production|ephemeral",
         ));
@@ -522,7 +542,9 @@ pub async fn apps_post(
         .map_err(|e| (StatusCode::FORBIDDEN, format!("{e:#}")))?;
 
     // Refuse to clobber an existing app.
-    let mut files = app_files(&state, &org, &req.name).await.map_err(bad_gateway)?;
+    let mut files = app_files(&state, &org, &req.name)
+        .await
+        .map_err(bad_gateway)?;
     if !files.is_empty() {
         return Err(bad_request(format!("app {} already exists", req.name)));
     }
@@ -550,7 +572,10 @@ pub async fn apps_post(
             &org,
             &format!("apps/{}/{class}.yaml", req.name),
             "{}\n",
-            &format!("manifest({}): add {class} overlay via dashboard by {actor}", req.name),
+            &format!(
+                "manifest({}): add {class} overlay via dashboard by {actor}",
+                req.name
+            ),
         )
         .await
         .map_err(bad_gateway)?;
@@ -573,9 +598,7 @@ pub async fn apps_post(
 // ── nodes ────────────────────────────────────────────────────────────────────
 
 /// `GET /api/nodes` — the platform's node registry (`nodes.yaml`).
-pub async fn nodes_get(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<Node>>, ApiError> {
+pub async fn nodes_get(State(state): State<Arc<AppState>>) -> Result<Json<Vec<Node>>, ApiError> {
     let files = read_platform(&state).await.map_err(bad_gateway)?;
     let yaml = files
         .get("nodes.yaml")
@@ -666,9 +689,9 @@ fn summarize_app(name: &str, text: &BTreeMap<String, String>) -> Result<AppSumma
     classes.sort();
 
     let overlay: serde_yaml::Value = match classes.first() {
-        Some(c) => serde_yaml::from_str(
-            text.get(&format!("{prefix}{c}.yaml")).context("overlay")?,
-        )?,
+        Some(c) => {
+            serde_yaml::from_str(text.get(&format!("{prefix}{c}.yaml")).context("overlay")?)?
+        }
         None => serde_yaml::Value::Mapping(Default::default()),
     };
     let mut merged = merge(base, overlay);
@@ -703,7 +726,10 @@ fn scaffold_base(req: &NewApp) -> Result<String> {
     let mut yaml = format!("name: {}\nimage: {}\n", req.name, req.image);
     if !req.host.is_empty() {
         anyhow::ensure!(req.port != 0, "a container port is required with a domain");
-        yaml.push_str(&format!("ingress:\n  host: {}\n  port: {}\n", req.host, req.port));
+        yaml.push_str(&format!(
+            "ingress:\n  host: {}\n  port: {}\n",
+            req.host, req.port
+        ));
         let extra: Vec<&String> = req.domains.iter().filter(|d| !d.is_empty()).collect();
         if !extra.is_empty() {
             yaml.push_str("  domains:\n");
@@ -713,7 +739,11 @@ fn scaffold_base(req: &NewApp) -> Result<String> {
         }
         yaml.push_str(&format!("health:\n  path: /\n  port: {}\n", req.port));
     }
-    if let Some(engine) = req.database.as_deref().filter(|e| !e.is_empty() && *e != "none") {
+    if let Some(engine) = req
+        .database
+        .as_deref()
+        .filter(|e| !e.is_empty() && *e != "none")
+    {
         yaml.push_str(&format!("database:\n  engine: {engine}\n"));
     }
     // Validate the base in isolation the way an overlay-merged manifest would be.
