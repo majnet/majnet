@@ -43,7 +43,7 @@ export function NewProject() {
           <Field label="GitHub org" hint="The org this project's repos live in."><Input value={org} onChange={(e) => setOrg(e.target.value)} placeholder="majksa-projects" /></Field>
         </div>
         <Field label="1 · Install the App on the org">
-          <pre className="overflow-x-auto rounded-md bg-foreground/90 p-3 font-mono text-xs text-background">https://github.com/apps/majnet-platform/installations/new</pre>
+          <pre className="overflow-x-auto rounded-md border bg-muted p-3 font-mono text-xs">https://github.com/apps/majnet-platform/installations/new</pre>
         </Field>
         <div className="flex items-center gap-3">
           <Button disabled={m.isPending} onClick={() => {

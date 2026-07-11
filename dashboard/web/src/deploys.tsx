@@ -8,10 +8,10 @@ import { Card } from '@/components/ui/card'
 
 function DiffBlock({ patch }: { patch: string }) {
   return (
-    <pre className="mt-2 overflow-x-auto rounded-md bg-foreground/90 p-3 font-mono text-[11px] leading-relaxed">
+    <pre className="mt-2 overflow-x-auto rounded-md border bg-muted p-3 font-mono text-[11px] leading-relaxed">
       {patch.split('\n').map((line, i) => {
-        const c = line[0] === '+' ? 'text-emerald-400' : line[0] === '-' ? 'text-red-400'
-          : line.startsWith('@@') ? 'text-sky-400' : 'text-background/80'
+        const c = line[0] === '+' ? 'text-success' : line[0] === '-' ? 'text-destructive'
+          : line.startsWith('@@') ? 'text-primary' : 'text-muted-foreground'
         return <div key={i} className={c}>{line || ' '}</div>
       })}
     </pre>

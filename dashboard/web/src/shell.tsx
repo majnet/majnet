@@ -1,6 +1,7 @@
 import { Link, Outlet } from '@tanstack/react-router'
 import { Activity, Boxes, Server, Settings } from 'lucide-react'
 import { useWhoami } from './api'
+import { TopBar } from './topbar'
 
 const NAV = [
   { to: '/', label: 'Projects', icon: Boxes, exact: true },
@@ -42,9 +43,12 @@ export function Shell() {
           </div>
         </div>
       </aside>
-      <main className="w-full max-w-5xl p-6 md:p-8">
-        <Outlet />
-      </main>
+      <div className="flex min-w-0 flex-col">
+        <TopBar />
+        <main className="w-full max-w-5xl p-6 md:p-8">
+          <Outlet />
+        </main>
+      </div>
     </div>
   )
 }

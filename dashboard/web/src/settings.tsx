@@ -111,7 +111,7 @@ function Onboard({ role }: { role: string }) {
       <Dialog open={!!result} onOpenChange={(o) => !o && setResult(null)}>
         <DialogContent className="max-w-2xl">
           <DialogHeader><DialogTitle>{result?.ok ? `${role} node enrolled` : `${role} enrollment failed`}</DialogTitle></DialogHeader>
-          <pre className="max-h-[28rem] overflow-auto whitespace-pre-wrap rounded-md bg-foreground/90 p-3 font-mono text-xs text-background">{result?.log}</pre>
+          <pre className="max-h-[28rem] overflow-auto whitespace-pre-wrap rounded-md border bg-muted p-3 font-mono text-xs">{result?.log}</pre>
         </DialogContent>
       </Dialog>
     </div>

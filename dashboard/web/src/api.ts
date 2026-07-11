@@ -28,8 +28,11 @@ export interface DeployPr {
 export interface ManifestFile { yaml: string; data: unknown }
 export interface Member { user: string; role: string }
 
+/** Parse a reconciler event timestamp (SQLite `datetime('now')`, UTC). */
+export const parseAt = (at: string): number => Date.parse(at.replace(' ', 'T') + 'Z')
+
 // ── fetch helpers ────────────────────────────────────────────────────────────
-async function getJSON<T>(url: string): Promise<T> {
+export async function getJSON<T>(url: string): Promise<T> {
   const r = await fetch(url)
   const text = await r.text()
   if (!r.ok) throw new Error(text || `${r.status} ${r.statusText}`)
