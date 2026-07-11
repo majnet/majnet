@@ -61,16 +61,19 @@ async function getText(url: string): Promise<string> {
   return text.trim()
 }
 
-/** Form-encoded POST (the setup service's enroll handler expects a form). */
-export async function sendForm(url: string, fields: Record<string, string>): Promise<string> {
-  const r = await fetch(url, {
+export interface EnrollResult { ok: boolean; log: string }
+
+/** Enroll a worker node via the setup service (JSON). Returns the log either
+ *  way — the request only throws on transport/proxy errors, not enroll failure. */
+export async function enrollNode(role: string, ssh_host: string): Promise<EnrollResult> {
+  const r = await fetch(urls.setupEnroll, {
     method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams(fields).toString(),
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ role, ssh_host }),
   })
   const text = await r.text()
   if (!r.ok) throw new Error(text || `${r.status} ${r.statusText}`)
-  return text
+  return JSON.parse(text) as EnrollResult
 }
 
 // ── query keys + endpoint URLs ───────────────────────────────────────────────
@@ -88,7 +91,7 @@ export const urls = {
     `${BOT}/manifest/${encodeURIComponent(org)}/${encodeURIComponent(app)}/${file}`,
   members: (org: string) => `${BOT}/members/${encodeURIComponent(org)}`,
   version: `${BOT}/platform/version`,
-  setupEnroll: '/api/setup/enroll',
+  setupEnroll: '/api/setup/enroll.json',
   promote: (org: string, app: string) => `${BOT}/promote/${encodeURIComponent(org)}/${encodeURIComponent(app)}`,
   rollback: (org: string) => `${BOT}/rollback/${encodeURIComponent(org)}`,
   restart: (org: string, cls: string, app: string) =>

@@ -15,9 +15,9 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates crates
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release -p majnet-bot -p majnet-reconciler \
+    cargo build --release -p majnet-bot -p majnet-reconciler -p majnet-setup \
     && mkdir -p /out \
-    && cp target/release/majnet-bot target/release/majnet-reconciler /out/
+    && cp target/release/majnet-bot target/release/majnet-reconciler target/release/majnet-setup /out/
 
 FROM debian:bookworm-slim
 ARG SOPS_VERSION=3.11.0
@@ -28,6 +28,8 @@ RUN apt-get update \
     && chmod +x /usr/local/bin/sops \
     && apt-get purge -y curl && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /out/majnet-bot /out/majnet-reconciler /usr/local/bin/
+# bot + reconciler run as containers; setup rides along so majnet-update can
+# extract it to the host (it drives systemctl/wireguard, so it stays native).
+COPY --from=builder /out/majnet-bot /out/majnet-reconciler /out/majnet-setup /usr/local/bin/
 # Overridden per service in compose; harmless default.
 CMD ["majnet-bot"]

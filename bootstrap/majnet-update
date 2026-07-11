@@ -3,10 +3,9 @@
 # platform repo's version.yaml. Runs hourly from majnet-update.timer;
 # `majnet-update <ref>` is the break-glass path when the bot is down. Main only.
 #
-# The bot + reconciler + dashboard now run as CI-built GHCR images (pulled, not
+# The bot + reconciler + dashboard run as CI-built GHCR images (pulled, not
 # compiled). `setup` stays a native host binary (it drives systemctl/wireguard)
-# and is the only thing still built on-box — small, and only when the pinned
-# ref changes.
+# but is *extracted from* the same image — so nothing compiles on the node.
 #
 # Failure is safe by ordering: images are pulled BEFORE the running services are
 # touched, so a bad pin or an unreachable registry aborts with the old control
@@ -71,12 +70,16 @@ main() {
   # 5. Converge the control-plane compose (recreates only what changed).
   docker compose -f "$COMPOSE" up -d --remove-orphans
 
-  # 6. setup: native host binary, rebuilt only when the source moved.
+  # 6. setup: host-native binary (it drives systemctl/wireguard, so it can't be
+  #    a container) — extracted from the pulled image, never compiled on-box.
+  #    Refresh only when the pinned source/image moved.
   if [[ $changed == 1 ]]; then
-    export PATH="$HOME/.cargo/bin:$PATH"
-    (cd "$DIR" && cargo build --release -p majnet-setup)
-    install -m 0755 "$DIR/target/release/majnet-setup" /usr/local/bin/
-    install -m 0755 "$DIR/bootstrap/majnet-update"     /usr/local/bin/
+    local cid
+    cid=$(docker create "$image")
+    docker cp "$cid:/usr/local/bin/majnet-setup" /usr/local/bin/majnet-setup
+    docker rm -f "$cid" >/dev/null
+    chmod 0755 /usr/local/bin/majnet-setup
+    install -m 0755 "$DIR/bootstrap/majnet-update" /usr/local/bin/
     systemctl restart majnet-setup
   fi
 

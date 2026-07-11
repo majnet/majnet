@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# majnet-cleanup — post-ADR-0008 housekeeping for a node installed the old way.
+#
+# Once the control plane moved to CI-built images (pulled, never compiled), the
+# things the *old* install.sh put on the box are dead weight: the Rust toolchain,
+# the C build dependencies, the multi-GB cargo target cache, and the legacy
+# native bot/reconciler systemd services + binaries (they run as compose now).
+#
+# One-shot and idempotent; main node only. Safe to run after the cutover is
+# confirmed healthy — it touches nothing the running control plane needs.
+set -euo pipefail
+
+[[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
+log() { printf '\033[1;34m[majnet-cleanup]\033[0m %s\n' "$*"; }
+
+# 1. Legacy native services — bot + reconciler run as compose now.
+log "removing legacy native bot/reconciler services"
+for svc in majnet-bot majnet-reconciler; do
+  systemctl disable --now "$svc" 2>/dev/null || true
+  rm -f "/etc/systemd/system/$svc.service"
+done
+systemctl daemon-reload
+rm -f /usr/local/bin/majnet-bot /usr/local/bin/majnet-reconciler
+
+# 2. The old standalone dashboard compose project (dashboard now lives in
+#    deploy/compose.yaml). Bring the legacy project down if it lingers.
+[[ -f /opt/majnet/dashboard/compose.yaml ]] &&
+  docker compose -f /opt/majnet/dashboard/compose.yaml down 2>/dev/null || true
+
+# 3. Rust toolchain — nothing compiles on the node anymore.
+if command -v rustup &>/dev/null || [[ -d /root/.rustup ]]; then
+  log "removing the Rust toolchain"
+  rustup self uninstall -y 2>/dev/null || true
+fi
+rm -rf /root/.cargo /root/.rustup "${HOME:-/root}/.cargo" "${HOME:-/root}/.rustup"
+
+# 4. C build dependencies from the old installer.
+log "purging build dependencies"
+DEBIAN_FRONTEND=noninteractive apt-get purge -y build-essential pkg-config libssl-dev 2>/dev/null || true
+DEBIAN_FRONTEND=noninteractive apt-get autoremove --purge -y 2>/dev/null || true
+
+# 5. The cargo build cache (frequently several GB).
+if [[ -d /opt/majnet/target ]]; then
+  log "removing /opt/majnet/target ($(du -sh /opt/majnet/target 2>/dev/null | cut -f1 || echo '?'))"
+  rm -rf /opt/majnet/target
+fi
+
+log "done — this node pulls images and compiles nothing"

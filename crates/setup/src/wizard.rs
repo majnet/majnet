@@ -9,8 +9,8 @@
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{Html, Redirect};
-use axum::Form;
-use serde::Deserialize;
+use axum::{Form, Json};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::enroll::{self, EnrollRequest};
@@ -224,6 +224,34 @@ pub async fn seed(
     state.seeded = true;
     state.save(&app.config.state_path()).map_err(fail)?;
     Ok(Redirect::to("/?step=4"))
+}
+
+#[derive(Serialize)]
+pub struct EnrollResult {
+    pub ok: bool,
+    /// Step-by-step enrollment log (shown to the operator either way).
+    pub log: String,
+}
+
+/// `POST /enroll.json` — JSON node enrollment for the dashboard's Settings UI.
+/// Always 200 with `{ ok, log }`: the log is the point even when it fails, so
+/// the operator can see exactly which step broke. State is persisted only on a
+/// clean run (matching the HTML handler).
+pub async fn enroll_json(
+    State(app): State<Arc<AppState>>,
+    Json(req): Json<EnrollRequest>,
+) -> Json<EnrollResult> {
+    let mut state = app.state.lock().await;
+    match enroll::run(&app.config, &mut state, &app.http, &req).await {
+        Ok(log) => {
+            let _ = state.save(&app.config.state_path());
+            Json(EnrollResult { ok: true, log })
+        }
+        Err(e) => Json(EnrollResult {
+            ok: false,
+            log: format!("{e:#}"),
+        }),
+    }
 }
 
 pub async fn enroll_handler(

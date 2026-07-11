@@ -1,11 +1,13 @@
 import { useState } from 'react'
 import { ServerCog } from 'lucide-react'
-import { sendForm, urls, useNodes, useVersion, useWhoami, type PlatformNode } from './api'
-import { useApiMutation } from './mutations'
+import { useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
+import { enrollNode, useNodes, useVersion, useWhoami, type EnrollResult, type PlatformNode } from './api'
 import { PageHead } from './views'
 import { QueryState, StatusBadge } from './ui'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Separator } from '@/components/ui/separator'
@@ -70,7 +72,30 @@ function NodeRow({ n }: { n: PlatformNode }) {
 
 function Onboard({ role }: { role: string }) {
   const [host, setHost] = useState('')
-  const m = useApiMutation({ invalidate: [['nodes']], onDone: () => setHost('') })
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<EnrollResult | null>(null)
+  const qc = useQueryClient()
+
+  const run = async () => {
+    setBusy(true)
+    try {
+      const res = await enrollNode(role, host.trim())
+      setResult(res)
+      if (res.ok) {
+        toast.success(`${role} node enrolled`)
+        setHost('')
+        qc.invalidateQueries({ queryKey: ['nodes'] })
+      } else {
+        toast.error(`${role} enrollment failed`)
+      }
+    } catch (e) {
+      setResult({ ok: false, log: (e as Error).message })
+      toast.error((e as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <div className="rounded-lg border border-dashed p-3.5">
       <div className="mb-2 flex items-center gap-2 text-sm font-medium"><ServerCog className="size-4" /> Onboard the <code className="font-mono">{role}</code> node</div>
@@ -81,10 +106,14 @@ function Onboard({ role }: { role: string }) {
       <div className="flex flex-wrap items-end gap-2">
         <div className="flex flex-1 flex-col gap-1.5"><Label className="text-xs">SSH host</Label>
           <Input value={host} onChange={(e) => setHost(e.target.value)} placeholder="203.0.113.9 or node.example.com" /></div>
-        <Button disabled={m.isPending || !host.trim()} onClick={() => m.mutate(() => sendForm(urls.setupEnroll, { role, ssh_host: host.trim() }))}>
-          {m.isPending ? 'Enrolling…' : 'Enroll'}
-        </Button>
+        <Button disabled={busy || !host.trim()} onClick={run}>{busy ? 'Enrolling…' : 'Enroll'}</Button>
       </div>
+      <Dialog open={!!result} onOpenChange={(o) => !o && setResult(null)}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader><DialogTitle>{result?.ok ? `${role} node enrolled` : `${role} enrollment failed`}</DialogTitle></DialogHeader>
+          <pre className="max-h-[28rem] overflow-auto whitespace-pre-wrap rounded-md bg-foreground/90 p-3 font-mono text-xs text-background">{result?.log}</pre>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

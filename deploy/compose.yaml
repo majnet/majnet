@@ -19,7 +19,11 @@ services:
     container_name: majnet-bot
     restart: unless-stopped
     network_mode: host
-    env_file: /etc/majnet/bot.env
+    # Optional so compose parses on a fresh install before the wizard writes
+    # bot.env; the bot restart-loops (missing App creds) until the wizard does.
+    env_file:
+      - path: /etc/majnet/bot.env
+        required: false
     volumes:
       # GitHub App PEM only. Path must match MAJNET_GITHUB_PRIVATE_KEY_PATH in
       # bot.env; adjust the left side if the wizard wrote it elsewhere.

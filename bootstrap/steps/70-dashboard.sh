@@ -1,20 +1,17 @@
 # 70-dashboard — the admin dashboard behind Tailscale (§16), main node only.
-# Tailscale is the dashboard's identity trust anchor (Tailscale-User-Login
-# headers), and joining the tailnet is an interactive login — so this step
-# installs everything, then no-ops with a hint until `tailscale up` has run.
-# After that: bootstrap.sh 70 brings the dashboard up.
+# The dashboard runs as a compose service from the CI-built image (ADR 0008,
+# deploy/compose.yaml); this step only wires Tailscale — its identity trust
+# anchor (Tailscale-User-Login headers) — and `tailscale serve`. Joining the
+# tailnet is an interactive login, so it no-ops with a hint until `tailscale up`
+# has run. After that: bootstrap.sh 70.
 
 if [[ $NODE_ROLE != main ]]; then
   return 0
 fi
 
-# install.sh clones the full checkout to /opt/majnet; manual runs from a
-# checkout land in <repo>/bootstrap, so the parent works too. Enrolled
-# workers only receive the bootstrap/ payload — but they never get here.
-DASH_DIR=/opt/majnet/dashboard
-[[ -d $DASH_DIR ]] || DASH_DIR=$(cd .. && pwd)/dashboard
-if [[ ! -d $DASH_DIR ]]; then
-  warn "no dashboard/ next to this payload — skipping"
+COMPOSE=/opt/majnet/deploy/compose.yaml
+if [[ ! -f $COMPOSE ]]; then
+  warn "no deploy/compose.yaml ($COMPOSE) — run install.sh first; skipping"
   return 0
 fi
 
@@ -36,6 +33,8 @@ if ! tailscale status &>/dev/null; then
   return 0
 fi
 
-log "starting the dashboard + tailscale serve"
-docker compose -f "$DASH_DIR/compose.yaml" up -d
+log "ensuring the dashboard is up + tailscale serve"
+# Idempotent; the image ref is auto-loaded from deploy/.env (written by install
+# / majnet-update). nginx binds 127.0.0.1:8090 (host networking).
+docker compose -f "$COMPOSE" up -d dashboard
 tailscale serve --bg --http 80 http://127.0.0.1:8090

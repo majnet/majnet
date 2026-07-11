@@ -133,19 +133,30 @@ pub fn write_bot_config(
     Ok(())
 }
 
-/// Best-effort `systemctl restart majnet-bot` — absent outside a node.
+/// Best-effort bring-up of the bot after its App credentials were written
+/// (ADR 0008: it runs as a compose service, so `up -d bot` — not systemctl).
+/// On a fresh install this is what first starts the bot; on a re-config it
+/// recreates it. Absent outside a node.
 pub async fn restart_bot() {
-    match tokio::process::Command::new("systemctl")
-        .args(["restart", "majnet-bot"])
+    match tokio::process::Command::new("docker")
+        .args([
+            "compose",
+            "-f",
+            "/opt/majnet/deploy/compose.yaml",
+            "up",
+            "-d",
+            "--force-recreate",
+            "bot",
+        ])
         .output()
         .await
     {
-        Ok(out) if out.status.success() => tracing::info!("majnet-bot restarted"),
+        Ok(out) if out.status.success() => tracing::info!("majnet-bot (re)started via compose"),
         Ok(out) => tracing::warn!(
             stderr = String::from_utf8_lossy(&out.stderr).trim(),
-            "systemctl restart majnet-bot failed"
+            "docker compose up bot failed"
         ),
-        Err(e) => tracing::warn!(error = %e, "systemctl unavailable — restart the bot manually"),
+        Err(e) => tracing::warn!(error = %e, "docker unavailable — start the bot manually"),
     }
 }
 

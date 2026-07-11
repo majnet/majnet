@@ -62,6 +62,7 @@ async fn main() -> Result<()> {
     let internal = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/enroll", post(wizard::enroll_handler))
+        .route("/enroll.json", post(wizard::enroll_json))
         .with_state(app.clone());
     let internal_listener = tokio::net::TcpListener::bind(&app.config.listen_internal).await?;
     tracing::info!(internal = %app.config.listen_internal, done, "majnet-setup listening");

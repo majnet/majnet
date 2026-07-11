@@ -27,17 +27,12 @@ die() { printf '\033[1;31m[majnet-install]\033[0m %s\n' "$*" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || die "run as root"
 [[ -f /etc/debian_version ]] || die "Debian only (design doc §4)"
 
-log "installing build + runtime dependencies"
+log "installing runtime dependencies"
 apt-get update -q
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
-  git curl ca-certificates build-essential pkg-config libssl-dev \
-  age openssl openssh-client gnupg
-
-if ! command -v cargo &>/dev/null && [[ ! -x $HOME/.cargo/bin/cargo ]]; then
-  log "installing Rust (rustup, minimal profile)"
-  curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
-fi
-export PATH="$HOME/.cargo/bin:$PATH"
+  git curl ca-certificates age openssl openssh-client gnupg
+# No build toolchain: the control plane is pulled as CI-built images (ADR 0008),
+# not compiled here. Only the `bootstrap/` shell + compose payload is checked out.
 
 log "fetching $REPO_URL @ $REF → $DIR"
 if [[ -d $DIR/.git ]]; then
@@ -148,17 +143,24 @@ EOF
   systemctl reload caddy
 fi
 
-# --- build + install the control plane -------------------------------------
-log "building the control plane (release — several minutes on a small VPS)"
-(cd "$DIR" && cargo build --release -p majnet-bot -p majnet-reconciler -p majnet-setup)
-install -m 0755 "$DIR/target/release/majnet-bot"        /usr/local/bin/
-install -m 0755 "$DIR/target/release/majnet-reconciler" /usr/local/bin/
-install -m 0755 "$DIR/target/release/majnet-setup"      /usr/local/bin/
-install -m 0755 "$DIR/bootstrap/majnet-update"          /usr/local/bin/
+# --- control plane: pull the CI-built images (ADR 0008) --------------------
+# bot + reconciler + dashboard run as compose services from the GHCR image;
+# `setup` rides along in the image but runs native (it drives systemctl/wg).
+# Nothing compiles here.
+CP_IMAGE=${MAJNET_CONTROL_PLANE_IMAGE:-ghcr.io/maxa-ondrej/majnet/control-plane:latest}
+DASH_IMAGE=${MAJNET_DASHBOARD_IMAGE:-ghcr.io/maxa-ondrej/majnet/dashboard:latest}
+log "pulling control-plane images"
+docker pull -q "$CP_IMAGE"
+docker pull -q "$DASH_IMAGE"
+# Extract the native setup binary from the image; install the update script.
+cid=$(docker create "$CP_IMAGE")
+docker cp "$cid:/usr/local/bin/majnet-setup" /usr/local/bin/majnet-setup
+docker rm -f "$cid" >/dev/null
+chmod 0755 /usr/local/bin/majnet-setup
+install -m 0755 "$DIR/bootstrap/majnet-update" /usr/local/bin/
 
-# --- service config + units ------------------------------------------------
-# bot.env is written by the wizard (App credentials); reconciler + setup are
-# fully known now.
+# --- service config --------------------------------------------------------
+# bot.env is written by the wizard (App credentials); reconciler + setup now.
 (umask 077; cat > "$ETC/reconciler.env" <<'EOF'
 MAJNET_BOT_URL=http://10.88.0.1:8081
 MAJNET_LISTEN=10.88.0.1:9090
@@ -179,35 +181,32 @@ EOF
 if [[ -n $DOMAIN ]]; then
   echo "MAJNET_PUBLIC_BASE_URL=https://$DOMAIN" >> "$ETC/setup.env"
 fi
+# Pinned images for compose (auto-loaded as deploy/.env by every compose call).
+printf 'MAJNET_CONTROL_PLANE_IMAGE=%s\nMAJNET_DASHBOARD_IMAGE=%s\n' \
+  "$CP_IMAGE" "$DASH_IMAGE" > "$DIR/deploy/.env"
 
-unit() { # unit <name> <extra-unit-lines>
-  local name=$1 extra=$2
-  cat > "/etc/systemd/system/majnet-$name.service" <<EOF
+# --- setup service (native) ------------------------------------------------
+cat > /etc/systemd/system/majnet-setup.service <<EOF
 [Unit]
-Description=MajNet $name
+Description=MajNet setup
 After=network-online.target wg-quick@wg0.service
 Wants=network-online.target
 Requires=wg-quick@wg0.service
-$extra
 [Service]
-EnvironmentFile=$ETC/$name.env
-ExecStart=/usr/local/bin/majnet-$name
+EnvironmentFile=$ETC/setup.env
+ExecStart=/usr/local/bin/majnet-setup
 Restart=on-failure
 RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-}
-# The bot stays down until the wizard writes its App credentials.
-unit bot "ConditionPathExists=$ETC/github-app.pem"
-unit reconciler ""
-unit setup ""
 
-# Self-update: converge the binaries to the version.yaml pin hourly (ADR 0005).
+# Self-update: converge the control plane to the version.yaml pin hourly
+# (ADR 0005/0008 — pulls images, extracts setup; never compiles).
 cat > /etc/systemd/system/majnet-update.service <<'EOF'
 [Unit]
-Description=MajNet control-plane update (ADR 0005)
-After=network-online.target majnet-bot.service
+Description=MajNet control-plane update (ADR 0005/0008)
+After=network-online.target docker.service
 Wants=network-online.target
 [Service]
 Type=oneshot
@@ -225,7 +224,12 @@ WantedBy=timers.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now majnet-bot majnet-reconciler majnet-setup majnet-update.timer
+systemctl enable --now majnet-setup majnet-update.timer
+
+# Bring up reconciler + dashboard now; the bot follows once the wizard writes
+# its App credentials (its env_file is optional so compose parses without it).
+log "starting the control-plane compose (reconciler + dashboard)"
+docker compose -f "$DIR/deploy/compose.yaml" up -d reconciler dashboard
 
 if [[ -n $DOMAIN ]]; then
   WIZARD_URL="https://$DOMAIN/?token=$(cat "$ETC/setup-token")"
