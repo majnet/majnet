@@ -5,9 +5,9 @@
 //! `render/<class>` branch, opening (or fast-forwarding) a render PR against
 //! `env/<class>`. Secrets pass through encrypted — rendering never decrypts.
 //!
-//! Merge policy: `stable` render PRs auto-merge (preserving auto-deploy);
-//! `env/production` waits for admin review — that review IS the production
-//! gate, over the most truthful artifact possible: the exact final diff.
+//! Merge policy: `testing`/`stable` render PRs auto-merge (preserving
+//! auto-deploy); `env/production` waits for admin review — that review IS the
+//! production gate, over the most truthful artifact possible: the exact final diff.
 //! Multiple `main` pushes while a PR is open fast-forward the same PR.
 //!
 //! An overlay file's presence (`apps/<app>/<class>.yaml`) opts the app into
