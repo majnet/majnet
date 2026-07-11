@@ -1,36 +1,50 @@
 import { Link, Outlet } from '@tanstack/react-router'
+import { Activity, Boxes, Server, Settings } from 'lucide-react'
 import { useWhoami } from './api'
 
-const IconProjects = (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" /></svg>
-)
-const IconActivity = (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 6h16M4 12h16M4 18h10" /></svg>
-)
-const IconNodes = (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="4" width="18" height="6" rx="1" /><rect x="3" y="14" width="18" height="6" rx="1" /></svg>
-)
+const NAV = [
+  { to: '/', label: 'Projects', icon: Boxes, exact: true },
+  { to: '/activity', label: 'Activity', icon: Activity, exact: false },
+  { to: '/nodes', label: 'Nodes', icon: Server, exact: false },
+  { to: '/settings', label: 'Settings', icon: Settings, exact: false },
+] as const
+
+const base = 'flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm font-medium transition-colors'
 
 export function Shell() {
   const { data: me } = useWhoami()
   const initials = (me?.login || 'infra').slice(0, 1).toUpperCase()
   return (
-    <div className="app">
-      <nav className="side">
-        <div className="brand"><div className="logo" /><b>MajNet</b></div>
-        <Link to="/" className="nav" activeProps={{ className: 'nav on' }} activeOptions={{ exact: true }}>{IconProjects}Projects</Link>
-        <Link to="/activity" className="nav" activeProps={{ className: 'nav on' }}>{IconActivity}Activity</Link>
-        <Link to="/nodes" className="nav" activeProps={{ className: 'nav on' }}>{IconNodes}Nodes</Link>
-        <div className="spacer" />
-        <div className="who">
-          <span className="avatar">{initials}</span>
-          <div>
-            <div>{me?.login || 'infra'}</div>
-            <div className="role">{me?.admin ? 'admin' : 'member'}</div>
+    <div className="grid min-h-screen grid-cols-[240px_1fr] max-md:grid-cols-1">
+      <aside className="flex flex-col gap-1 border-r bg-sidebar p-3 text-sidebar-foreground max-md:flex-row max-md:items-center max-md:gap-2 max-md:overflow-x-auto">
+        <div className="flex items-center gap-2.5 px-2 py-3 max-md:py-0">
+          <div className="grid size-8 place-items-center rounded-lg bg-primary/15 font-bold text-primary">M</div>
+          <span className="font-semibold tracking-tight">MajNet</span>
+        </div>
+        <nav className="flex flex-col gap-0.5 max-md:flex-row">
+          {NAV.map((n) => (
+            <Link
+              key={n.to}
+              to={n.to}
+              activeOptions={{ exact: n.exact }}
+              activeProps={{ className: `${base} bg-sidebar-accent text-sidebar-accent-foreground` }}
+              inactiveProps={{ className: `${base} text-muted-foreground hover:bg-sidebar-accent hover:text-foreground` }}
+            >
+              <n.icon className="size-4" /> {n.label}
+            </Link>
+          ))}
+        </nav>
+        <div className="mt-auto flex items-center gap-2.5 border-t pt-3 max-md:mt-0 max-md:border-0 max-md:pt-0">
+          <div className="grid size-7 place-items-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">{initials}</div>
+          <div className="text-xs leading-tight max-md:hidden">
+            <div className="text-foreground">{me?.login || 'infra'}</div>
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-success">{me?.admin ? 'admin' : 'member'}</div>
           </div>
         </div>
-      </nav>
-      <main className="main"><Outlet /></main>
+      </aside>
+      <main className="w-full max-w-5xl p-6 md:p-8">
+        <Outlet />
+      </main>
     </div>
   )
 }

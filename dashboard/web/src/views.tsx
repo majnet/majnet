@@ -1,10 +1,24 @@
 import { Link, useParams } from '@tanstack/react-router'
+import { ChevronRight, Plus } from 'lucide-react'
 import { useApps, useDeploys, useEvents, useNodes, useProjects, useWhoami } from './api'
-import { DeployStatus, latestEventFor, Pill, QueryState, short } from './ui'
+import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { DeployStatus, Empty, latestEventFor, QueryState, short, StatusBadge } from './ui'
 
-const Chevron = (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--faint)" strokeWidth="2"><path d="M9 6l6 6-6 6" /></svg>
-)
+export function Crumbs({ children }: { children: React.ReactNode }) {
+  return <div className="mb-1.5 text-xs text-muted-foreground [&_a]:text-primary [&_a]:hover:underline">{children}</div>
+}
+export function PageHead({ title, sub, children }: { title: string; sub?: string; children?: React.ReactNode }) {
+  return (
+    <div className="mb-6 flex flex-wrap items-center gap-3">
+      <h1 className="text-2xl font-bold tracking-tight">{title}</h1>
+      {sub && <span className="font-mono text-sm text-muted-foreground">{sub}</span>}
+      <div className="flex-1" />
+      {children}
+    </div>
+  )
+}
 
 // ── Projects ─────────────────────────────────────────────────────────────────
 export function Projects() {
@@ -12,36 +26,34 @@ export function Projects() {
   const { data: me } = useWhoami()
   return (
     <>
-      <div className="head">
-        <h1>Projects</h1><span className="grow" />
-        {me?.admin && <Link to="/new-project" className="btn primary">+ New project</Link>}
-      </div>
+      <PageHead title="Projects">
+        {me?.admin && <Button asChild><Link to="/new-project"><Plus className="size-4" /> New project</Link></Button>}
+      </PageHead>
       <QueryState isLoading={q.isLoading} error={q.error}>
-        <div className="grid">
-          {q.data?.length === 0 && <div className="empty">No projects registered yet.</div>}
-          {q.data?.map((p) =>
-            p.onboarded ? (
-              <Link key={p.org} to="/projects/$org" params={{ org: p.org }} className="card">
-                <h3>{p.name}</h3>
-                <div className="meta">{p.org}</div>
-                <div className="foot">
-                  <span><b>{p.apps}</b> app{p.apps === 1 ? '' : 's'}</span>
-                  <Pill kind="ok" dot>onboarded</Pill>
-                </div>
-              </Link>
-            ) : (
-              <div key={p.org} className="card" style={{ opacity: 0.6, borderStyle: 'dashed', cursor: 'default' }}>
-                <h3>{p.name}</h3>
-                <div className="meta">{p.org}</div>
-                <div className="foot"><Pill kind="dim">registered · App not installed</Pill></div>
+        <div className="grid gap-3.5 [grid-template-columns:repeat(auto-fill,minmax(280px,1fr))]">
+          {q.data?.length === 0 && <Empty>No projects registered yet.</Empty>}
+          {q.data?.map((p) => p.onboarded ? (
+            <Link key={p.org} to="/projects/$org" params={{ org: p.org }}
+              className="rounded-xl border bg-card p-4 shadow-sm transition-colors hover:border-primary">
+              <div className="font-semibold">{p.name}</div>
+              <div className="font-mono text-xs text-muted-foreground">{p.org}</div>
+              <div className="mt-3 flex items-center gap-3 text-xs text-muted-foreground">
+                <span><b className="text-foreground">{p.apps}</b> app{p.apps === 1 ? '' : 's'}</span>
+                <StatusBadge tone="success" dot>onboarded</StatusBadge>
               </div>
-            ),
-          )}
+            </Link>
+          ) : (
+            <div key={p.org} className="rounded-xl border border-dashed bg-card p-4 opacity-60">
+              <div className="font-semibold">{p.name}</div>
+              <div className="font-mono text-xs text-muted-foreground">{p.org}</div>
+              <div className="mt-3"><StatusBadge tone="muted">registered · App not installed</StatusBadge></div>
+            </div>
+          ))}
         </div>
-        <div className="note">
-          Projects map 1:1 to GitHub orgs. A project is live only when it is listed in <code>projects.yaml</code> <b>and</b> the
-          App is installed on the org. "New project" registers the org; org creation stays on GitHub.
-        </div>
+        <p className="mt-6 rounded-lg border border-dashed bg-muted/40 p-3.5 text-xs text-muted-foreground">
+          Projects map 1:1 to GitHub orgs. A project is live only when it is listed in <code>projects.yaml</code> <b>and</b> the App
+          is installed on the org. "New project" registers the org; org creation stays on GitHub.
+        </p>
       </QueryState>
     </>
   )
@@ -59,39 +71,32 @@ export function ProjectDetail() {
 
   return (
     <>
-      <div className="crumb"><Link to="/">Projects</Link> / {name}</div>
-      <div className="head">
-        <h1>{name}</h1>
-        <span className="head sub" style={{ fontFamily: 'var(--mono)' }}>{org}</span>
-        <span className="grow" />
-        <Link to="/projects/$org/deploys" params={{ org }} className="btn ghost sm">
-          Deployments{pending ? ` · ${pending}` : ''}
-        </Link>
-        <Link to="/projects/$org/members" params={{ org }} className="btn ghost sm">Members</Link>
-        <Link to="/projects/$org/new-app" params={{ org }} className="btn primary">+ New app</Link>
-      </div>
+      <Crumbs><Link to="/">Projects</Link> / {name}</Crumbs>
+      <PageHead title={name} sub={org}>
+        <Button asChild variant="outline" size="sm"><Link to="/projects/$org/deploys" params={{ org }}>Deployments{pending ? ` · ${pending}` : ''}</Link></Button>
+        <Button asChild variant="outline" size="sm"><Link to="/projects/$org/members" params={{ org }}>Members</Link></Button>
+        <Button asChild size="sm"><Link to="/projects/$org/new-app" params={{ org }}><Plus className="size-4" /> New app</Link></Button>
+      </PageHead>
 
-      <div className="panel-h" style={{ border: 0, padding: '0 0 10px' }}><h2>Apps</h2></div>
+      <h2 className="mb-2.5 text-sm font-semibold">Apps</h2>
       <QueryState isLoading={apps.isLoading} error={apps.error}>
-        <div className="rows">
-          {apps.data?.length === 0 && <div className="empty">No apps yet — create one.</div>}
+        <div className="flex flex-col gap-2">
+          {apps.data?.length === 0 && <Empty>No apps yet — create one.</Empty>}
           {apps.data?.map((a) => {
             const dm = [short(a.image), a.database].filter(Boolean).join('  ·  ')
-            const ev = latestEventFor(events.data, name, a.name)
             return (
-              <Link key={a.name} to="/projects/$org/apps/$app" params={{ org, app: a.name }} className="row link">
-                <div>
-                  <div className="nm">
+              <Link key={a.name} to="/projects/$org/apps/$app" params={{ org, app: a.name }}
+                className="flex items-center gap-3 rounded-lg border bg-card px-4 py-3 transition-colors hover:border-primary">
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2 font-semibold">
                     {a.name}
-                    {a.classes.map((c) => <Pill key={c} kind="cls">{c}</Pill>)}
+                    {a.classes.map((c) => <Badge key={c} variant="secondary" className="text-primary bg-accent">{c}</Badge>)}
                   </div>
-                  <div className="dm">{dm || '—'}</div>
+                  <div className="mt-0.5 truncate font-mono text-xs text-muted-foreground">{dm || '—'}</div>
                 </div>
-                <div className="rt">
-                  {a.host && <span style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--muted)' }}>{a.host}</span>}
-                  <DeployStatus ev={ev} />
-                  {Chevron}
-                </div>
+                {a.host && <span className="font-mono text-xs text-muted-foreground max-sm:hidden">{a.host}</span>}
+                <DeployStatus ev={latestEventFor(events.data, name, a.name)} />
+                <ChevronRight className="size-4 text-muted-foreground/50" />
               </Link>
             )
           })}
@@ -107,24 +112,25 @@ export function Nodes() {
   const q = useNodes()
   return (
     <>
-      <div className="head"><h1>Nodes</h1></div>
+      <PageHead title="Nodes" />
       <QueryState isLoading={q.isLoading} error={q.error}>
-        <div className="rows">
-          {q.data?.length === 0 && <div className="empty">No nodes enrolled.</div>}
+        <div className="flex flex-col gap-2">
+          {q.data?.length === 0 && <Empty>No nodes enrolled.</Empty>}
           {q.data?.map((n) => {
             const enrolled = !!n.wireguard_pubkey
             const ep = [n.wireguard_ip, n.public_endpoint].filter(Boolean).join(' · ')
             return (
-              <div key={n.role} className="row" style={enrolled ? undefined : { opacity: 0.6 }}>
-                <div>
-                  <div className="nm">{n.name} <Pill kind="dim">{ZONE[n.role] ?? n.role}</Pill></div>
-                  <div className="dm">{ep || '—'}</div>
+              <div key={n.role} className={`flex items-center gap-3 rounded-lg border bg-card px-4 py-3 ${enrolled ? '' : 'opacity-60'}`}>
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 font-semibold">{n.name} <Badge variant="secondary">{ZONE[n.role] ?? n.role}</Badge></div>
+                  <div className="mt-0.5 font-mono text-xs text-muted-foreground">{ep || '—'}</div>
                 </div>
-                {enrolled ? <Pill kind="ok" dot>enrolled</Pill> : <Pill kind="dim">pending</Pill>}
+                {enrolled ? <StatusBadge tone="success" dot>enrolled</StatusBadge> : <StatusBadge tone="muted">pending</StatusBadge>}
               </div>
             )
           })}
         </div>
+        <p className="mt-4 text-xs text-muted-foreground">Enroll a pending node from <Link to="/settings" className="text-primary hover:underline">Settings → Nodes</Link>.</p>
       </QueryState>
     </>
   )
@@ -135,25 +141,26 @@ export function Activity() {
   const q = useEvents(100)
   return (
     <>
-      <div className="head"><h1>Activity</h1></div>
+      <PageHead title="Activity" />
       <QueryState isLoading={q.isLoading} error={q.error}>
-        <div className="panel"><div className="panel-b" style={{ padding: '6px 18px 14px' }}>
-          <table className="ev">
-            <thead><tr><th>time</th><th>project</th><th>node</th><th>action</th><th>result</th><th>commit</th></tr></thead>
-            <tbody>
-              {q.data?.length === 0 && <tr><td colSpan={6} className="empty">No events yet.</td></tr>}
+        <div className="rounded-xl border bg-card">
+          <Table>
+            <TableHeader>
+              <TableRow><TableHead>time</TableHead><TableHead>project</TableHead><TableHead>node</TableHead><TableHead>action</TableHead><TableHead>result</TableHead><TableHead>commit</TableHead></TableRow>
+            </TableHeader>
+            <TableBody className="font-mono text-xs">
+              {q.data?.length === 0 && <TableRow><TableCell colSpan={6} className="text-muted-foreground">No events yet.</TableCell></TableRow>}
               {q.data?.map((e, i) => (
-                <tr key={i}>
-                  <td>{e.at}</td><td>{e.project}</td><td>{e.node}</td><td>{e.action}</td>
-                  <td style={{ color: e.result.startsWith('FAILED') ? 'var(--bad)' : 'inherit' }}>{e.result}</td>
-                  <td>{e.commit.slice(0, 12)}</td>
-                </tr>
+                <TableRow key={i}>
+                  <TableCell>{e.at}</TableCell><TableCell>{e.project}</TableCell><TableCell>{e.node}</TableCell><TableCell>{e.action}</TableCell>
+                  <TableCell className={e.result.startsWith('FAILED') ? 'text-destructive' : ''}>{e.result}</TableCell>
+                  <TableCell>{e.commit.slice(0, 12)}</TableCell>
+                </TableRow>
               ))}
-            </tbody>
-          </table>
-        </div></div>
+            </TableBody>
+          </Table>
+        </div>
       </QueryState>
     </>
   )
 }
-

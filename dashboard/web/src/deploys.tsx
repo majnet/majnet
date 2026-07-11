@@ -1,28 +1,29 @@
 import { Link, useParams } from '@tanstack/react-router'
 import { send, urls, useDeploys, type DeployFile } from './api'
 import { useApiMutation } from './mutations'
-import { Pill, QueryState } from './ui'
+import { ConfirmButton, Empty, QueryState } from './ui'
+import { Crumbs, PageHead } from './views'
+import { Badge } from '@/components/ui/badge'
+import { Card } from '@/components/ui/card'
 
 function DiffBlock({ patch }: { patch: string }) {
   return (
-    <div className="term" style={{ marginTop: 8 }}>
-      <pre><code>
-        {patch.split('\n').map((line, i) => {
-          const c = line[0] === '+' ? 'var(--good)' : line[0] === '-' ? 'var(--bad)'
-            : line.startsWith('@@') ? 'var(--term-accent)' : 'var(--term-text)'
-          return <span key={i} style={{ color: c, display: 'block' }}>{line || ' '}</span>
-        })}
-      </code></pre>
-    </div>
+    <pre className="mt-2 overflow-x-auto rounded-md bg-foreground/90 p-3 font-mono text-[11px] leading-relaxed">
+      {patch.split('\n').map((line, i) => {
+        const c = line[0] === '+' ? 'text-emerald-400' : line[0] === '-' ? 'text-red-400'
+          : line.startsWith('@@') ? 'text-sky-400' : 'text-background/80'
+        return <div key={i} className={c}>{line || ' '}</div>
+      })}
+    </pre>
   )
 }
 
 function FileDiff({ f }: { f: DeployFile }) {
   return (
-    <details>
-      <summary style={{ cursor: 'pointer', fontFamily: 'var(--mono)', fontSize: 12.5 }}>
-        {f.filename} <span style={{ color: 'var(--good)' }}>+{f.additions}</span> <span style={{ color: 'var(--bad)' }}>−{f.deletions}</span>{' '}
-        <Pill kind="dim">{f.status}</Pill>
+    <details className="group">
+      <summary className="cursor-pointer select-none font-mono text-xs">
+        {f.filename} <span className="text-success">+{f.additions}</span> <span className="text-destructive">−{f.deletions}</span>{' '}
+        <Badge variant="secondary">{f.status}</Badge>
       </summary>
       {f.patch && <DiffBlock patch={f.patch} />}
     </details>
@@ -36,31 +37,31 @@ export function Deploys() {
 
   return (
     <>
-      <div className="crumb"><Link to="/">Projects</Link> / <Link to="/projects/$org" params={{ org }}>{org}</Link> / Deployments</div>
-      <div className="head"><h1>Deployments</h1><span className="head sub">pending render PRs on {org}/ops</span></div>
+      <Crumbs><Link to="/">Projects</Link> / <Link to="/projects/$org" params={{ org }}>{org}</Link> / Deployments</Crumbs>
+      <PageHead title="Deployments" sub={`pending render PRs on ${org}/ops`} />
       <QueryState isLoading={q.isLoading} error={q.error}>
         {q.data?.length === 0 && (
-          <div className="empty">No pending deployment requests. Production changes appear here as render PRs awaiting review; stable auto-deploys.</div>
+          <Empty>No pending deployment requests. Production changes appear here as render PRs awaiting review; stable auto-deploys.</Empty>
         )}
-        {q.data?.map((d) => (
-          <div key={d.number} className="panel">
-            <div className="panel-h">
-              <Pill kind="cls">{d.class}</Pill>
-              <h2 style={{ fontWeight: 600 }}>#{d.number} · {d.title}</h2>
-              <span className="grow" />
-              <button className="btn primary sm" disabled={m.isPending} onClick={() => {
-                if (confirm(`Merge PR #${d.number} and deploy env/${d.class}?`)) m.mutate(() => send(urls.deployMerge(org, d.number)))
-              }}>{d.class === 'production' ? 'Approve & deploy' : 'Merge & deploy'}</button>
-              <button className="btn danger sm" disabled={m.isPending} onClick={() => {
-                if (confirm(`Close PR #${d.number} without deploying?`)) m.mutate(() => send(urls.deployClose(org, d.number)))
-              }}>Close</button>
-            </div>
-            <div className="panel-b">
-              {d.files.length === 0 && <div className="h">No file changes.</div>}
-              {d.files.map((f) => <FileDiff key={f.filename} f={f} />)}
-            </div>
-          </div>
-        ))}
+        <div className="flex flex-col gap-4">
+          {q.data?.map((d) => (
+            <Card key={d.number} className="gap-0 py-0">
+              <div className="flex flex-wrap items-center gap-2.5 border-b px-4 py-3">
+                <Badge variant="secondary" className="bg-accent text-primary">{d.class}</Badge>
+                <h2 className="font-semibold">#{d.number} · {d.title}</h2>
+                <div className="flex-1" />
+                <ConfirmButton size="sm" title={`Merge PR #${d.number}?`} description={`Deploy env/${d.class}.`} confirmText="Merge & deploy"
+                  onConfirm={() => m.mutate(() => send(urls.deployMerge(org, d.number)))}>{d.class === 'production' ? 'Approve & deploy' : 'Merge & deploy'}</ConfirmButton>
+                <ConfirmButton variant="outline" size="sm" className="text-destructive" title={`Close PR #${d.number}?`} description="Reject this change without deploying."
+                  confirmText="Close" onConfirm={() => m.mutate(() => send(urls.deployClose(org, d.number)))}>Close</ConfirmButton>
+              </div>
+              <div className="flex flex-col gap-2 px-4 py-4">
+                {d.files.length === 0 && <span className="text-xs text-muted-foreground">No file changes.</span>}
+                {d.files.map((f) => <FileDiff key={f.filename} f={f} />)}
+              </div>
+            </Card>
+          ))}
+        </div>
       </QueryState>
     </>
   )

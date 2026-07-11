@@ -1,44 +1,58 @@
 import { useState } from 'react'
 import { Link, useNavigate, useParams } from '@tanstack/react-router'
+import { toast } from 'sonner'
+import { Info } from 'lucide-react'
 import { send, urls } from './api'
 import { useApiMutation } from './mutations'
-import { useToast } from './ui'
+import { Crumbs, PageHead } from './views'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+
+function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <Label>{label}</Label>
+      {children}
+      {hint && <span className="text-xs text-muted-foreground">{hint}</span>}
+    </div>
+  )
+}
 
 // ── New project ──────────────────────────────────────────────────────────────
 export function NewProject() {
   const nav = useNavigate()
-  const toast = useToast()
   const [name, setName] = useState('')
   const [org, setOrg] = useState('')
   const m = useApiMutation({ invalidate: [['projects']], onDone: () => nav({ to: '/' }) })
-
   return (
     <>
-      <div className="crumb"><Link to="/">Projects</Link> / New</div>
-      <div className="head"><h1>New project</h1></div>
-      <div className="panel"><div className="panel-b">
-        <div className="banner">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="9" /><path d="M12 8h.01M11 12h1v4h1" /></svg>
+      <Crumbs><Link to="/">Projects</Link> / New</Crumbs>
+      <PageHead title="New project" />
+      <Card><CardContent className="flex flex-col gap-4 pt-6">
+        <div className="flex gap-2.5 rounded-lg border bg-muted/40 p-3 text-sm text-muted-foreground">
+          <Info className="mt-0.5 size-4 shrink-0" />
           <div>Create the GitHub org yourself (GitHub has no org-creation API), then register it here. Discovery needs the org listed <b>and</b> the App installed.</div>
         </div>
-        <div className="row2">
-          <div className="field"><label>Project name</label>
-            <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="blog" />
-            <span className="h">Lowercase slug, used in the dashboard.</span></div>
-          <div className="field"><label>GitHub org</label>
-            <input type="text" value={org} onChange={(e) => setOrg(e.target.value)} placeholder="majksa-projects" />
-            <span className="h">The org this project's repos live in.</span></div>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Field label="Project name" hint="Lowercase slug, used in the dashboard."><Input value={name} onChange={(e) => setName(e.target.value)} placeholder="blog" /></Field>
+          <Field label="GitHub org" hint="The org this project's repos live in."><Input value={org} onChange={(e) => setOrg(e.target.value)} placeholder="majksa-projects" /></Field>
         </div>
-        <div className="field"><label>1 · Install the App on the org</label>
-          <div className="term"><pre><code>https://github.com/apps/majnet-platform/installations/new</code></pre></div></div>
-        <div className="actions">
-          <button className="btn primary" disabled={m.isPending} onClick={() => {
-            if (!name.trim() || !org.trim()) return toast('name and org are required', true)
+        <Field label="1 · Install the App on the org">
+          <pre className="overflow-x-auto rounded-md bg-foreground/90 p-3 font-mono text-xs text-background">https://github.com/apps/majnet-platform/installations/new</pre>
+        </Field>
+        <div className="flex items-center gap-3">
+          <Button disabled={m.isPending} onClick={() => {
+            if (!name.trim() || !org.trim()) return toast.error('name and org are required')
             m.mutate(() => send(urls.projects, { json: { name: name.trim(), org: org.trim() } }))
-          }}>Register project</button>
-          <span className="h">Commits to projects.yaml; the ops repo is created on the next org sync.</span>
+          }}>Register project</Button>
+          <span className="text-xs text-muted-foreground">Commits to projects.yaml; the ops repo is created on the next org sync.</span>
         </div>
-      </div></div>
+      </CardContent></Card>
     </>
   )
 }
@@ -48,68 +62,62 @@ const CLASSES = ['production', 'stable', 'ephemeral'] as const
 export function NewApp() {
   const { org } = useParams({ from: '/projects/$org/new-app' })
   const nav = useNavigate()
-  const toast = useToast()
   const [name, setName] = useState('')
   const [image, setImage] = useState('')
   const [host, setHost] = useState('')
   const [port, setPort] = useState('8080')
   const [domains, setDomains] = useState('')
-  const [database, setDatabase] = useState('')
+  const [database, setDatabase] = useState('none')
   const [classes, setClasses] = useState<string[]>(['production'])
   const m = useApiMutation({ invalidate: [['apps', org]], onDone: () => nav({ to: '/projects/$org', params: { org } }) })
-
   const toggle = (c: string) => setClasses((cs) => (cs.includes(c) ? cs.filter((x) => x !== c) : [...cs, c]))
 
   return (
     <>
-      <div className="crumb"><Link to="/">Projects</Link> / <Link to="/projects/$org" params={{ org }}>{org}</Link> / New app</div>
-      <div className="head"><h1>New app</h1></div>
-      <div className="panel"><div className="panel-b">
-        <div className="row2">
-          <div className="field"><label>App name</label>
-            <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="blog" />
-            <span className="h">Lowercase; its manifest directory.</span></div>
-          <div className="field"><label>Image</label>
-            <input type="text" value={image} onChange={(e) => setImage(e.target.value)} placeholder="ghcr.io/org/app@sha256:…" />
-            <span className="h">Digest-pinned; tags are rejected.</span></div>
+      <Crumbs><Link to="/">Projects</Link> / <Link to="/projects/$org" params={{ org }}>{org}</Link> / New app</Crumbs>
+      <PageHead title="New app" />
+      <Card><CardContent className="flex flex-col gap-4 pt-6">
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Field label="App name" hint="Lowercase; its manifest directory."><Input value={name} onChange={(e) => setName(e.target.value)} placeholder="blog" /></Field>
+          <Field label="Image" hint="Digest-pinned; tags are rejected."><Input value={image} onChange={(e) => setImage(e.target.value)} placeholder="ghcr.io/org/app@sha256:…" /></Field>
         </div>
-        <div className="row2">
-          <div className="field"><label>Primary domain <span style={{ color: 'var(--faint)' }}>— optional</span></label>
-            <input type="text" value={host} onChange={(e) => setHost(e.target.value)} placeholder="blog.majksa.cz" />
-            <span className="h">Cloudflare + cert handled automatically for production.</span></div>
-          <div className="field"><label>Container port</label>
-            <input type="number" value={port} onChange={(e) => setPort(e.target.value)} min={1} max={65535} /></div>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Field label="Primary domain — optional" hint="Cloudflare + cert handled automatically for production."><Input value={host} onChange={(e) => setHost(e.target.value)} placeholder="blog.majksa.cz" /></Field>
+          <Field label="Container port"><Input type="number" value={port} onChange={(e) => setPort(e.target.value)} /></Field>
         </div>
-        <div className="field"><label>Additional domains <span style={{ color: 'var(--faint)' }}>— optional, one per line</span></label>
-          <textarea value={domains} onChange={(e) => setDomains(e.target.value)} style={{ minHeight: 60 }} placeholder="www.majksa.cz" /></div>
-        <div className="field"><label>Classes</label>
-          <div className="actions">
+        <Field label="Additional domains — optional, one per line"><Textarea value={domains} onChange={(e) => setDomains(e.target.value)} className="min-h-16" placeholder="www.majksa.cz" /></Field>
+        <Field label="Classes" hint="Which environments this app deploys to. Production goes through the reviewed render PR.">
+          <div className="flex flex-wrap gap-2">
             {CLASSES.map((c) => (
-              <label key={c} className={`pill ${classes.includes(c) ? 'cls' : 'dim'}`} style={{ cursor: 'pointer' }}>
-                <input type="checkbox" checked={classes.includes(c)} onChange={() => toggle(c)} style={{ width: 'auto' }} /> {c}
+              <label key={c} className="flex cursor-pointer items-center gap-2 rounded-md border px-3 py-1.5 text-sm has-[:checked]:border-primary has-[:checked]:bg-accent has-[:checked]:text-accent-foreground">
+                <Checkbox checked={classes.includes(c)} onCheckedChange={() => toggle(c)} /> {c}
               </label>
             ))}
           </div>
-          <span className="h">Which environments this app deploys to. Production goes through the reviewed render PR.</span></div>
-        <div className="field"><label>Database <span style={{ color: 'var(--faint)' }}>— optional</span></label>
-          <select value={database} onChange={(e) => setDatabase(e.target.value)}>
-            <option value="">none</option><option>postgres</option><option>mariadb</option><option>valkey</option><option>mongodb</option>
-          </select></div>
-        <div className="actions">
-          <button className="btn primary" disabled={m.isPending} onClick={() => {
-            if (!name.trim() || !image.trim()) return toast('name and image are required', true)
-            if (!classes.length) return toast('select at least one class', true)
+        </Field>
+        <Field label="Database — optional">
+          <Select value={database} onValueChange={setDatabase}>
+            <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              {['none', 'postgres', 'mariadb', 'valkey', 'mongodb'].map((e) => <SelectItem key={e} value={e}>{e}</SelectItem>)}
+            </SelectContent>
+          </Select>
+        </Field>
+        <div className="flex items-center gap-3">
+          <Button disabled={m.isPending} onClick={() => {
+            if (!name.trim() || !image.trim()) return toast.error('name and image are required')
+            if (!classes.length) return toast.error('select at least one class')
             m.mutate(() => send(urls.apps(org), {
               json: {
                 name: name.trim(), image: image.trim(), host: host.trim(), port: Number(port),
                 domains: domains.split('\n').map((s) => s.trim()).filter(Boolean),
-                classes, database: database || null,
+                classes, database: database === 'none' ? null : database,
               },
             }))
-          }}>Create app</button>
-          <span className="h">Writes base.yaml + overlays to the ops repo.</span>
+          }}>Create app</Button>
+          <span className="text-xs text-muted-foreground">Writes base.yaml + overlays to the ops repo.</span>
         </div>
-      </div></div>
+      </CardContent></Card>
     </>
   )
 }

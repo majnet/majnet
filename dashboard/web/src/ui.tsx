@@ -1,43 +1,13 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
+import { Loader2 } from 'lucide-react'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
+  AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger,
+} from '@/components/ui/alert-dialog'
+import { cn } from '@/lib/utils'
 import type { Event } from './api'
-
-// ── toast ────────────────────────────────────────────────────────────────────
-type Toast = { msg: string; bad: boolean } | null
-const ToastCtx = createContext<(msg: string, bad?: boolean) => void>(() => {})
-export const useToast = () => useContext(ToastCtx)
-
-export function ToastProvider({ children }: { children: ReactNode }) {
-  const [toast, setToast] = useState<Toast>(null)
-  const timer = useRef<number>(0)
-  const show = useCallback((msg: string, bad = false) => {
-    setToast({ msg, bad })
-    window.clearTimeout(timer.current)
-    timer.current = window.setTimeout(() => setToast(null), bad ? 9000 : 4500)
-  }, [])
-  useEffect(() => () => window.clearTimeout(timer.current), [])
-  return (
-    <ToastCtx.Provider value={show}>
-      {children}
-      {toast && (
-        <div id="toast" className={toast.bad ? 'bad' : ''}>
-          <pre>{toast.msg}</pre>
-          <button className="btn ghost sm" style={{ marginLeft: 'auto' }} onClick={() => setToast(null)}>✕</button>
-        </div>
-      )}
-    </ToastCtx.Provider>
-  )
-}
-
-// ── pills + status ───────────────────────────────────────────────────────────
-export type PillKind = 'ok' | 'dep' | 'err' | 'cls' | 'dim'
-export function Pill({ kind, dot, title, children }: { kind: PillKind; dot?: boolean; title?: string; children: ReactNode }) {
-  return (
-    <span className={`pill ${kind}`} title={title}>
-      {dot && <span className="dot" />}
-      {children}
-    </span>
-  )
-}
 
 export const short = (img: string | null | undefined) =>
   String(img ?? '').replace(/(@sha256:[0-9a-f]{8})[0-9a-f]+/, '$1…')
@@ -45,23 +15,75 @@ export const short = (img: string | null | undefined) =>
 export const latestEventFor = (events: Event[] | undefined, project: string, app: string) =>
   (events ?? []).find((e) => e.project === project && e.action.trim().split(/\s+/).pop() === app)
 
+// ── status badge ─────────────────────────────────────────────────────────────
+const TONES = {
+  success: 'border-transparent bg-success/15 text-success',
+  warn: 'border-transparent bg-warning/15 text-warning',
+  danger: 'border-transparent bg-destructive/15 text-destructive',
+  muted: 'border-transparent bg-muted text-muted-foreground',
+  accent: 'border-transparent bg-accent text-accent-foreground',
+} as const
+
+export function StatusBadge({ tone, dot, title, children }: {
+  tone: keyof typeof TONES; dot?: boolean; title?: string; children: ReactNode
+}) {
+  return (
+    <Badge variant="outline" title={title} className={cn('gap-1.5 font-medium', TONES[tone])}>
+      {dot && <span className="size-1.5 rounded-full bg-current" />}
+      {children}
+    </Badge>
+  )
+}
+
 export function DeployStatus({ ev }: { ev: Event | undefined }) {
-  if (!ev) return <Pill kind="dim">no deploys</Pill>
+  if (!ev) return <StatusBadge tone="muted">no deploys</StatusBadge>
   const r = ev.result || ''
   const act = ev.action.trim().split(/\s+/)[0] ?? ''
   const title = `${ev.action} → ${r}  ·  ${ev.at}  ·  ${ev.commit.slice(0, 12)}`
-  if (r.startsWith('FAILED')) return <Pill kind="err" title={title}>failed</Pill>
-  if (act === 'gc') return <Pill kind="dim" title={title}>removed</Pill>
-  if (r.startsWith('deployed')) return <Pill kind="ok" dot title={title}>deployed</Pill>
-  if (r === 'in sync') return <Pill kind="ok" dot title={title}>healthy</Pill>
-  return <Pill kind="dim" title={title}>{(r || act).slice(0, 20)}</Pill>
+  if (r.startsWith('FAILED')) return <StatusBadge tone="danger" title={title}>failed</StatusBadge>
+  if (act === 'gc') return <StatusBadge tone="muted" title={title}>removed</StatusBadge>
+  if (r.startsWith('deployed')) return <StatusBadge tone="success" dot title={title}>deployed</StatusBadge>
+  if (r === 'in sync') return <StatusBadge tone="success" dot title={title}>healthy</StatusBadge>
+  return <StatusBadge tone="muted" title={title}>{(r || act).slice(0, 20)}</StatusBadge>
 }
 
-// ── query-state wrapper ──────────────────────────────────────────────────────
-export function QueryState({
-  isLoading, error, children,
-}: { isLoading: boolean; error: unknown; children: ReactNode }) {
-  if (isLoading) return <div className="spin">Loading…</div>
-  if (error) return <div className="empty">Failed to load: {String((error as Error).message)}</div>
+// ── query state ──────────────────────────────────────────────────────────────
+export function QueryState({ isLoading, error, children }: {
+  isLoading: boolean; error: unknown; children: ReactNode
+}) {
+  if (isLoading) return (
+    <div className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
+      <Loader2 className="size-4 animate-spin" /> Loading…
+    </div>
+  )
+  if (error) return <div className="py-8 text-sm text-destructive">Failed to load: {String((error as Error).message)}</div>
   return <>{children}</>
+}
+
+export function Empty({ children }: { children: ReactNode }) {
+  return <div className="py-8 text-sm text-muted-foreground">{children}</div>
+}
+
+// ── confirm dialog button ────────────────────────────────────────────────────
+export function ConfirmButton({
+  title, description, confirmText = 'Confirm', onConfirm, children, ...btn
+}: React.ComponentProps<typeof Button> & {
+  title: string; description?: string; confirmText?: string; onConfirm: () => void
+}) {
+  const [open, setOpen] = useState(false)
+  return (
+    <AlertDialog open={open} onOpenChange={setOpen}>
+      <AlertDialogTrigger asChild><Button {...btn}>{children}</Button></AlertDialogTrigger>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>{title}</AlertDialogTitle>
+          {description && <AlertDialogDescription>{description}</AlertDialogDescription>}
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction onClick={onConfirm}>{confirmText}</AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  )
 }

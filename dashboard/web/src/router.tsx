@@ -5,6 +5,7 @@ import { NewApp, NewProject } from './forms'
 import { AppDetail } from './appDetail'
 import { Members } from './members'
 import { Deploys } from './deploys'
+import { Settings } from './settings'
 
 const rootRoute = createRootRoute({ component: Shell })
 
@@ -12,6 +13,7 @@ const rootRoute = createRootRoute({ component: Shell })
 const indexRoute = createRoute({ getParentRoute: () => rootRoute, path: '/', component: Projects })
 const newProjectRoute = createRoute({ getParentRoute: () => rootRoute, path: '/new-project', component: NewProject })
 const activityRoute = createRoute({ getParentRoute: () => rootRoute, path: '/activity', component: Activity })
+const settingsRoute = createRoute({ getParentRoute: () => rootRoute, path: '/settings', component: Settings })
 const nodesRoute = createRoute({ getParentRoute: () => rootRoute, path: '/nodes', component: Nodes })
 const projectRoute = createRoute({ getParentRoute: () => rootRoute, path: '/projects/$org', component: ProjectDetail })
 const newAppRoute = createRoute({ getParentRoute: () => rootRoute, path: '/projects/$org/new-app', component: NewApp })
@@ -20,7 +22,7 @@ const deploysRoute = createRoute({ getParentRoute: () => rootRoute, path: '/proj
 const appRoute = createRoute({ getParentRoute: () => rootRoute, path: '/projects/$org/apps/$app', component: AppDetail })
 
 const routeTree = rootRoute.addChildren([
-  indexRoute, newProjectRoute, activityRoute, nodesRoute,
+  indexRoute, newProjectRoute, activityRoute, settingsRoute, nodesRoute,
   projectRoute, newAppRoute, membersRoute, deploysRoute, appRoute,
 ])
 

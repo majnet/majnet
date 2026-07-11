@@ -2,10 +2,20 @@ import { useEffect, useState } from 'react'
 import { Link, useParams } from '@tanstack/react-router'
 import { send, urls, useApps, useEvents, useManifest, type ManifestFile } from './api'
 import { useApiMutation } from './mutations'
-import { DeployStatus, QueryState, short } from './ui'
+import { ConfirmButton, DeployStatus, QueryState, short } from './ui'
+import { Crumbs, PageHead } from './views'
 import { fromData, ManifestForm, toManifest, type ManifestDraft } from './manifestForm'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent } from '@/components/ui/card'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { Textarea } from '@/components/ui/textarea'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 
 const FILES = ['base.yaml', 'stable.yaml', 'production.yaml', 'ephemeral.yaml']
+
+function Kv({ k, children }: { k: string; children: React.ReactNode }) {
+  return <div className="flex gap-2.5 text-sm"><span className="min-w-28 text-muted-foreground">{k}</span><span className="font-mono text-xs">{children}</span></div>
+}
 
 export function AppDetail() {
   const { org, app } = useParams({ from: '/projects/$org/apps/$app' })
@@ -20,30 +30,23 @@ export function AppDetail() {
 
   return (
     <>
-      <div className="crumb">
-        <Link to="/">Projects</Link> / <Link to="/projects/$org" params={{ org }}>{org}</Link> / {app}
-      </div>
-      <div className="head">
-        <h1>{app}</h1><span className="grow" />
+      <Crumbs><Link to="/">Projects</Link> / <Link to="/projects/$org" params={{ org }}>{org}</Link> / {app}</Crumbs>
+      <PageHead title={app}>
         {a && a.classes.length > 0 && <RestartControl org={org} app={app} classes={a.classes} run={act.mutate} busy={act.isPending} />}
-        <button className="btn ghost sm" disabled={deploy.isPending} onClick={() => {
-          if (confirm(`Revert the last change on ${org}/ops?`)) deploy.mutate(() => send(urls.rollback(org)))
-        }}>Roll back</button>
-        <button className="btn primary sm" disabled={deploy.isPending} onClick={() => {
-          if (confirm(`Promote ${app} to production? An admin still merges the render PR.`)) deploy.mutate(() => send(urls.promote(org, app)))
-        }}>Promote → production</button>
-      </div>
+        <ConfirmButton variant="outline" size="sm" title={`Roll back ${app}?`} description={`Revert the last change on ${org}/ops.`}
+          confirmText="Roll back" onConfirm={() => deploy.mutate(() => send(urls.rollback(org)))}>Roll back</ConfirmButton>
+        <ConfirmButton size="sm" title={`Promote ${app} to production?`} description="An admin still merges the render PR in Deployments."
+          confirmText="Promote" onConfirm={() => deploy.mutate(() => send(urls.promote(org, app)))}>Promote → production</ConfirmButton>
+      </PageHead>
 
       {a && (
-        <div className="panel"><div className="panel-b" style={{ gap: 10 }}>
-          <div className="kv"><span className="k">Deploy status</span><span className="v">
-            <DeployStatus ev={appEvents[0]} /> {appEvents[0] && <span style={{ color: 'var(--muted)' }}>{appEvents[0].result} · {appEvents[0].at}</span>}
-          </span></div>
-          <div className="kv"><span className="k">Classes</span><span className="v">{a.classes.join(', ') || '—'}</span></div>
-          <div className="kv"><span className="k">Domains</span><span className="v">{a.domains.join(', ') || '—'}</span></div>
-          <div className="kv"><span className="k">Image</span><span className="v">{short(a.image)}</span></div>
-          {a.database && <div className="kv"><span className="k">Database</span><span className="v">{a.database}</span></div>}
-        </div></div>
+        <Card className="mb-4"><CardContent className="flex flex-col gap-2.5 pt-6">
+          <Kv k="Deploy status"><span className="inline-flex items-center gap-2"><DeployStatus ev={appEvents[0]} />{appEvents[0] && <span className="text-muted-foreground">{appEvents[0].result} · {appEvents[0].at}</span>}</span></Kv>
+          <Kv k="Classes">{a.classes.join(', ') || '—'}</Kv>
+          <Kv k="Domains">{a.domains.join(', ') || '—'}</Kv>
+          <Kv k="Image">{short(a.image)}</Kv>
+          {a.database && <Kv k="Database">{a.database}</Kv>}
+        </CardContent></Card>
       )}
 
       <QueryState isLoading={manifest.isLoading} error={manifest.error}>
@@ -51,19 +54,18 @@ export function AppDetail() {
       </QueryState>
 
       {appEvents.length > 0 && (
-        <div className="panel">
-          <div className="panel-h"><h2>Recent deploys</h2></div>
-          <div className="panel-b" style={{ padding: '6px 18px 14px' }}>
-            <table className="ev">
-              <thead><tr><th>time</th><th>node</th><th>action</th><th>result</th><th>commit</th></tr></thead>
-              <tbody>{appEvents.slice(0, 8).map((e, i) => (
-                <tr key={i}><td>{e.at}</td><td>{e.node}</td><td>{e.action}</td>
-                  <td style={{ color: e.result.startsWith('FAILED') ? 'var(--bad)' : 'inherit' }}>{e.result}</td>
-                  <td>{e.commit.slice(0, 12)}</td></tr>
-              ))}</tbody>
-            </table>
-          </div>
-        </div>
+        <Card className="mt-4"><CardContent className="pt-6">
+          <h2 className="mb-2 text-sm font-semibold">Recent deploys</h2>
+          <Table>
+            <TableHeader><TableRow><TableHead>time</TableHead><TableHead>node</TableHead><TableHead>action</TableHead><TableHead>result</TableHead><TableHead>commit</TableHead></TableRow></TableHeader>
+            <TableBody className="font-mono text-xs">
+              {appEvents.slice(0, 8).map((e, i) => (
+                <TableRow key={i}><TableCell>{e.at}</TableCell><TableCell>{e.node}</TableCell><TableCell>{e.action}</TableCell>
+                  <TableCell className={e.result.startsWith('FAILED') ? 'text-destructive' : ''}>{e.result}</TableCell><TableCell>{e.commit.slice(0, 12)}</TableCell></TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </CardContent></Card>
       )}
     </>
   )
@@ -74,12 +76,13 @@ function RestartControl({ org, app, classes, run, busy }: {
 }) {
   const [cls, setCls] = useState(classes[0]!)
   return (
-    <>
-      <select style={{ width: 'auto' }} value={cls} onChange={(e) => setCls(e.target.value)}>
-        {classes.map((c) => <option key={c}>{c}</option>)}
-      </select>
-      <button className="btn ghost sm" disabled={busy} onClick={() => run(() => send(urls.restart(org, cls, app)))}>Restart</button>
-    </>
+    <div className="flex items-center gap-2">
+      <Select value={cls} onValueChange={setCls}>
+        <SelectTrigger size="sm" className="w-auto"><SelectValue /></SelectTrigger>
+        <SelectContent>{classes.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent>
+      </Select>
+      <Button variant="outline" size="sm" disabled={busy} onClick={() => run(() => send(urls.restart(org, cls, app)))}>Restart</Button>
+    </div>
   )
 }
 
@@ -90,7 +93,6 @@ function ManifestEditor({ org, app, files }: { org: string; app: string; files: 
   const [draft, setDraft] = useState<ManifestDraft>(() => fromData(files[file]?.data))
   const [yaml, setYaml] = useState(() => files[file]?.yaml ?? '')
 
-  // Reset both editors when the file changes or the manifest refetches (post-save).
   useEffect(() => {
     setDraft(fromData(files[file]?.data))
     setYaml(files[file]?.yaml ?? '')
@@ -103,30 +105,29 @@ function ManifestEditor({ org, app, files }: { org: string; app: string; files: 
   }
 
   return (
-    <div className="panel">
-      <div className="panel-h">
-        <div className="tabs" style={{ border: 0, padding: 0 }}>
-          {FILES.map((f) => (
-            <button key={f} className={`tab ${f === file ? 'on' : ''}`} onClick={() => setFile(f)}>
-              {f}{!files[f] && <span style={{ color: 'var(--faint)' }}> (new)</span>}
-            </button>
-          ))}
-        </div>
-        <span className="grow" />
-        <div className="actions">
-          <button className={`btn ghost sm ${mode === 'form' ? 'primary' : ''}`} onClick={() => setMode('form')}>Form</button>
-          <button className={`btn ghost sm ${mode === 'yaml' ? 'primary' : ''}`} onClick={() => setMode('yaml')}>YAML</button>
+    <Card>
+      <div className="flex flex-wrap items-center gap-1 border-b px-3 py-2">
+        {FILES.map((f) => (
+          <button key={f} onClick={() => setFile(f)}
+            className={`rounded-md px-2.5 py-1.5 text-sm font-medium ${f === file ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:text-foreground'}`}>
+            {f}{!files[f] && <span className="text-muted-foreground/60"> (new)</span>}
+          </button>
+        ))}
+        <div className="flex-1" />
+        <div className="flex gap-1 rounded-md bg-muted p-0.5">
+          <button onClick={() => setMode('form')} className={`rounded px-2.5 py-1 text-xs font-medium ${mode === 'form' ? 'bg-background shadow-sm' : 'text-muted-foreground'}`}>Form</button>
+          <button onClick={() => setMode('yaml')} className={`rounded px-2.5 py-1 text-xs font-medium ${mode === 'yaml' ? 'bg-background shadow-sm' : 'text-muted-foreground'}`}>YAML</button>
         </div>
       </div>
-      <div className="panel-b">
+      <CardContent className="flex flex-col gap-3.5 pt-5">
         {mode === 'form'
           ? <ManifestForm file={file} draft={draft} onChange={setDraft} />
-          : <textarea spellCheck={false} value={yaml} onChange={(e) => setYaml(e.target.value)} />}
-        <div className="actions" style={{ marginTop: 14 }}>
-          <button className="btn primary sm" disabled={save.isPending} onClick={onSave}>Save &amp; commit</button>
-          <span className="h">Validated + committed to ops main; a render PR follows. production.yaml requires admin. Switching Form/YAML reloads the last saved state.</span>
+          : <Textarea spellCheck={false} value={yaml} onChange={(e) => setYaml(e.target.value)} className="min-h-64 font-mono text-xs" />}
+        <div className="flex items-center gap-3">
+          <Button size="sm" disabled={save.isPending} onClick={onSave}>Save &amp; commit</Button>
+          <span className="text-xs text-muted-foreground">Validated + committed to ops main; a render PR follows. production.yaml requires admin.</span>
         </div>
-      </div>
-    </div>
+      </CardContent>
+    </Card>
   )
 }

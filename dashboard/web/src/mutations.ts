@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { useToast } from './ui'
+import { toast } from 'sonner'
 
 /**
  * A write action against the bot/recon APIs. `mutate(() => send(...))` runs the
@@ -7,15 +7,14 @@ import { useToast } from './ui'
  * query keys, and optionally runs `onDone` (e.g. navigate).
  */
 export function useApiMutation(opts: { invalidate?: readonly unknown[][]; onDone?: () => void } = {}) {
-  const toast = useToast()
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (fn: () => Promise<string>) => fn(),
     onSuccess: (msg) => {
-      toast(msg)
+      toast.success(msg)
       opts.invalidate?.forEach((queryKey) => qc.invalidateQueries({ queryKey }))
       opts.onDone?.()
     },
-    onError: (e: Error) => toast(e.message, true),
+    onError: (e: Error) => toast.error(e.message),
   })
 }

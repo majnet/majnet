@@ -54,6 +54,25 @@ export async function send(
   return text
 }
 
+async function getText(url: string): Promise<string> {
+  const r = await fetch(url)
+  const text = await r.text()
+  if (!r.ok) throw new Error(text || `${r.status} ${r.statusText}`)
+  return text.trim()
+}
+
+/** Form-encoded POST (the setup service's enroll handler expects a form). */
+export async function sendForm(url: string, fields: Record<string, string>): Promise<string> {
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(fields).toString(),
+  })
+  const text = await r.text()
+  if (!r.ok) throw new Error(text || `${r.status} ${r.statusText}`)
+  return text
+}
+
 // ── query keys + endpoint URLs ───────────────────────────────────────────────
 export const urls = {
   whoami: `${BOT}/whoami`,
@@ -68,6 +87,8 @@ export const urls = {
   manifestFile: (org: string, app: string, file: string) =>
     `${BOT}/manifest/${encodeURIComponent(org)}/${encodeURIComponent(app)}/${file}`,
   members: (org: string) => `${BOT}/members/${encodeURIComponent(org)}`,
+  version: `${BOT}/platform/version`,
+  setupEnroll: '/api/setup/enroll',
   promote: (org: string, app: string) => `${BOT}/promote/${encodeURIComponent(org)}/${encodeURIComponent(app)}`,
   rollback: (org: string) => `${BOT}/rollback/${encodeURIComponent(org)}`,
   restart: (org: string, cls: string, app: string) =>
@@ -90,3 +111,5 @@ export const useManifest = (org: string, app: string) =>
   useQuery({ queryKey: ['manifest', org, app], queryFn: () => getJSON<Record<string, ManifestFile>>(urls.manifest(org, app)) })
 export const useMembers = (org: string) =>
   useQuery({ queryKey: ['members', org], queryFn: () => getJSON<Member[]>(urls.members(org)) })
+export const useVersion = () =>
+  useQuery({ queryKey: ['version'], queryFn: () => getText(urls.version) })
