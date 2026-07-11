@@ -21,6 +21,19 @@ fn bad_gateway(e: impl std::fmt::Display) -> ApiError {
     (StatusCode::BAD_GATEWAY, format!("{e}"))
 }
 
+/// Surface the actual GitHub status + message (octocrab's `Display` collapses a
+/// GitHub API error to a terse "GitHub", which hid a 405 "merge commits are not
+/// allowed" behind a bare 502).
+fn gh_err(e: octocrab::Error) -> ApiError {
+    let msg = match &e {
+        octocrab::Error::GitHub { source, .. } => {
+            format!("GitHub {}: {}", source.status_code, source.message)
+        }
+        other => format!("{other}"),
+    };
+    (StatusCode::BAD_GATEWAY, msg)
+}
+
 #[derive(Serialize)]
 pub struct DeployPr {
     pub number: u64,
@@ -52,7 +65,7 @@ pub async fn list(
     let prs: serde_json::Value = client
         .get(format!("{repo}/pulls?state=open"), None::<&()>)
         .await
-        .map_err(bad_gateway)?;
+        .map_err(gh_err)?;
 
     let mut out = Vec::new();
     for pr in prs.as_array().into_iter().flatten() {
@@ -65,7 +78,7 @@ pub async fn list(
         let files: serde_json::Value = client
             .get(format!("{repo}/pulls/{number}/files"), None::<&()>)
             .await
-            .map_err(bad_gateway)?;
+            .map_err(gh_err)?;
         let files = files
             .as_array()
             .into_iter()
@@ -105,7 +118,7 @@ pub async fn merge(
             Some(&json!({ "merge_method": "merge" })),
         )
         .await
-        .map_err(bad_gateway)?;
+        .map_err(gh_err)?;
     state
         .store
         .log_event(
@@ -135,7 +148,7 @@ pub async fn close(
             Some(&json!({ "state": "closed" })),
         )
         .await
-        .map_err(bad_gateway)?;
+        .map_err(gh_err)?;
     state
         .store
         .log_event(
@@ -159,7 +172,7 @@ async fn resolve_render_pr(
     let pr: serde_json::Value = client
         .get(format!("{repo}/pulls/{number}"), None::<&()>)
         .await
-        .map_err(bad_gateway)?;
+        .map_err(gh_err)?;
     let base = pr["base"]["ref"].as_str().unwrap_or_default();
     let class = base.strip_prefix("env/").ok_or((
         StatusCode::BAD_REQUEST,

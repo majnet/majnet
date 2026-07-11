@@ -141,6 +141,11 @@ async fn ensure_ops_repo(state: &AppState, client: &octocrab::Octocrab, org: &st
                 "description": "MajNet project config — managed by the platform",
                 "private": true,
                 "auto_init": false,
+                // Merging a render PR is the deploy trigger (§16), and the bot
+                // merges with `merge_method: "merge"`. Orgs that default to
+                // rebase-only would 405 that merge, so ensure merge commits are
+                // allowed on the ops repo we own.
+                "allow_merge_commit": true,
             })),
         )
         .await
