@@ -1,6 +1,10 @@
 import { createRootRoute, createRoute, createRouter } from '@tanstack/react-router'
 import { Shell } from './shell'
-import { Activity, AppDetail, Deploys, Members, NewApp, NewProject, Nodes, ProjectDetail, Projects } from './views'
+import { Activity, Nodes, ProjectDetail, Projects } from './views'
+import { NewApp, NewProject } from './forms'
+import { AppDetail } from './appDetail'
+import { Members } from './members'
+import { Deploys } from './deploys'
 
 const rootRoute = createRootRoute({ component: Shell })
 

@@ -157,17 +157,3 @@ export function Activity() {
   )
 }
 
-// ── placeholders (ported next) ───────────────────────────────────────────────
-function Placeholder({ title }: { title: string }) {
-  return (
-    <>
-      <div className="head"><h1>{title}</h1></div>
-      <div className="empty">This view is being ported to React — still available in the classic dashboard.</div>
-    </>
-  )
-}
-export const NewProject = () => <Placeholder title="New project" />
-export const NewApp = () => <Placeholder title="New app" />
-export const AppDetail = () => <Placeholder title="App" />
-export const Members = () => <Placeholder title="Members" />
-export const Deploys = () => <Placeholder title="Deployments" />
