@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams } from '@tanstack/react-router'
-import { send, urls, useApps, useEvents, useManifest, type ManifestFile } from './api'
+import { send, urls, useApps, useEvents, useManifest, useReleases, type ManifestFile } from './api'
 import { useApiMutation } from './mutations'
-import { ConfirmButton, DeployStatus, QueryState, short } from './ui'
+import { ConfirmButton, DeployStatus, QueryState, short, StatusBadge } from './ui'
 import { Crumbs, PageHead } from './views'
 import { fromData, ManifestForm, toManifest, type ManifestDraft } from './manifestForm'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -24,6 +25,8 @@ export function AppDetail() {
   const manifest = useManifest(org, app)
   const events = useEvents()
   const appEvents = (events.data ?? []).filter((e) => e.action.trim().split(/\s+/).pop() === app)
+  const imageOf = (f?: ManifestFile) => (f?.data as { image?: string } | null)?.image
+  const prodImage = imageOf(manifest.data?.['production.yaml']) ?? imageOf(manifest.data?.['base.yaml'])
 
   const act = useApiMutation({ invalidate: [['events']] })
   const deploy = useApiMutation({ invalidate: [['deploys', org], ['events']] })
@@ -49,6 +52,8 @@ export function AppDetail() {
         </CardContent></Card>
       )}
 
+      <Releases org={org} app={app} prodImage={prodImage} />
+
       <QueryState isLoading={manifest.isLoading} error={manifest.error}>
         {manifest.data && <ManifestEditor org={org} app={app} files={manifest.data} />}
       </QueryState>
@@ -68,6 +73,51 @@ export function AppDetail() {
         </CardContent></Card>
       )}
     </>
+  )
+}
+
+function Releases({ org, app, prodImage }: { org: string; app: string; prodImage?: string }) {
+  const q = useReleases(org, app)
+  const m = useApiMutation({ invalidate: [['deploys', org], ['releases', org, app], ['events']] })
+  const releases = q.data ?? []
+  if (q.isLoading || q.error) return null
+
+  return (
+    <Card className="mb-4"><CardContent className="pt-6">
+      <h2 className="mb-2 text-sm font-semibold">Releases</h2>
+      {releases.length === 0 && (
+        <p className="text-sm text-muted-foreground">
+          No releases yet. Tag <code className="font-mono">vX.Y.Z</code> in the app repo (with a <code className="font-mono">majnet-release.yaml</code>) to publish one.
+        </p>
+      )}
+      <div className="flex flex-col gap-2">
+        {releases.map((r) => {
+          const onProd = !!prodImage && r.app_image === prodImage
+          return (
+            <div key={r.version} className="flex items-center gap-3 rounded-lg border px-4 py-2.5">
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2 font-medium">
+                  {r.version}
+                  {onProd && <StatusBadge tone="success" dot>on production</StatusBadge>}
+                  {r.migration_command && <Badge variant="secondary">migration</Badge>}
+                </div>
+                <div className="truncate font-mono text-xs text-muted-foreground">
+                  {short(r.app_image)} · {r.commit.slice(0, 7)} · {r.published_at}
+                </div>
+              </div>
+              {!onProd && (
+                <ConfirmButton size="sm" title={`Promote ${app} ${r.version} to production?`}
+                  description="Writes the release into production.yaml; an admin still merges the render PR."
+                  confirmText="Promote"
+                  onConfirm={() => m.mutate(() => send(urls.releasePromote(org, app, r.version)))}>
+                  Promote → production
+                </ConfirmButton>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </CardContent></Card>
   )
 }
 

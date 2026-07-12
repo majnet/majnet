@@ -98,6 +98,8 @@ export const urls = {
     `${BOT}/manifest/${encodeURIComponent(org)}/${encodeURIComponent(app)}/${file}`,
   members: (org: string) => `${BOT}/members/${encodeURIComponent(org)}`,
   releases: (org: string, app: string) => `${BOT}/releases/${encodeURIComponent(org)}/${encodeURIComponent(app)}`,
+  releasePromote: (org: string, app: string, version: string) =>
+    `${BOT}/releases/${encodeURIComponent(org)}/${encodeURIComponent(app)}/promote/${encodeURIComponent(version)}`,
   version: `${BOT}/platform/version`,
   setupEnroll: '/api/setup/enroll.json',
   promote: (org: string, app: string) => `${BOT}/promote/${encodeURIComponent(org)}/${encodeURIComponent(app)}`,

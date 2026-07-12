@@ -101,6 +101,10 @@ async fn main() -> Result<()> {
         )
         .route("/api/nodes", get(dashboard_api::nodes_get))
         .route("/api/releases/{org}/{app}", get(releases::list))
+        .route(
+            "/api/releases/{org}/{app}/promote/{version}",
+            post(releases::promote),
+        )
         .route("/api/deploys/{org}", get(deploys::list))
         .route("/api/deploys/{org}/{number}/merge", post(deploys::merge))
         .route("/api/deploys/{org}/{number}/close", post(deploys::close))

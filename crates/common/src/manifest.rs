@@ -161,6 +161,9 @@ impl AppManifest {
                 !migration.command.is_empty(),
                 "migration command must not be empty"
             );
+            if let Some(image) = &migration.image {
+                validate_digest_pinned(image)?;
+            }
         }
         for secret in &self.secrets {
             ensure!(
@@ -176,7 +179,18 @@ impl AppManifest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Migration {
+    /// Migration image (digest-pinned); omitted = run `command` in the app image
+    /// (ADR 0009). SQL/tooling migrations point this at a runner image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
     pub command: Vec<String>,
+}
+
+impl Migration {
+    /// The image the migration runs in — its own if set, else the app image.
+    pub fn image<'a>(&'a self, app_image: &'a str) -> &'a str {
+        self.image.as_deref().unwrap_or(app_image)
+    }
 }
 
 #[cfg(test)]

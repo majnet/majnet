@@ -76,7 +76,8 @@ pub async fn converge_app(
             .context("delivering secrets")?;
     }
 
-    // Migrations: one-shot, must exit 0 before the rollout (§12.6).
+    // Migrations: one-shot, must exit 0 before the rollout (§12.6). Runs in its
+    // own image when the manifest gives one (ADR 0009), else the app image.
     if let Some(migration) = &manifest.migration {
         run_migration(
             ctx,
@@ -84,6 +85,7 @@ pub async fn converge_app(
             secrets.is_some(),
             &secrets_dir,
             extra_env,
+            migration.image(&manifest.image),
             &migration.command,
         )
         .await?;
@@ -348,6 +350,7 @@ async fn run_migration(
     with_secrets: bool,
     secrets_dir: &str,
     extra_env: &[(String, String)],
+    image: &str,
     command: &[String],
 ) -> Result<()> {
     let name = format!(
@@ -358,8 +361,13 @@ async fn run_migration(
     );
     remove_container_if_exists(ctx.docker, &name).await?;
 
+    // The app image was already pulled; a distinct migration image needs its own.
+    if image != manifest.image {
+        pull_image(ctx.docker, image).await?;
+    }
+
     let body = ContainerCreateBody {
-        image: Some(manifest.image.clone()),
+        image: Some(image.to_string()),
         cmd: Some(command.to_vec()),
         env: Some(env_list(manifest, extra_env)),
         labels: Some(HashMap::from([(

@@ -1,17 +1,21 @@
 //! Releases (ADR 0009): the bot watches app repos' GitHub Releases, reads the
-//! `majnet-release.yaml` descriptor at the tag, and records it. This is the
-//! DEV-side of delivery; promotion into `ops` (stable/production) is phase 3.
+//! `majnet-release.yaml` descriptor at the tag, records it, and promotes a
+//! chosen release into `ops` production (stable auto-tracks the latest tag).
 
 use anyhow::{Context, Result};
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use base64::Engine;
+use majnet_common::manifest::Migration;
+use majnet_common::project::Role;
 use majnet_common::release::Release;
 use std::sync::Arc;
 
 use crate::state::StoredRelease;
 use crate::AppState;
+
+type ApiError = (StatusCode, String);
 
 const DESCRIPTOR: &str = "majnet-release.yaml";
 
@@ -69,6 +73,84 @@ pub async fn list(
         .releases(&org, &app)
         .map(Json)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+#[derive(serde::Serialize)]
+struct ProdOverlay {
+    image: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    migration: Option<Migration>,
+}
+
+/// `POST /api/releases/{org}/{app}/promote/{version}` — pin production to a
+/// chosen release (ADR 0009): write its app + migration digests into
+/// `apps/{app}/production.yaml` on ops main. Admin-gated; the `env/production`
+/// render PR (the §9 gate) follows. Stable auto-tracks the latest tag, so
+/// promotion targets production only.
+pub async fn promote(
+    State(state): State<Arc<AppState>>,
+    Path((org, app, version)): Path<(String, String, String)>,
+    headers: HeaderMap,
+) -> Result<String, ApiError> {
+    let actor = crate::authz::require(&state, &headers, &org, Role::Admin)
+        .await
+        .map_err(|e| (StatusCode::FORBIDDEN, format!("{e:#}")))?;
+
+    let rel = state
+        .store
+        .releases(&org, &app)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .into_iter()
+        .find(|r| r.version == version)
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            format!("release {version} not found for {app}"),
+        ))?;
+
+    // Overlay pins the app image; migration (if any) carries its own image, or
+    // omits it to run in the app image (Migration defaults on the reconciler).
+    let migration = rel.migration_command.clone().map(|command| Migration {
+        image: rel.migration_image.clone(),
+        command,
+    });
+    let overlay = format!(
+        "# production overlay for {app} — release {version} (ADR 0009)\n{}",
+        serde_yaml::to_string(&ProdOverlay {
+            image: rel.app_image.clone(),
+            migration,
+        })
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    );
+
+    // Validate base ⊕ this overlay before committing.
+    let mut files = crate::dashboard_api::app_files(&state, &org, &app)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
+    files.insert("production.yaml".to_string(), overlay.clone());
+    crate::dashboard_api::validate_app_files(&app, &files)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("{e:#}")))?;
+
+    crate::dashboard_api::commit_file(
+        &state,
+        &org,
+        &format!("apps/{app}/production.yaml"),
+        &overlay,
+        &format!("promote({app}): release {version} to production by {actor}"),
+    )
+    .await
+    .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
+
+    state
+        .store
+        .log_event(
+            "promote-release",
+            Some(&org),
+            &format!("{app} {version} by {actor}"),
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(format!(
+        "{app} {version} promoted; review the env/production render PR to deploy"
+    ))
 }
 
 /// Read a repo file at a specific ref (tag/branch/sha) via the Contents API.

@@ -208,7 +208,11 @@ fn check_name(app: &str) -> Result<(), ApiError> {
 }
 
 /// The app's manifest files from the ops `main` snapshot.
-async fn app_files(state: &AppState, org: &str, app: &str) -> Result<BTreeMap<String, String>> {
+pub(crate) async fn app_files(
+    state: &AppState,
+    org: &str,
+    app: &str,
+) -> Result<BTreeMap<String, String>> {
     let (_, tar) = crate::proxy::fetch_snapshot(state, org, "ops", "main").await?;
     let sources = majnet_common::tarball::untar(&tar)?;
     let prefix = format!("apps/{app}/");
@@ -225,7 +229,7 @@ async fn app_files(state: &AppState, org: &str, app: &str) -> Result<BTreeMap<St
 
 /// Validate the app's files as the render pipeline would see them after the
 /// change: every present overlay must merge with base into a valid manifest.
-fn validate_app_files(app: &str, files: &BTreeMap<String, String>) -> Result<()> {
+pub(crate) fn validate_app_files(app: &str, files: &BTreeMap<String, String>) -> Result<()> {
     let base_str = files
         .get("base.yaml")
         .context("the app has no base.yaml — create it first")?;
@@ -258,7 +262,7 @@ fn validate_app_files(app: &str, files: &BTreeMap<String, String>) -> Result<()>
 }
 
 /// Create-or-update one file on ops `main`.
-async fn commit_file(
+pub(crate) async fn commit_file(
     state: &AppState,
     org: &str,
     path: &str,
