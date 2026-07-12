@@ -100,10 +100,11 @@ deploy and a cutover runbook (DNS handoff, maintenance window).
 
 ## Phasing
 
-1. **Repo + CI import** — "Import existing" copies the old repo + injects CI;
+1. ✅ **Repo + CI import** — "Import existing" copies the old repo + injects CI;
    manifest + `project.yaml` from the existing `apps_post`. (bot)
-2. **Secrets import** — env → `sops`-encrypted `secrets.<class>.yaml`; needs a
-   bot-side encrypt helper + the public recipients from `.sops.yaml`. (bot)
+2. ✅ **Secrets import** — env (dotenv) → `sops --encrypt` (recipients from ops
+   `.sops.yaml`) → `secrets.<class>.yaml` for the target class, declared in that
+   class overlay. Delivered as tmpfs files, never env vars (§14). (bot)
 3. **Data restore** — reconciler one-shot DB/volume restore over WG. (reconciler)
 4. **Export helper + runbook** — `majnet-export` for the specific source PaaS;
    the cutover checklist.

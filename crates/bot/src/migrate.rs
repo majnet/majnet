@@ -28,6 +28,10 @@ pub struct ImportSource {
     /// Optional read token for a private source (a GitHub PAT). In memory only.
     #[serde(default)]
     pub token: Option<String>,
+    /// The old app's environment variables (dotenv `KEY=VALUE` lines) to import
+    /// as SOPS-encrypted secrets (ADR 0010 phase 2). In memory only.
+    #[serde(default)]
+    pub env: Option<String>,
 }
 
 const IMPORT_POLL: Duration = Duration::from_secs(5);
@@ -61,6 +65,11 @@ pub async fn import_app(
     // the template (org-sync skips existing repos).
     crate::dashboard_api::scaffold_and_declare(state, org, req, actor).await?;
 
+    // Phase 2: import env vars as SOPS-encrypted secrets for the target class.
+    if let Some(env_text) = source.env.as_deref().filter(|s| !s.trim().is_empty()) {
+        import_secrets(state, org, req, env_text).await?;
+    }
+
     state.store.log_event(
         "app-import-done",
         Some(org),
@@ -68,6 +77,195 @@ pub async fn import_app(
     )?;
     tracing::info!(org, app, "app import complete");
     Ok(())
+}
+
+/// Encrypt the old app's env vars into `secrets.<class>.yaml` for the target
+/// class and declare the keys in that class overlay (ADR 0010 phase 2). Secrets
+/// are delivered as tmpfs files, never env vars (§14) — a migrated app reads
+/// them from its secrets dir. Encryption uses the ops `.sops.yaml` recipients,
+/// exactly as an operator running `sops apps/<app>/secrets.<class>.yaml` would.
+async fn import_secrets(
+    state: &AppState,
+    org: &str,
+    req: &NewApp,
+    env_text: &str,
+) -> Result<()> {
+    let app = req.name.as_str();
+    let class = target_class(&req.classes);
+
+    // Only keys that are valid bare secret filenames (§14) — skip + warn on the
+    // rest so a stray key can't break the render.
+    let mut secrets = BTreeMap::new();
+    for (k, v) in parse_dotenv(env_text) {
+        if valid_secret_name(&k) {
+            secrets.insert(k, v);
+        } else {
+            tracing::warn!(org, app, key = k, "skipping env var — not a valid secret name");
+        }
+    }
+    if secrets.is_empty() {
+        return Ok(());
+    }
+
+    let client = state.github.org_client(org).await?;
+    let repos = client.repos(org, "ops");
+    let sops_config = crate::promote::read_file(&repos, ".sops.yaml")
+        .await?
+        .map(|(c, _)| c)
+        .context(".sops.yaml missing in ops — configure secret recipients first")?;
+    let encrypted = sops_encrypt(&sops_config, app, class, &secrets)
+        .await
+        .context("encrypting imported env")?;
+
+    // Commit the encrypted file first, then declare the keys in the overlay, so
+    // a render triggered in between never sees a declaration without its file.
+    crate::dashboard_api::commit_file(
+        state,
+        org,
+        &format!("apps/{app}/secrets.{class}.yaml"),
+        &encrypted,
+        &format!("migrate({app}): import {} secrets into {class}", secrets.len()),
+    )
+    .await?;
+    declare_secrets_in_overlay(state, org, app, class, secrets.keys()).await?;
+
+    state.store.log_event(
+        "app-import-secrets",
+        Some(org),
+        &format!("{app}: {} secrets → {class}", secrets.len()),
+    )?;
+    tracing::info!(org, app, class, count = secrets.len(), "imported secrets");
+    Ok(())
+}
+
+/// Add `secrets: [keys…]` to the class overlay (merged with any existing, then
+/// sorted and deduped). Declaring in the overlay — not `base.yaml` — keeps other
+/// classes from being forced to carry a secrets file.
+async fn declare_secrets_in_overlay<'a>(
+    state: &AppState,
+    org: &str,
+    app: &str,
+    class: &str,
+    keys: impl Iterator<Item = &'a String>,
+) -> Result<()> {
+    let path = format!("apps/{app}/{class}.yaml");
+    let client = state.github.org_client(org).await?;
+    let repos = client.repos(org, "ops");
+    let current = crate::promote::read_file(&repos, &path)
+        .await?
+        .map(|(c, _)| c)
+        .unwrap_or_else(|| "{}\n".to_string());
+
+    let mut overlay: serde_yaml::Value =
+        serde_yaml::from_str(&current).context("parsing class overlay")?;
+    if !overlay.is_mapping() {
+        overlay = serde_yaml::Value::Mapping(Default::default());
+    }
+    let map = overlay.as_mapping_mut().unwrap();
+    let mut names: std::collections::BTreeSet<String> = map
+        .get("secrets")
+        .and_then(|s| s.as_sequence())
+        .map(|seq| seq.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    names.extend(keys.cloned());
+    let seq: Vec<serde_yaml::Value> = names.into_iter().map(serde_yaml::Value::from).collect();
+    map.insert("secrets".into(), serde_yaml::Value::Sequence(seq));
+
+    let yaml = serde_yaml::to_string(&overlay)?;
+    crate::dashboard_api::commit_file(
+        state,
+        org,
+        &path,
+        &yaml,
+        &format!("migrate({app}): declare {class} secrets"),
+    )
+    .await
+}
+
+/// SOPS-encrypt a flat secret map into a `secrets.<class>.yaml` document. Runs
+/// `sops --encrypt` in a temp dir holding the ops `.sops.yaml`, with the file at
+/// its real repo-relative path so `.sops.yaml` `path_regex` rules match.
+async fn sops_encrypt(
+    sops_config: &str,
+    app: &str,
+    class: &str,
+    secrets: &BTreeMap<String, String>,
+) -> Result<String> {
+    let plaintext = serde_yaml::to_string(secrets)?;
+    let root = std::env::temp_dir().join(format!(
+        "majnet-migrate-{app}-{class}-{}",
+        std::process::id()
+    ));
+    let rel = format!("apps/{app}/secrets.{class}.yaml");
+    let file = root.join(&rel);
+    tokio::fs::create_dir_all(file.parent().unwrap()).await?;
+    tokio::fs::write(root.join(".sops.yaml"), sops_config).await?;
+    tokio::fs::write(&file, plaintext).await?;
+
+    let output = tokio::process::Command::new("sops")
+        .arg("--encrypt")
+        .arg("--in-place")
+        .arg(&rel)
+        .current_dir(&root)
+        .output()
+        .await
+        .context("spawning sops (is it installed?)");
+
+    let result = match output {
+        Ok(out) if out.status.success() => Ok(tokio::fs::read_to_string(&file).await?),
+        Ok(out) => bail!(
+            "sops encrypt failed (is .sops.yaml configured with recipients for {class}?): {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+        Err(e) => Err(e),
+    };
+    let _ = tokio::fs::remove_dir_all(&root).await;
+    result
+}
+
+/// Migration target class: the running app is production, so prefer it, then the
+/// most-stable selected class.
+fn target_class(classes: &[String]) -> &str {
+    for pref in ["production", "stable", "testing", "ephemeral"] {
+        if classes.iter().any(|c| c == pref) {
+            return pref;
+        }
+    }
+    classes.first().map(String::as_str).unwrap_or("production")
+}
+
+/// Parse dotenv `KEY=VALUE` text: skips blanks/comments, strips a leading
+/// `export`, and unwraps matching surrounding quotes.
+fn parse_dotenv(text: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let k = k.trim();
+        if k.is_empty() {
+            continue;
+        }
+        let mut v = v.trim();
+        if v.len() >= 2
+            && ((v.starts_with('"') && v.ends_with('"'))
+                || (v.starts_with('\'') && v.ends_with('\'')))
+        {
+            v = &v[1..v.len() - 1];
+        }
+        out.insert(k.to_string(), v.to_string());
+    }
+    out
+}
+
+/// A valid bare secret file name (§14): non-empty, no path separators.
+fn valid_secret_name(name: &str) -> bool {
+    !name.is_empty() && !name.contains('/') && !name.contains("..")
 }
 
 /// The empty destination repo the source-import writes into.
@@ -236,5 +434,43 @@ mod tests {
     fn missing_template_workflows_errors() {
         let platform = BTreeMap::new();
         assert!(ci_workflow_files(&platform, "web-app", "o", "a").is_err());
+    }
+
+    #[test]
+    fn dotenv_parsing_handles_comments_export_and_quotes() {
+        let env = super::parse_dotenv(
+            "# comment\n\
+             export FOO=bar\n\
+             BAZ=\"quoted value\"\n\
+             QUX='single'\n\
+             EMPTY=\n\
+             \n\
+             =novalue\n\
+             URL=postgres://u:p@h/db\n",
+        );
+        assert_eq!(env.get("FOO").unwrap(), "bar");
+        assert_eq!(env.get("BAZ").unwrap(), "quoted value");
+        assert_eq!(env.get("QUX").unwrap(), "single");
+        assert_eq!(env.get("EMPTY").unwrap(), "");
+        assert_eq!(env.get("URL").unwrap(), "postgres://u:p@h/db");
+        assert!(!env.contains_key("")); // the `=novalue` line is dropped
+        assert_eq!(env.len(), 5);
+    }
+
+    #[test]
+    fn target_class_prefers_production_then_stability() {
+        let c = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(super::target_class(&c(&["testing", "production"])), "production");
+        assert_eq!(super::target_class(&c(&["ephemeral", "stable"])), "stable");
+        assert_eq!(super::target_class(&c(&["testing"])), "testing");
+        assert_eq!(super::target_class(&[]), "production");
+    }
+
+    #[test]
+    fn secret_names_reject_paths() {
+        assert!(super::valid_secret_name("DATABASE_URL"));
+        assert!(!super::valid_secret_name("../etc/passwd"));
+        assert!(!super::valid_secret_name("a/b"));
+        assert!(!super::valid_secret_name(""));
     }
 }

@@ -74,6 +74,7 @@ export function NewApp() {
   const [importing, setImporting] = useState(false)
   const [importRepo, setImportRepo] = useState('')
   const [importToken, setImportToken] = useState('')
+  const [importEnv, setImportEnv] = useState('')
   const m = useApiMutation({ invalidate: [['apps', org]], onDone: () => nav({ to: '/projects/$org', params: { org } }) })
   const toggle = (c: string) => setClasses((cs) => (cs.includes(c) ? cs.filter((x) => x !== c) : [...cs, c]))
 
@@ -131,6 +132,11 @@ export function NewApp() {
               <Field label="Read token — optional" hint="A GitHub PAT if the source repo is private. Held in memory for the import; never stored.">
                 <Input type="password" value={importToken} onChange={(e) => setImportToken(e.target.value)} placeholder="ghp_…" />
               </Field>
+              <div className="sm:col-span-2">
+                <Field label="Environment variables — optional (KEY=VALUE, one per line)" hint={`Encrypted (SOPS) into secrets.${classes.includes('production') ? 'production' : (classes[0] ?? 'production')}.yaml and delivered as tmpfs files. Never committed in plaintext.`}>
+                  <Textarea value={importEnv} onChange={(e) => setImportEnv(e.target.value)} className="min-h-24 font-mono text-xs" placeholder={'DATABASE_URL=postgres://…\nSECRET_KEY=…'} />
+                </Field>
+              </div>
             </div>
           )}
         </div>
@@ -144,7 +150,7 @@ export function NewApp() {
                 name: name.trim(), image: image.trim(), host: host.trim(), port: Number(port),
                 domains: domains.split('\n').map((s) => s.trim()).filter(Boolean),
                 classes, database: database === 'none' ? null : database, template,
-                ...(importing ? { import: { repo: importRepo.trim(), token: importToken.trim() || null } } : {}),
+                ...(importing ? { import: { repo: importRepo.trim(), token: importToken.trim() || null, env: importEnv.trim() || null } } : {}),
               },
             }))
           }}>{importing ? 'Import app' : 'Create app'}</Button>
