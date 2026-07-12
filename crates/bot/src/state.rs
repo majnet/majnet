@@ -1,10 +1,16 @@
 //! Persistent state — SQLite. Deliberately minimal: the bot carries no state
 //! git doesn't, except webhook delivery dedup and an audit log of actions.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::path::Path;
 use std::sync::Mutex;
+
+/// Versioned schema migrations (ADR 0011), embedded from `crates/bot/migrations`
+/// at compile time and run on startup by refinery.
+mod embedded {
+    refinery::embed_migrations!("migrations");
+}
 
 pub struct Store {
     conn: Mutex<Connection>,
@@ -40,46 +46,10 @@ pub struct ImportStatus {
 impl Store {
     pub fn open(dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(dir)?;
-        let conn = Connection::open(dir.join("bot.sqlite"))?;
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS deliveries (
-                 id TEXT PRIMARY KEY,
-                 received_at TEXT NOT NULL DEFAULT (datetime('now'))
-             );
-             CREATE TABLE IF NOT EXISTS events (
-                 seq INTEGER PRIMARY KEY AUTOINCREMENT,
-                 at TEXT NOT NULL DEFAULT (datetime('now')),
-                 kind TEXT NOT NULL,
-                 org TEXT,
-                 detail TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS releases (
-                 org TEXT NOT NULL,
-                 app TEXT NOT NULL,
-                 version TEXT NOT NULL,
-                 commit_sha TEXT NOT NULL,
-                 app_image TEXT NOT NULL,
-                 published_at TEXT NOT NULL DEFAULT (datetime('now')),
-                 PRIMARY KEY (org, app, version)
-             );
-             CREATE TABLE IF NOT EXISTS imports (
-                 org TEXT NOT NULL,
-                 app TEXT NOT NULL,
-                 status TEXT NOT NULL,
-                 step TEXT NOT NULL,
-                 detail TEXT NOT NULL DEFAULT '',
-                 request TEXT NOT NULL DEFAULT '{}',
-                 updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-                 PRIMARY KEY (org, app)
-             );",
-        )?;
-        // Poor-man's migration: `request` was added to `imports` after its first
-        // release, and CREATE TABLE IF NOT EXISTS won't add it to a pre-existing
-        // table. ALTER errors (and is ignored) where the column already exists.
-        let _ = conn.execute(
-            "ALTER TABLE imports ADD COLUMN request TEXT NOT NULL DEFAULT '{}'",
-            [],
-        );
+        let mut conn = Connection::open(dir.join("bot.sqlite"))?;
+        embedded::migrations::runner()
+            .run(&mut conn)
+            .context("running bot schema migrations")?;
         Ok(Self {
             conn: Mutex::new(conn),
         })

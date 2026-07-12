@@ -2,10 +2,16 @@
 //! The reconciler carries no state git doesn't; this is an audit trail, not
 //! a source of truth.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::path::Path;
 use std::sync::Mutex;
+
+/// Versioned schema migrations (ADR 0011), embedded from
+/// `crates/reconciler/migrations` at compile time and run on startup.
+mod embedded {
+    refinery::embed_migrations!("migrations");
+}
 
 pub struct Store {
     conn: Mutex<Connection>,
@@ -24,37 +30,10 @@ pub struct Event {
 impl Store {
     pub fn open(dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(dir)?;
-        let conn = Connection::open(dir.join("reconciler.sqlite"))?;
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS events (
-                 seq INTEGER PRIMARY KEY AUTOINCREMENT,
-                 at TEXT NOT NULL DEFAULT (datetime('now')),
-                 commit_sha TEXT NOT NULL,
-                 project TEXT NOT NULL,
-                 node TEXT NOT NULL,
-                 action TEXT NOT NULL,
-                 result TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS ephemeral_stacks (
-                 project TEXT NOT NULL,
-                 app TEXT NOT NULL,
-                 first_deployed TEXT NOT NULL DEFAULT (datetime('now')),
-                 missing_since TEXT,
-                 PRIMARY KEY (project, app)
-             );
-             CREATE TABLE IF NOT EXISTS data_migrations (
-                 project TEXT NOT NULL,
-                 app TEXT NOT NULL,
-                 class TEXT NOT NULL,
-                 done_at TEXT NOT NULL DEFAULT (datetime('now')),
-                 PRIMARY KEY (project, app, class)
-             );",
-        )?;
-        // Phase-5 dashboard: TTL extension. Idempotent poor-man's migration.
-        let _ = conn.execute(
-            "ALTER TABLE ephemeral_stacks ADD COLUMN extended_until TEXT",
-            [],
-        );
+        let mut conn = Connection::open(dir.join("reconciler.sqlite"))?;
+        embedded::migrations::runner()
+            .run(&mut conn)
+            .context("running reconciler schema migrations")?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
