@@ -299,7 +299,7 @@ pub(crate) async fn protect_app_main(
     org: &str,
     app: &str,
 ) -> Result<()> {
-    let _: serde_json::Value = client
+    match client
         .put(
             format!("/repos/{org}/{app}/branches/main/protection"),
             Some(&json!({
@@ -312,7 +312,21 @@ pub(crate) async fn protect_app_main(
             })),
         )
         .await
-        .with_context(|| format!("protecting {app}@main"))?;
+    {
+        Ok::<serde_json::Value, _>(_) => {}
+        // Branch protection on a private repo needs a paid plan (Free 403s).
+        // Don't fail — warn that `main` isn't branch-protected (same policy as
+        // env/production; the build check still runs, just isn't enforced).
+        Err(octocrab::Error::GitHub { source, .. }) if source.status_code == 403 => {
+            tracing::warn!(
+                org,
+                app,
+                "branch protection unavailable (paid GitHub plan required) — \
+                 {app}@main is NOT branch-protected"
+            );
+        }
+        Err(e) => return Err(e).with_context(|| format!("protecting {app}@main")),
+    }
     Ok(())
 }
 
