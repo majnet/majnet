@@ -10,7 +10,7 @@ use axum::Json;
 use majnet_common::manifest::AppManifest;
 use majnet_common::merge::merge;
 use majnet_common::platform::{Node, NodesFile, ProjectRegistryEntry, ProjectsFile};
-use majnet_common::project::{Member, ProjectConfig, Role};
+use majnet_common::project::{AppDecl, Member, ProjectConfig, Role};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -514,6 +514,10 @@ pub struct NewApp {
     /// `postgres` | `mariadb` | `valkey` | `mongodb` | none.
     #[serde(default)]
     pub database: Option<String>,
+    /// Starter template for the app's source repo (`repo-templates/<template>/`
+    /// in the platform repo). The app is declared in `project.yaml`, and
+    /// org-sync materializes the source repo from this template.
+    pub template: String,
 }
 
 /// `POST /api/apps/{org}` — scaffold a new app's `base.yaml` + selected class
@@ -554,6 +558,21 @@ pub async fn apps_post(
         return Err(bad_request(format!("app {} already exists", req.name)));
     }
 
+    // The source repo is scaffolded from this template by org-sync; validate it
+    // exists now so a typo is rejected here rather than failing later in a
+    // background sync.
+    if req.template.trim().is_empty() {
+        return Err(bad_request("a source-repo template is required (e.g. web-app)"));
+    }
+    let platform = read_platform(&state).await.map_err(bad_gateway)?;
+    let tprefix = format!("repo-templates/{}/", req.template);
+    if !platform.keys().any(|p| p.starts_with(&tprefix)) {
+        return Err(bad_request(format!(
+            "unknown template '{}' (no repo-templates/{}/ in the platform repo)",
+            req.template, req.template
+        )));
+    }
+
     let base = scaffold_base(&req).map_err(|e| bad_request(format!("{e:#}")))?;
     files.insert("base.yaml".to_string(), base.clone());
     for class in &req.classes {
@@ -585,6 +604,30 @@ pub async fn apps_post(
         .await
         .map_err(bad_gateway)?;
     }
+    // Declare the app in project.yaml — the canonical app list (AppDecl). This
+    // push triggers org-sync, which materializes the source repo from the
+    // template (and archives it if the app is later removed).
+    let mut project = read_project(&state, &org).await.map_err(bad_gateway)?;
+    if !project.apps.iter().any(|a| a.name == req.name) {
+        project.apps.push(AppDecl {
+            name: req.name.clone(),
+            template: req.template.clone(),
+        });
+        let yaml = serde_yaml::to_string(&project).map_err(|e| bad_gateway(e.into()))?;
+        commit_file(
+            &state,
+            &org,
+            "project.yaml",
+            &yaml,
+            &format!(
+                "project({}): declare app (template {}) via dashboard by {actor}",
+                req.name, req.template
+            ),
+        )
+        .await
+        .map_err(bad_gateway)?;
+    }
+
     state
         .store
         .log_event(
@@ -594,9 +637,10 @@ pub async fn apps_post(
         )
         .map_err(bad_gateway)?;
     Ok(format!(
-        "{} scaffolded ({}); render PRs will propagate",
+        "{} scaffolded ({}); source repo from template {} + render PRs will propagate",
         req.name,
-        req.classes.join(", ")
+        req.classes.join(", "),
+        req.template
     ))
 }
 
@@ -805,6 +849,7 @@ mod tests {
             domains: vec!["www.example.com".into()],
             classes: classes.iter().map(|s| s.to_string()).collect(),
             database: Some("postgres".into()),
+            template: "web-app".into(),
         }
     }
 

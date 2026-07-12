@@ -59,6 +59,7 @@ export function NewProject() {
 
 // ── New app ──────────────────────────────────────────────────────────────────
 const CLASSES = ['production', 'stable', 'testing', 'ephemeral'] as const
+const TEMPLATES = ['web-app', 'rust-service'] as const
 export function NewApp() {
   const { org } = useParams({ from: '/projects/$org/new-app' })
   const nav = useNavigate()
@@ -68,6 +69,7 @@ export function NewApp() {
   const [port, setPort] = useState('8080')
   const [domains, setDomains] = useState('')
   const [database, setDatabase] = useState('none')
+  const [template, setTemplate] = useState<string>('web-app')
   const [classes, setClasses] = useState<string[]>(['production'])
   const m = useApiMutation({ invalidate: [['apps', org]], onDone: () => nav({ to: '/projects/$org', params: { org } }) })
   const toggle = (c: string) => setClasses((cs) => (cs.includes(c) ? cs.filter((x) => x !== c) : [...cs, c]))
@@ -95,14 +97,24 @@ export function NewApp() {
             ))}
           </div>
         </Field>
-        <Field label="Database — optional">
-          <Select value={database} onValueChange={setDatabase}>
-            <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              {['none', 'postgres', 'mariadb', 'valkey', 'mongodb'].map((e) => <SelectItem key={e} value={e}>{e}</SelectItem>)}
-            </SelectContent>
-          </Select>
-        </Field>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Field label="Source-repo template" hint="Scaffolds the app's GitHub repo (CI wired for the delivery pipeline).">
+            <Select value={template} onValueChange={setTemplate}>
+              <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {TEMPLATES.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </Field>
+          <Field label="Database — optional">
+            <Select value={database} onValueChange={setDatabase}>
+              <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {['none', 'postgres', 'mariadb', 'valkey', 'mongodb'].map((e) => <SelectItem key={e} value={e}>{e}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </Field>
+        </div>
         <div className="flex items-center gap-3">
           <Button disabled={m.isPending} onClick={() => {
             if (!name.trim() || !image.trim()) return toast.error('name and image are required')
@@ -111,11 +123,11 @@ export function NewApp() {
               json: {
                 name: name.trim(), image: image.trim(), host: host.trim(), port: Number(port),
                 domains: domains.split('\n').map((s) => s.trim()).filter(Boolean),
-                classes, database: database === 'none' ? null : database,
+                classes, database: database === 'none' ? null : database, template,
               },
             }))
           }}>Create app</Button>
-          <span className="text-xs text-muted-foreground">Writes base.yaml + overlays to the ops repo.</span>
+          <span className="text-xs text-muted-foreground">Writes base.yaml + overlays and declares the app in project.yaml; the source repo is scaffolded on the next org sync.</span>
         </div>
       </CardContent></Card>
     </>
