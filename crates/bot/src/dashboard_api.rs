@@ -519,14 +519,26 @@ pub struct NewApp {
     #[serde(default)]
     pub database: Option<String>,
     /// Starter template for the app's source repo (`repo-templates/<template>/`
-    /// in the platform repo). The app is declared in `project.yaml`, and
-    /// org-sync materializes the source repo from this template.
+    /// in the platform repo). Ignored when `create_repo` is false. The app is
+    /// declared in `project.yaml`, and org-sync materializes the source repo
+    /// from this template.
+    #[serde(default)]
     pub template: String,
+    /// Create a MajNet source repo (from `template`, with CI) and declare the
+    /// app in `project.yaml`. When false, the app is manifests-only — it runs a
+    /// prebuilt/external image, so `image` is required and no repo/CI is made.
+    /// Defaults to true (and is implied by `import`).
+    #[serde(default = "default_true")]
+    pub create_repo: bool,
     /// Migrate an existing app instead of scaffolding fresh (ADR 0010): seed the
     /// source repo from an old GitHub repo + inject MajNet CI. `template` still
     /// selects which CI workflows to inject.
     #[serde(default)]
     pub import: Option<crate::migrate::ImportSource>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// `POST /api/apps/{org}` — scaffold a new app's `base.yaml` + selected class
@@ -576,27 +588,36 @@ pub async fn apps_post(
         }
     }
 
-    // The source repo is scaffolded from this template by org-sync; validate it
-    // exists now so a typo is rejected here rather than failing later in a
-    // background sync.
-    if req.template.trim().is_empty() {
-        return Err(bad_request("a source-repo template is required (e.g. web-app)"));
-    }
-    let platform = read_platform(&state).await.map_err(bad_gateway)?;
-    let tprefix = format!("repo-templates/{}/", req.template);
-    if !platform.keys().any(|p| p.starts_with(&tprefix)) {
-        return Err(bad_request(format!(
-            "unknown template '{}' (no repo-templates/{}/ in the platform repo)",
-            req.template, req.template
-        )));
+    // A source repo is made when scaffolding from a template or importing.
+    let wants_repo = req.create_repo || req.import.is_some();
+
+    if wants_repo {
+        // The source repo is scaffolded from this template by org-sync; validate
+        // it exists now so a typo is rejected here rather than failing later in
+        // a background sync.
+        if req.template.trim().is_empty() {
+            return Err(bad_request("a source-repo template is required (e.g. web-app)"));
+        }
+        let platform = read_platform(&state).await.map_err(bad_gateway)?;
+        let tprefix = format!("repo-templates/{}/", req.template);
+        if !platform.keys().any(|p| p.starts_with(&tprefix)) {
+            return Err(bad_request(format!(
+                "unknown template '{}' (no repo-templates/{}/ in the platform repo)",
+                req.template, req.template
+            )));
+        }
     }
 
-    // Validate base ⊕ overlays as the render pipeline would (fast-fail on bad
-    // form input) before committing anything or kicking off an import.
-    // Image is optional: default to a placeholder at the app's eventual GHCR
-    // path (replaced by CI builds / promote; production moves via promote).
+    // Image is optional only when a repo/CI (or promote) will supply one; a
+    // manifests-only app (no repo) must bring a prebuilt image.
     if req.image.trim().is_empty() {
-        req.image = format!("ghcr.io/{org}/{}@sha256:{}", req.name, "0".repeat(64));
+        if wants_repo {
+            req.image = format!("ghcr.io/{org}/{}@sha256:{}", req.name, "0".repeat(64));
+        } else {
+            return Err(bad_request(
+                "an image is required when not creating a source repo",
+            ));
+        }
     }
 
     let base = scaffold_base(&req).map_err(|e| bad_request(format!("{e:#}")))?;
@@ -630,15 +651,24 @@ pub async fn apps_post(
         ));
     }
 
-    scaffold_and_declare(&state, &org, &req, &actor)
+    scaffold_and_declare(&state, &org, &req, &actor, req.create_repo)
         .await
         .map_err(bad_gateway)?;
-    Ok(format!(
-        "{} scaffolded ({}); source repo from template {} + render PRs will propagate",
-        req.name,
-        req.classes.join(", "),
-        req.template
-    ))
+    Ok(if req.create_repo {
+        format!(
+            "{} scaffolded ({}); source repo from template {} + render PRs will propagate",
+            req.name,
+            req.classes.join(", "),
+            req.template
+        )
+    } else {
+        format!(
+            "{} scaffolded ({}) from image {}; no source repo — render PRs will propagate",
+            req.name,
+            req.classes.join(", "),
+            req.image
+        )
+    })
 }
 
 /// Declare the app in `project.yaml` (the canonical app list) **first**, then
@@ -655,25 +685,31 @@ pub(crate) async fn scaffold_and_declare(
     org: &str,
     req: &NewApp,
     actor: &str,
+    declare: bool,
 ) -> Result<()> {
-    let mut project = read_project(state, org).await?;
-    if !project.apps.iter().any(|a| a.name == req.name) {
-        project.apps.push(AppDecl {
-            name: req.name.clone(),
-            template: req.template.clone(),
-        });
-        let yaml = serde_yaml::to_string(&project)?;
-        commit_file(
-            state,
-            org,
-            "project.yaml",
-            &yaml,
-            &format!(
-                "project({}): declare app (template {}) via dashboard by {actor}",
-                req.name, req.template
-            ),
-        )
-        .await?;
+    // A manifests-only app (no source repo) isn't declared in project.yaml, so
+    // org-sync neither creates nor archives a repo for it — it just renders +
+    // deploys from the provided image (like the external-image demo apps).
+    if declare {
+        let mut project = read_project(state, org).await?;
+        if !project.apps.iter().any(|a| a.name == req.name) {
+            project.apps.push(AppDecl {
+                name: req.name.clone(),
+                template: req.template.clone(),
+            });
+            let yaml = serde_yaml::to_string(&project)?;
+            commit_file(
+                state,
+                org,
+                "project.yaml",
+                &yaml,
+                &format!(
+                    "project({}): declare app (template {}) via dashboard by {actor}",
+                    req.name, req.template
+                ),
+            )
+            .await?;
+        }
     }
     let base = scaffold_base(req)?;
     commit_file(
@@ -1007,6 +1043,7 @@ mod tests {
             classes: classes.iter().map(|s| s.to_string()).collect(),
             database: Some("postgres".into()),
             template: "web-app".into(),
+            create_repo: true,
             import: None,
         }
     }

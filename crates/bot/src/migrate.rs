@@ -86,7 +86,7 @@ pub async fn import_app(
     // The repo now exists → declaring it in project.yaml won't re-scaffold from
     // the template (org-sync skips existing repos).
     state.store.set_import(org, app, "running", "configure", &source.repo)?;
-    crate::dashboard_api::scaffold_and_declare(state, org, req, actor).await?;
+    crate::dashboard_api::scaffold_and_declare(state, org, req, actor, true).await?;
 
     // Phase 2: import env vars as SOPS-encrypted secrets for the target class.
     if let Some(env_text) = source.env.as_deref().filter(|s| !s.trim().is_empty()) {

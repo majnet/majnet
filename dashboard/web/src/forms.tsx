@@ -75,6 +75,7 @@ export function NewApp() {
   const [importRepo, setImportRepo] = useState('')
   const [importToken, setImportToken] = useState('')
   const [importEnv, setImportEnv] = useState('')
+  const [createRepo, setCreateRepo] = useState(true)
   const m = useApiMutation({ invalidate: [['apps', org]], onDone: () => nav({ to: '/projects/$org', params: { org } }) })
   const toggle = (c: string) => setClasses((cs) => (cs.includes(c) ? cs.filter((x) => x !== c) : [...cs, c]))
 
@@ -85,7 +86,7 @@ export function NewApp() {
       <Card><CardContent className="flex flex-col gap-4 pt-6">
         <div className="grid gap-3 sm:grid-cols-2">
           <Field label="App name" hint="Lowercase; its manifest directory."><Input value={name} onChange={(e) => setName(e.target.value)} placeholder="blog" /></Field>
-          <Field label="Image — optional" hint="Digest-pinned; tags rejected. Blank → a placeholder until CI builds one."><Input value={image} onChange={(e) => setImage(e.target.value)} placeholder="ghcr.io/org/app@sha256:… (optional)" /></Field>
+          <Field label={createRepo ? 'Image — optional' : 'Image — required'} hint={createRepo ? 'Digest-pinned; tags rejected. Blank → a placeholder until CI builds one.' : 'Digest-pinned; tags rejected. Required — no CI to build one.'}><Input value={image} onChange={(e) => setImage(e.target.value)} placeholder="ghcr.io/org/app@sha256:…" /></Field>
         </div>
         <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Primary domain — optional" hint="Cloudflare + cert handled automatically for production."><Input value={host} onChange={(e) => setHost(e.target.value)} placeholder="blog.majksa.cz" /></Field>
@@ -101,15 +102,24 @@ export function NewApp() {
             ))}
           </div>
         </Field>
+        <label className="flex cursor-pointer items-center gap-2 text-sm font-medium">
+          <Checkbox checked={createRepo} onCheckedChange={(v) => { setCreateRepo(!!v); if (!v) setImporting(false) }} />
+          Create a source repo (MajNet scaffolds a GitHub repo + CI)
+        </label>
+        {!createRepo && (
+          <p className="-mt-1 text-xs text-muted-foreground">Off = manifests-only: the app runs your prebuilt image — no repo, no CI, and the image is required.</p>
+        )}
         <div className="grid gap-3 sm:grid-cols-2">
-          <Field label="Source-repo template" hint={importing ? 'Selects which MajNet CI workflows to inject into the imported repo.' : "Scaffolds the app's GitHub repo (CI wired for the delivery pipeline)."}>
-            <Select value={template} onValueChange={setTemplate}>
-              <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                {TEMPLATES.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}
-              </SelectContent>
-            </Select>
-          </Field>
+          {createRepo && (
+            <Field label="Source-repo template" hint={importing ? 'Selects which MajNet CI workflows to inject into the imported repo.' : "Scaffolds the app's GitHub repo (CI wired for the delivery pipeline)."}>
+              <Select value={template} onValueChange={setTemplate}>
+                <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {TEMPLATES.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </Field>
+          )}
           <Field label="Database — optional">
             <Select value={database} onValueChange={setDatabase}>
               <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
@@ -119,6 +129,7 @@ export function NewApp() {
             </Select>
           </Field>
         </div>
+        {createRepo && (
         <div className="rounded-lg border p-3">
           <label className="flex cursor-pointer items-center gap-2 text-sm font-medium">
             <Checkbox checked={importing} onCheckedChange={(v) => setImporting(!!v)} />
@@ -140,24 +151,28 @@ export function NewApp() {
             </div>
           )}
         </div>
+        )}
         <div className="flex items-center gap-3">
           <Button disabled={m.isPending} onClick={() => {
             if (!name.trim()) return toast.error('name is required')
             if (!classes.length) return toast.error('select at least one class')
-            if (importing && !importRepo.trim()) return toast.error('enter the old repo URL to import')
+            if (!createRepo && !image.trim()) return toast.error('an image is required when not creating a source repo')
+            if (createRepo && importing && !importRepo.trim()) return toast.error('enter the old repo URL to import')
             m.mutate(() => send(urls.apps(org), {
               json: {
                 name: name.trim(), image: image.trim(), host: host.trim(), port: Number(port),
                 domains: domains.split('\n').map((s) => s.trim()).filter(Boolean),
-                classes, database: database === 'none' ? null : database, template,
-                ...(importing ? { import: { repo: importRepo.trim(), token: importToken.trim() || null, env: importEnv.trim() || null } } : {}),
+                classes, database: database === 'none' ? null : database, template, create_repo: createRepo,
+                ...(createRepo && importing ? { import: { repo: importRepo.trim(), token: importToken.trim() || null, env: importEnv.trim() || null } } : {}),
               },
             }))
           }}>{importing ? 'Import app' : 'Create app'}</Button>
           <span className="text-xs text-muted-foreground">
             {importing
               ? 'Imports the repo + injects CI (runs in the background), then writes base.yaml + overlays and declares the app in project.yaml.'
-              : 'Writes base.yaml + overlays and declares the app in project.yaml; the source repo is scaffolded on the next org sync.'}
+              : createRepo
+                ? 'Writes base.yaml + overlays and declares the app in project.yaml; the source repo is scaffolded on the next org sync.'
+                : 'Writes base.yaml + overlays only — runs your prebuilt image, no source repo or CI.'}
           </span>
         </div>
       </CardContent></Card>
