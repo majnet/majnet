@@ -85,7 +85,7 @@ export function NewApp() {
       <Card><CardContent className="flex flex-col gap-4 pt-6">
         <div className="grid gap-3 sm:grid-cols-2">
           <Field label="App name" hint="Lowercase; its manifest directory."><Input value={name} onChange={(e) => setName(e.target.value)} placeholder="blog" /></Field>
-          <Field label="Image" hint="Digest-pinned; tags are rejected."><Input value={image} onChange={(e) => setImage(e.target.value)} placeholder="ghcr.io/org/app@sha256:…" /></Field>
+          <Field label="Image — optional" hint="Digest-pinned; tags rejected. Blank → a placeholder until CI builds one."><Input value={image} onChange={(e) => setImage(e.target.value)} placeholder="ghcr.io/org/app@sha256:… (optional)" /></Field>
         </div>
         <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Primary domain — optional" hint="Cloudflare + cert handled automatically for production."><Input value={host} onChange={(e) => setHost(e.target.value)} placeholder="blog.majksa.cz" /></Field>
@@ -142,7 +142,7 @@ export function NewApp() {
         </div>
         <div className="flex items-center gap-3">
           <Button disabled={m.isPending} onClick={() => {
-            if (!name.trim() || !image.trim()) return toast.error('name and image are required')
+            if (!name.trim()) return toast.error('name is required')
             if (!classes.length) return toast.error('select at least one class')
             if (importing && !importRepo.trim()) return toast.error('enter the old repo URL to import')
             m.mutate(() => send(urls.apps(org), {

@@ -502,6 +502,10 @@ pub async fn apps_get(
 #[derive(Deserialize)]
 pub struct NewApp {
     pub name: String,
+    /// Digest-pinned image. Optional — when omitted, a placeholder at the app's
+    /// eventual GHCR path is used until CI builds a real one (production still
+    /// moves via promote).
+    #[serde(default)]
     pub image: String,
     #[serde(default)]
     pub host: String,
@@ -531,7 +535,7 @@ pub async fn apps_post(
     State(state): State<Arc<AppState>>,
     Path(org): Path<String>,
     headers: HeaderMap,
-    Json(req): Json<NewApp>,
+    Json(mut req): Json<NewApp>,
 ) -> Result<String, ApiError> {
     check_name(&req.name)?;
     let valid_classes = ["testing", "stable", "production", "ephemeral"];
@@ -580,6 +584,12 @@ pub async fn apps_post(
 
     // Validate base ⊕ overlays as the render pipeline would (fast-fail on bad
     // form input) before committing anything or kicking off an import.
+    // Image is optional: default to a placeholder at the app's eventual GHCR
+    // path (replaced by CI builds / promote; production moves via promote).
+    if req.image.trim().is_empty() {
+        req.image = format!("ghcr.io/{org}/{}@sha256:{}", req.name, "0".repeat(64));
+    }
+
     let base = scaffold_base(&req).map_err(|e| bad_request(format!("{e:#}")))?;
     files.insert("base.yaml".to_string(), base);
     for class in &req.classes {

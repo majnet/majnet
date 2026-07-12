@@ -150,13 +150,17 @@ async fn converge_project_class(
         match result {
             Ok(summary) => {
                 tracing::info!(project, class = class.as_str(), app, %summary, "converged");
-                state.store.record(
-                    &snapshot.commit,
-                    project,
-                    &node.name,
-                    &format!("converge {app}"),
-                    &summary,
-                )?;
+                // Record only meaningful changes — a steady-state "in sync"
+                // every poll would flood the event feed with no-op notifications.
+                if summary != "in sync" {
+                    state.store.record(
+                        &snapshot.commit,
+                        project,
+                        &node.name,
+                        &format!("converge {app}"),
+                        &summary,
+                    )?;
+                }
                 converged_apps.push(app.to_string());
                 if class == EnvClass::Ephemeral {
                     state.store.ephemeral_mark_seen(project, app)?;
