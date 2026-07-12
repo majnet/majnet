@@ -4,13 +4,14 @@
 
 use anyhow::{Context, Result};
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
-use axum::Json;
-use base64::Engine;
+use axum::http::{header, HeaderMap, StatusCode};
 use majnet_common::manifest::Migration;
 use majnet_common::project::Role;
 use majnet_common::release::Release;
+use secrecy::ExposeSecret;
 use std::sync::Arc;
+
+use axum::Json;
 
 use crate::state::StoredRelease;
 use crate::AppState;
@@ -19,9 +20,10 @@ type ApiError = (StatusCode, String);
 
 const DESCRIPTOR: &str = "majnet-release.yaml";
 
-/// Handle a `release` webhook: on publish, read + validate the descriptor at the
-/// tag and record it. A repo without a `majnet-release.yaml` isn't a MajNet
-/// release — we log and move on rather than error.
+/// Handle a `release` webhook: on publish, read + validate the `majnet-release.yaml`
+/// **release asset** (CI computes the digests at build time, after the tag, so the
+/// descriptor is an asset, not a committed file) and record it. A release without
+/// that asset isn't a MajNet release — we log and move on rather than error.
 pub async fn on_release(state: &AppState, org: &str, payload: &serde_json::Value) -> Result<()> {
     let action = payload["action"].as_str().unwrap_or_default();
     if !matches!(action, "published" | "released" | "edited") {
@@ -38,16 +40,35 @@ pub async fn on_release(state: &AppState, org: &str, payload: &serde_json::Value
         return Ok(());
     }
 
-    let client = state.github.org_client(org).await?;
-    let Some(bytes) = read_at_ref(&client, org, app, DESCRIPTOR, tag).await? else {
+    // The asset's API `url` serves the raw bytes with Accept: octet-stream.
+    let Some(asset_url) = release["assets"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|a| a["name"].as_str() == Some(DESCRIPTOR))
+        .and_then(|a| a["url"].as_str())
+    else {
         tracing::info!(
             org,
             app,
             tag,
-            "release has no {DESCRIPTOR} — not a MajNet release"
+            "release has no {DESCRIPTOR} asset — skipping"
         );
         return Ok(());
     };
+    let (_, token) = state.github.org_client_and_token(org).await?;
+    let bytes = state
+        .http
+        .get(asset_url)
+        .bearer_auth(token.expose_secret())
+        .header(header::ACCEPT, "application/octet-stream")
+        .header(header::USER_AGENT, "majnet-bot")
+        .send()
+        .await?
+        .error_for_status()
+        .with_context(|| format!("downloading {DESCRIPTOR} for {org}/{app}@{tag}"))?
+        .bytes()
+        .await?;
     let descriptor = Release::parse(&bytes)
         .with_context(|| format!("{org}/{app}@{tag}: invalid {DESCRIPTOR}"))?;
 
@@ -151,37 +172,4 @@ pub async fn promote(
     Ok(format!(
         "{app} {version} promoted; review the env/production render PR to deploy"
     ))
-}
-
-/// Read a repo file at a specific ref (tag/branch/sha) via the Contents API.
-/// `None` for a missing file (404).
-async fn read_at_ref(
-    client: &octocrab::Octocrab,
-    org: &str,
-    repo: &str,
-    path: &str,
-    r#ref: &str,
-) -> Result<Option<Vec<u8>>> {
-    match client
-        .repos(org, repo)
-        .get_content()
-        .path(path)
-        .r#ref(r#ref)
-        .send()
-        .await
-    {
-        Ok(content) => {
-            let item = content
-                .items
-                .into_iter()
-                .next()
-                .context("empty contents response")?;
-            let encoded = item.content.unwrap_or_default().replace(['\n', ' '], "");
-            Ok(Some(
-                base64::engine::general_purpose::STANDARD.decode(encoded)?,
-            ))
-        }
-        Err(octocrab::Error::GitHub { source, .. }) if source.status_code == 404 => Ok(None),
-        Err(e) => Err(e).context("reading release descriptor"),
-    }
 }

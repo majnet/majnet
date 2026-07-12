@@ -58,7 +58,10 @@ migration:                                  # optional
 ```
 
 Immutable, digest-pinned, human-visible on GitHub, and delivered to the bot via
-the `release` webhook it already receives.
+the `release` webhook it already receives. The descriptor is a **release asset**
+(not a committed file): CI only knows the digests *after* the build, i.e. after
+the tag, so `app-release.yaml` builds → writes `majnet-release.yaml` → publishes
+the Release with it attached. The bot downloads that asset off the webhook.
 
 ### Migrations (flexible — `migration = { image?, command }`)
 
@@ -111,12 +114,17 @@ The reconciler's existing §12 pre-rollout migration step runs `migration.image`
    SQLite `releases` table, `release` webhook, `GET /api/releases/{org}/{app}`.
 3. ✅ **Dashboard Releases tab + promote-from-release** — `migration.image`,
    `POST …/releases/…/promote/{version}`, per-app Releases panel.
-4. **Reusable workflow + starter template** — the app-side CI that builds the
-   artifacts and publishes the release descriptor.
+4. ✅ **Reusable workflow + templates** — `.github/workflows/app-release.yaml`
+   (build → push by digest → publish Release with `majnet-release.yaml` asset);
+   `release.yaml` added to the web-app + rust-service templates. Bot reads the
+   descriptor from the release asset.
 5. **Build-tier wiring** — main/PR push → image bumps into testing/ephemeral.
 
 ## Open items
 
+- **Release backfill** — a periodic reconcile listing releases + assets from
+  GitHub, so a missed/out-of-order `release` webhook (e.g. asset attached just
+  after publish) still populates the store. The webhook is the fast path.
 - Build-tier trigger for `testing` (main push → bump `testing.yaml`): auto vs
   opt-in per app.
 - Production promote: allow any release, or only newer-than-current?

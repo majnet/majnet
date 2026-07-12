@@ -1,10 +1,11 @@
 # App repo templates
 
-Templates the bot uses to materialize app repos declared in a project's `project.yaml` (e.g. `template: rust-service`, `template: web-app`). Each template ships:
+Templates the bot uses to materialize app repos declared in a project's `project.yaml` (e.g. `template: rust-service`, `template: web-app`). Each template ships two GHA workflows for the DEV→OPS gradient (ADR 0009):
 
-- a GHA workflow: test → build → push image to GHCR (org-scoped, by digest) → webhook the bot `(org, app, digest)`
-- branch protection config for `main`
-- standard labels
+- **`build.yaml`** — the *build tier*: on `main`/PR, test → build → push image to GHCR by digest. Feeds `testing` (latest main) and `ephemeral` (PR previews). Disposable, continuous.
+- **`release.yaml`** — the *release tier*: on tag `vX.Y.Z`, calls the reusable [`app-release.yaml`](../../.github/workflows/app-release.yaml) — builds the app (+ optional migration) image, writes `majnet-release.yaml` (digest-pinned), and publishes a GitHub Release with it attached. The bot records it off the `release` webhook; an operator promotes a release to `production` (stable auto-tracks the latest tag).
+
+Plus branch protection config for `main` and standard labels.
 
 These are *developed* here and *deployed* to `majksa-platform/platform/repo-templates/`, which is what the bot actually reads (design doc §10).
 

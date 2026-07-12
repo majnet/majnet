@@ -1,0 +1,20 @@
+# MajNet release pipeline (ADR 0009): tag `vX.Y.Z` → build + publish a Release
+# the bot records and an operator promotes to production. Continuous main/PR
+# builds still go through build.yaml (the testing/ephemeral build tier).
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  release:
+    permissions:
+      contents: write
+      packages: write
+    uses: maxa-ondrej/majnet/.github/workflows/app-release.yaml@main
+    # with:
+    #   # A migration that runs before each rollout. Omit for none.
+    #   migration_command: '["/app/migrate", "up"]'
+    #   # For SQL migrations, build a separate runner image (e.g. dbmate):
+    #   migration_dockerfile: Dockerfile.migrate
