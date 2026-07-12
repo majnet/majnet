@@ -2,7 +2,7 @@
 //!
 //! Flow: PR opened → GHA builds & pushes `pr-<N>` → `registry_package` event
 //! lands here → manifest generated (base ⊕ ephemeral overlay ⊕ PR patch:
-//! digest, name `<app>-pr<N>`, host `<app>-pr<N>.<project>.majksa.net`) →
+//! digest, name `<app>-pr<N>`, host `<app>-pr<N>.<project>.<base_domain>`) →
 //! committed onto `env/ephemeral` → reconciler deploys → preview URL
 //! commented on the PR. PR closed → manifest removed → reconciler GC
 //! (48 h grace, 7 d hard TTL).
@@ -43,8 +43,9 @@ pub async fn on_pr_build(
         .get(&format!("apps/{app}/base.yaml"))
         .with_context(|| format!("apps/{app}/base.yaml missing"))?;
 
-    let project = project_name(state, org).await?;
-    let (yaml, preview_url) = generate_manifest(base, overlay, &project, app, pr, image)?;
+    let (project, base_domain) = crate::dashboard_api::project_and_domain(state, org).await?;
+    let (yaml, preview_url) =
+        generate_manifest(base, overlay, &project, &base_domain, app, pr, image)?;
     let name = format!("{app}-pr{pr}");
 
     // Secrets: previews reuse the app's stable-class secrets (same key class,
@@ -106,6 +107,7 @@ fn generate_manifest(
     base: &[u8],
     overlay: &[u8],
     project: &str,
+    base_domain: &str,
     app: &str,
     pr: u64,
     image: &str,
@@ -115,20 +117,23 @@ fn generate_manifest(
     let mut merged = merge(base, overlay);
 
     let name = format!("{app}-pr{pr}");
-    let host = format!("{name}.{project}.majksa.net");
+    let host = format!("{name}.{project}.{base_domain}");
     let map = merged
         .as_mapping_mut()
         .context("merged manifest is not a mapping")?;
     map.insert("name".into(), name.clone().into());
     map.insert("image".into(), image.into());
 
-    // Previews get their own host; apps without ingress deploy silently.
+    // Previews get their own auto-assigned host (ADR 0013); any custom
+    // host/domains the app carried are ignored. Apps without ingress deploy
+    // silently (no preview URL).
     let mut preview_url = None;
     if let Some(ingress) = map
         .get_mut(serde_yaml::Value::from("ingress"))
         .and_then(|i| i.as_mapping_mut())
     {
         ingress.insert("host".into(), host.clone().into());
+        ingress.remove(serde_yaml::Value::from("domains"));
         preview_url = Some(format!("https://{host}"));
     }
 
@@ -237,24 +242,6 @@ async fn comment_preview_url(
     Ok(())
 }
 
-/// Project name for an org, from the root registry.
-async fn project_name(state: &AppState, org: &str) -> Result<String> {
-    let (_, tarball) =
-        crate::proxy::fetch_snapshot(state, &state.config.root_org, "platform", "main").await?;
-    let platform = majnet_common::tarball::untar(&tarball)?;
-    let projects = majnet_common::platform::ProjectsFile::parse(
-        platform
-            .get("projects.yaml")
-            .context("platform repo has no projects.yaml")?,
-    )?;
-    projects
-        .projects
-        .iter()
-        .find(|p| p.org == org)
-        .map(|p| p.name.clone())
-        .with_context(|| format!("org '{org}' not in registry"))
-}
-
 fn short(image: &str) -> &str {
     &image[image.len().saturating_sub(12)..]
 }
@@ -267,28 +254,45 @@ mod tests {
 
     #[test]
     fn patches_name_image_and_host() {
-        let base =
-            b"env:\n  RUST_LOG: info\ningress:\n  host: api.zpevnik.majksa.net\n  port: 8080\n";
+        // A stray host + custom domains in base are overwritten/dropped for the
+        // preview (ADR 0013); the base domain is configurable.
+        let base = b"env:\n  RUST_LOG: info\ningress:\n  host: leftover.example.com\n  port: 8080\n  domains:\n    - www.example.com\n";
         let overlay = b"env:\n  MODE: preview\n";
         let image = format!("ghcr.io/zpevnik/api@{DIGEST}");
-        let (yaml, url) = generate_manifest(base, overlay, "zpevnik", "api", 12, &image).unwrap();
+        let (yaml, url) =
+            generate_manifest(base, overlay, "zpevnik", "majksa.net", "api", 12, &image).unwrap();
         assert!(yaml.contains("name: api-pr12"));
         assert!(yaml.contains("host: api-pr12.zpevnik.majksa.net"));
+        assert!(!yaml.contains("www.example.com"), "custom domains dropped");
         assert!(yaml.contains("MODE: preview"));
         assert_eq!(url.as_deref(), Some("https://api-pr12.zpevnik.majksa.net"));
+    }
+
+    #[test]
+    fn honours_a_custom_base_domain() {
+        let base = b"ingress:\n  port: 8080\n";
+        let image = format!("ghcr.io/o/api@{DIGEST}");
+        let (yaml, url) =
+            generate_manifest(base, b"{}\n", "proj", "example.org", "api", 7, &image).unwrap();
+        assert!(yaml.contains("host: api-pr7.proj.example.org"));
+        assert_eq!(url.as_deref(), Some("https://api-pr7.proj.example.org"));
     }
 
     #[test]
     fn no_ingress_means_no_preview_url() {
         let image = format!("ghcr.io/o/worker@{DIGEST}");
         let (yaml, url) =
-            generate_manifest(b"env: {}\n", b"{}\n", "p", "worker", 3, &image).unwrap();
+            generate_manifest(b"env: {}\n", b"{}\n", "p", "majksa.net", "worker", 3, &image)
+                .unwrap();
         assert!(yaml.contains("name: worker-pr3"));
         assert!(url.is_none());
     }
 
     #[test]
     fn tag_pinned_patch_is_rejected() {
-        assert!(generate_manifest(b"{}\n", b"{}\n", "p", "a", 1, "ghcr.io/o/a:pr-1").is_err());
+        assert!(
+            generate_manifest(b"{}\n", b"{}\n", "p", "majksa.net", "a", 1, "ghcr.io/o/a:pr-1")
+                .is_err()
+        );
     }
 }

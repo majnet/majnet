@@ -290,7 +290,11 @@ fn container_spec(
         (LABEL_COMMIT.to_string(), ctx.commit.to_string()),
         (LABEL_CONFIG.to_string(), config_hash.to_string()),
     ]);
-    if let Some(ingress) = &manifest.ingress {
+    // A host-less ingress (a production app that declared only a port, since
+    // ADR 0013 made `host` optional) has nothing to route to — skip the Traefik
+    // labels rather than emit an empty `Host()` rule. Non-production classes
+    // always have an auto-assigned host by this point.
+    if let Some(ingress) = manifest.ingress.as_ref().filter(|i| !i.hosts().is_empty()) {
         let router = format!("{}-{}-{}", ctx.project, manifest.name, ctx.class.as_str());
         labels.insert("traefik.enable".into(), "true".into());
         // OR every hostname the ingress serves (primary + custom domains,

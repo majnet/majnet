@@ -87,13 +87,34 @@ pub async fn list(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
+/// Build the `production.yaml` for a promote. Promote pins only the digest, so
+/// replace the top-level `image:` in the existing overlay — preserving custom
+/// ingress domains, env, and anything else hand-managed there (ADR 0013). When
+/// the app has no production overlay yet, create a minimal image-only one.
+fn production_overlay(
+    current: Option<&str>,
+    app: &str,
+    version: &str,
+    image: &str,
+) -> Result<String> {
+    match current {
+        Some(existing) if !existing.trim().is_empty() => {
+            crate::digest::replace_image_line(existing, image)
+        }
+        _ => Ok(format!(
+            "# production overlay for {app} — release {version} (ADR 0009)\nimage: {image}\n"
+        )),
+    }
+}
+
 /// `POST /api/releases/{org}/{app}/promote/{version}` — pin production to a
-/// chosen release (ADR 0009): write its app digest into
-/// `apps/{app}/production.yaml` on ops main. The migration is inherited from
-/// `base.yaml` (version-independent command; the files travel in the image), so
-/// the overlay pins only the image. Admin-gated; the `env/production` render PR
-/// (the §9 gate) follows. Stable auto-tracks the latest tag, so promotion
-/// targets production only.
+/// chosen release (ADR 0009): update the app digest in
+/// `apps/{app}/production.yaml` on ops main, leaving the rest of the overlay
+/// (custom domains, env) untouched. The migration is inherited from `base.yaml`
+/// (version-independent command; the files travel in the image), so the overlay
+/// pins only the image. Admin-gated; the `env/production` render PR (the §9
+/// gate) follows. Stable auto-tracks the latest tag, so promotion targets
+/// production only.
 pub async fn promote(
     State(state): State<Arc<AppState>>,
     Path((org, app, version)): Path<(String, String, String)>,
@@ -114,15 +135,22 @@ pub async fn promote(
             format!("release {version} not found for {app}"),
         ))?;
 
-    let overlay = format!(
-        "# production overlay for {app} — release {version} (ADR 0009)\nimage: {}\n",
-        rel.app_image
-    );
-
     // Validate base ⊕ this overlay before committing.
     let mut files = crate::dashboard_api::app_files(&state, &org, &app)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
+
+    // Promote pins ONLY the image: replace the digest in the existing
+    // production overlay, preserving any hand-managed production config
+    // (custom ingress domains, env) rather than overwriting it — production
+    // ingress lives in `production.yaml` by design (ADR 0013).
+    let overlay = production_overlay(
+        files.get("production.yaml").map(String::as_str),
+        &app,
+        &version,
+        &rel.app_image,
+    )
+    .map_err(|e| (StatusCode::BAD_REQUEST, format!("{e:#}")))?;
     files.insert("production.yaml".to_string(), overlay.clone());
     crate::dashboard_api::validate_app_files(&app, &files)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("{e:#}")))?;
@@ -148,4 +176,32 @@ pub async fn promote(
     Ok(format!(
         "{app} {version} promoted; review the env/production render PR to deploy"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::production_overlay;
+
+    const NEW: &str = "ghcr.io/o/a@sha256:new";
+
+    #[test]
+    fn promote_preserves_hand_managed_production_config() {
+        // The drift case: ingress was hand-added to production.yaml. A promote
+        // must swap only the image and keep the ingress (ADR 0013).
+        let current = "image: ghcr.io/o/a@sha256:old\ningress:\n  host: a.example.com\n  port: 8080\n";
+        let out = production_overlay(Some(current), "a", "v1.2.3", NEW).unwrap();
+        assert!(out.contains("image: ghcr.io/o/a@sha256:new"));
+        assert!(out.contains("host: a.example.com"));
+        assert!(out.contains("port: 8080"));
+        assert!(!out.contains("sha256:old"));
+    }
+
+    #[test]
+    fn promote_creates_minimal_overlay_when_absent() {
+        for current in [None, Some(""), Some("   \n")] {
+            let out = production_overlay(current, "a", "v1.0.0", NEW).unwrap();
+            assert!(out.contains("image: ghcr.io/o/a@sha256:new"));
+            assert!(out.contains("release v1.0.0"));
+        }
+    }
 }

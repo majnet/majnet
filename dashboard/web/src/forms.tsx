@@ -89,10 +89,10 @@ export function NewApp() {
           <Field label={createRepo ? 'Image — optional' : 'Image — required'} hint={createRepo ? 'Digest-pinned; tags rejected. Blank → a placeholder until CI builds one.' : 'Digest-pinned; tags rejected. Required — no CI to build one.'}><Input value={image} onChange={(e) => setImage(e.target.value)} placeholder="ghcr.io/org/app@sha256:…" /></Field>
         </div>
         <div className="grid gap-3 sm:grid-cols-2">
-          <Field label="Primary domain — optional" hint="Cloudflare + cert handled automatically for production."><Input value={host} onChange={(e) => setHost(e.target.value)} placeholder="blog.majksa.cz" /></Field>
-          <Field label="Container port"><Input type="number" value={port} onChange={(e) => setPort(e.target.value)} /></Field>
+          <Field label="Production domain — optional" hint="Custom production domain (Cloudflare + cert automatic). Non-prod gets an auto host {app}.{project}.<base-domain>."><Input value={host} onChange={(e) => setHost(e.target.value)} placeholder="blog.majksa.cz" /></Field>
+          <Field label="Container port" hint="Set a port to expose the app; the host is assigned automatically for non-prod."><Input type="number" value={port} onChange={(e) => setPort(e.target.value)} /></Field>
         </div>
-        <Field label="Additional domains — optional, one per line"><Textarea value={domains} onChange={(e) => setDomains(e.target.value)} className="min-h-16" placeholder="www.majksa.cz" /></Field>
+        <Field label="Additional production domains — optional, one per line"><Textarea value={domains} onChange={(e) => setDomains(e.target.value)} className="min-h-16" placeholder="www.majksa.cz" /></Field>
         <Field label="Classes" hint="Which environments this app deploys to. Production goes through the reviewed render PR.">
           <div className="flex flex-wrap gap-2">
             {CLASSES.map((c) => (

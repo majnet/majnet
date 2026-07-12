@@ -862,6 +862,32 @@ pub(crate) async fn read_platform(state: &AppState) -> Result<BTreeMap<String, S
         .collect())
 }
 
+/// Resolve `(project_name, base_domain)` for an org from the platform repo
+/// (ADR 0013) in one snapshot fetch. The base domain drives auto-assigned
+/// non-production ingress hosts; it defaults to `majksa.net` when `nodes.yaml`
+/// predates ADR 0013.
+pub(crate) async fn project_and_domain(state: &AppState, org: &str) -> Result<(String, String)> {
+    let files = read_platform(state).await?;
+    let base_domain = match files.get("nodes.yaml") {
+        Some(yaml) => NodesFile::parse(yaml.as_bytes())?.base_domain,
+        None => default_base_domain(),
+    };
+    let projects = files
+        .get("projects.yaml")
+        .context("platform repo has no projects.yaml")?;
+    let project = ProjectsFile::parse(projects.as_bytes())?
+        .projects
+        .into_iter()
+        .find(|p| p.org == org)
+        .map(|p| p.name)
+        .with_context(|| format!("org '{org}' not in registry"))?;
+    Ok((project, base_domain))
+}
+
+fn default_base_domain() -> String {
+    "majksa.net".to_string()
+}
+
 async fn read_projects(state: &AppState) -> Result<ProjectsFile> {
     let files = read_platform(state).await?;
     let yaml = files
@@ -948,7 +974,7 @@ fn summarize_app(name: &str, text: &BTreeMap<String, String>) -> Result<AppSumma
         name: name.to_string(),
         image: manifest.image,
         classes,
-        host: manifest.ingress.as_ref().map(|i| i.host.clone()),
+        host: manifest.ingress.as_ref().and_then(|i| i.host.clone()),
         domains: manifest
             .ingress
             .as_ref()
@@ -968,12 +994,18 @@ fn scaffold_base(req: &NewApp) -> Result<String> {
     let mut yaml = format!("name: {}\nimage: {}\n", req.name, req.image);
     if !req.host.is_empty() {
         anyhow::ensure!(req.port != 0, "a container port is required with a domain");
-        yaml.push_str(&format!(
-            "ingress:\n  host: {}\n  port: {}\n",
-            req.host, req.port
-        ));
+    }
+    // A port opts the app into routing. Non-production classes get an
+    // auto-assigned host at render (ADR 0013); a `host`/`domains` here is a
+    // production custom domain. So port-only is valid; a host requires a port.
+    if req.port != 0 {
+        yaml.push_str("ingress:\n");
+        if !req.host.is_empty() {
+            yaml.push_str(&format!("  host: {}\n", req.host));
+        }
+        yaml.push_str(&format!("  port: {}\n", req.port));
         let extra: Vec<&String> = req.domains.iter().filter(|d| !d.is_empty()).collect();
-        if !extra.is_empty() {
+        if !req.host.is_empty() && !extra.is_empty() {
             yaml.push_str("  domains:\n");
             for d in extra {
                 yaml.push_str(&format!("    - {d}\n"));
@@ -1054,7 +1086,7 @@ mod tests {
         let m = AppManifest::parse(&base).unwrap();
         assert_eq!(m.name, "blog");
         let ingress = m.ingress.unwrap();
-        assert_eq!(ingress.host, "blog.example.com");
+        assert_eq!(ingress.host.as_deref(), Some("blog.example.com"));
         assert_eq!(ingress.hosts(), vec!["blog.example.com", "www.example.com"]);
         assert!(m.database.is_some());
         // And it validates as base ⊕ empty-overlay the way apps_post commits it.
@@ -1066,14 +1098,30 @@ mod tests {
     }
 
     #[test]
-    fn scaffold_without_a_domain_omits_ingress() {
+    fn scaffold_without_a_port_omits_ingress() {
         let mut req = new_app(&["stable"]);
         req.host = String::new();
         req.domains.clear();
+        req.port = 0;
         req.database = None;
         let base = scaffold_base(&req).unwrap();
         let m = AppManifest::parse(&base).unwrap();
         assert!(m.ingress.is_none() && m.database.is_none());
+    }
+
+    #[test]
+    fn scaffold_port_only_emits_hostless_ingress() {
+        // ADR 0013: a port opts into routing; non-production hosts are
+        // auto-assigned at render, so no host is written to base.yaml.
+        let mut req = new_app(&["stable"]);
+        req.host = String::new();
+        req.domains = vec!["www.example.com".into()]; // ignored without a host
+        let base = scaffold_base(&req).unwrap();
+        let m = AppManifest::parse(&base).unwrap();
+        let ingress = m.ingress.expect("a port opts into ingress");
+        assert_eq!(ingress.host, None);
+        assert_eq!(ingress.port, 8080);
+        assert!(ingress.domains.is_empty());
     }
 
     #[test]

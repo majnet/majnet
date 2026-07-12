@@ -8,7 +8,16 @@ use serde::{Deserialize, Serialize};
 pub struct NodesFile {
     pub wireguard_subnet: String,
     pub docker_api_port: u16,
+    /// Base domain for auto-assigned non-production ingress hosts (ADR 0013):
+    /// `{app}.{project}.{base_domain}` (`-pr{N}` for ephemeral previews).
+    /// Defaulted so a pre-0013 `nodes.yaml` (without the key) still parses.
+    #[serde(default = "default_base_domain")]
+    pub base_domain: String,
     pub nodes: Vec<Node>,
+}
+
+fn default_base_domain() -> String {
+    "majksa.net".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

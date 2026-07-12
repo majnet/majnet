@@ -32,9 +32,12 @@ const RENDERED_CLASSES: [EnvClass; 3] = [EnvClass::Testing, EnvClass::Stable, En
 pub async fn on_ops_main_push(state: &AppState, org: &str, commit: &str) -> Result<()> {
     let (_, tarball) = crate::proxy::fetch_snapshot(state, org, "ops", "main").await?;
     let sources = majnet_common::tarball::untar(&tarball)?;
+    // ADR 0013: non-production classes get an auto-assigned ingress host built
+    // from the project name + platform base domain.
+    let (project, base_domain) = crate::dashboard_api::project_and_domain(state, org).await?;
 
     for class in RENDERED_CLASSES {
-        match render_class(&sources, class)
+        match render_class(&sources, class, &project, &base_domain)
             .with_context(|| format!("rendering {}", class.as_str()))?
         {
             Some(rendered) => {
@@ -57,6 +60,8 @@ pub async fn on_ops_main_push(state: &AppState, org: &str, commit: &str) -> Resu
 fn render_class(
     sources: &BTreeMap<String, Vec<u8>>,
     class: EnvClass,
+    project: &str,
+    base_domain: &str,
 ) -> Result<Option<BTreeMap<String, String>>> {
     let mut rendered = BTreeMap::new();
 
@@ -90,6 +95,20 @@ fn render_class(
                     existing == app,
                     "{app}: manifest name '{existing}' does not match app directory"
                 ),
+            }
+            // ADR 0013: non-production classes get an auto-assigned ingress host
+            // (`{app}.{project}.{base_domain}`); the app declares only the port,
+            // and any custom host/domains it carried are ignored here. Production
+            // keeps its custom host/domains (Cloudflare + edge, ADR 0007).
+            if class != EnvClass::Production {
+                if let Some(ingress) = map
+                    .get_mut(serde_yaml::Value::from("ingress"))
+                    .and_then(|i| i.as_mapping_mut())
+                {
+                    let host = format!("{app}.{project}.{base_domain}");
+                    ingress.insert("host".into(), host.into());
+                    ingress.remove(serde_yaml::Value::from("domains"));
+                }
             }
         } else {
             bail!("{app}: merged manifest is not a mapping");
@@ -277,7 +296,7 @@ mod tests {
             ),
             ("apps/web/base.yaml", "env: {}\n"), // no stable overlay → not rendered
         ]);
-        let rendered = render_class(&src, EnvClass::Stable).unwrap().unwrap();
+        let rendered = render_class(&src, EnvClass::Stable, "proj", "majksa.net").unwrap().unwrap();
         assert_eq!(rendered.keys().collect::<Vec<_>>(), vec!["api.yaml"]);
         assert!(rendered["api.yaml"].contains("name: api"));
         assert!(rendered["api.yaml"].contains("RUST_LOG"));
@@ -286,7 +305,7 @@ mod tests {
     #[test]
     fn empty_class_renders_none() {
         let src = sources(&[("apps/api/base.yaml", "env: {}\n")]);
-        assert!(render_class(&src, EnvClass::Production).unwrap().is_none());
+        assert!(render_class(&src, EnvClass::Production, "proj", "majksa.net").unwrap().is_none());
     }
 
     #[test]
@@ -295,7 +314,7 @@ mod tests {
             ("apps/api/base.yaml", ""),
             ("apps/api/stable.yaml", "image: ghcr.io/o/api:latest\n"), // tag, not digest
         ]);
-        assert!(render_class(&src, EnvClass::Stable).is_err());
+        assert!(render_class(&src, EnvClass::Stable, "proj", "majksa.net").is_err());
     }
 
     #[test]
@@ -307,7 +326,7 @@ mod tests {
                 &format!("image: ghcr.io/o/api@{DIGEST}\n"),
             ),
         ]);
-        assert!(render_class(&src, EnvClass::Stable)
+        assert!(render_class(&src, EnvClass::Stable, "proj", "majksa.net")
             .unwrap_err()
             .to_string()
             .contains("secrets"));
@@ -326,10 +345,76 @@ mod tests {
                 "db-url: ENC[AES256_GCM,...]\n",
             ),
         ]);
-        let rendered = render_class(&src, EnvClass::Stable).unwrap().unwrap();
+        let rendered = render_class(&src, EnvClass::Stable, "proj", "majksa.net").unwrap().unwrap();
         assert_eq!(
             rendered["secrets/api.yaml"],
             "db-url: ENC[AES256_GCM,...]\n"
+        );
+    }
+
+    #[test]
+    fn non_production_gets_an_auto_assigned_host() {
+        // The app declares only a port; base carries a stray host + domains that
+        // must be ignored for non-production (ADR 0013).
+        let src = sources(&[
+            (
+                "apps/api/base.yaml",
+                "ingress:\n  host: leftover.example.com\n  port: 8080\n  domains:\n    - www.example.com\n",
+            ),
+            (
+                "apps/api/stable.yaml",
+                &format!("image: ghcr.io/o/api@{DIGEST}\n"),
+            ),
+        ]);
+        let rendered = render_class(&src, EnvClass::Stable, "zpevnik", "majksa.net")
+            .unwrap()
+            .unwrap();
+        let m = AppManifest::parse(&rendered["api.yaml"]).unwrap();
+        let ingress = m.ingress.unwrap();
+        assert_eq!(ingress.host.as_deref(), Some("api.zpevnik.majksa.net"));
+        assert!(ingress.domains.is_empty(), "custom domains dropped for non-prod");
+        assert_eq!(ingress.port, 8080);
+    }
+
+    #[test]
+    fn production_keeps_the_custom_host() {
+        let src = sources(&[
+            (
+                "apps/api/base.yaml",
+                "ingress:\n  host: api.example.com\n  port: 8080\n  domains:\n    - www.example.com\n",
+            ),
+            (
+                "apps/api/production.yaml",
+                &format!("image: ghcr.io/o/api@{DIGEST}\n"),
+            ),
+        ]);
+        let rendered = render_class(&src, EnvClass::Production, "zpevnik", "majksa.net")
+            .unwrap()
+            .unwrap();
+        let m = AppManifest::parse(&rendered["api.yaml"]).unwrap();
+        assert_eq!(
+            m.ingress.unwrap().hosts(),
+            vec!["api.example.com", "www.example.com"]
+        );
+    }
+
+    #[test]
+    fn port_only_app_is_routed_on_non_production() {
+        // The ADR 0013 happy path: no host anywhere, just a port.
+        let src = sources(&[
+            ("apps/api/base.yaml", "ingress:\n  port: 8080\n"),
+            (
+                "apps/api/stable.yaml",
+                &format!("image: ghcr.io/o/api@{DIGEST}\n"),
+            ),
+        ]);
+        let rendered = render_class(&src, EnvClass::Stable, "zpevnik", "majksa.net")
+            .unwrap()
+            .unwrap();
+        let m = AppManifest::parse(&rendered["api.yaml"]).unwrap();
+        assert_eq!(
+            m.ingress.unwrap().host.as_deref(),
+            Some("api.zpevnik.majksa.net")
         );
     }
 
@@ -342,7 +427,7 @@ mod tests {
                 &format!("image: ghcr.io/o/api@{DIGEST}\n"),
             ),
         ]);
-        assert!(render_class(&src, EnvClass::Stable)
+        assert!(render_class(&src, EnvClass::Stable, "proj", "majksa.net")
             .unwrap_err()
             .to_string()
             .contains("does not match"));

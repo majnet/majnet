@@ -41,8 +41,12 @@ export function toManifest(d: ManifestDraft, file: string, app: string): Rec {
   if (file === 'base.yaml') out.name = app // identity = directory
   if (d.image.trim()) out.image = d.image.trim()
   if (d.ingress.on) {
-    const ing: Rec = { host: d.ingress.host.trim(), port: Number(d.ingress.port) }
-    const domains = d.ingress.domains.map((s) => s.trim()).filter(Boolean)
+    // A host is a production custom domain (ADR 0013); non-production classes
+    // get an auto-assigned host at render, so omit it when blank.
+    const ing: Rec = { port: Number(d.ingress.port) }
+    const host = d.ingress.host.trim()
+    if (host) ing.host = host
+    const domains = host ? d.ingress.domains.map((s) => s.trim()).filter(Boolean) : []
     if (domains.length) ing.domains = domains
     out.ingress = ing
   }
@@ -119,10 +123,11 @@ export function ManifestForm({ file, draft, onChange }: { file: string; draft: M
 
       <Section label="Ingress" on={draft.ingress.on} onToggle={(on) => set('ingress', { ...draft.ingress, on })}>
         <div className="grid gap-2.5 sm:grid-cols-2">
-          <Fld label="Host"><Input value={draft.ingress.host} onChange={(e) => set('ingress', { ...draft.ingress, host: e.target.value })} /></Fld>
+          <Fld label="Production domain — optional"><Input value={draft.ingress.host} placeholder="app.example.com" onChange={(e) => set('ingress', { ...draft.ingress, host: e.target.value })} /></Fld>
           <Fld label="Container port"><Input type="number" value={draft.ingress.port} onChange={(e) => set('ingress', { ...draft.ingress, port: e.target.value })} /></Fld>
         </div>
-        <Fld label="Additional domains"><ListEditor values={draft.ingress.domains} placeholder="www.example.com" onChange={(domains) => set('ingress', { ...draft.ingress, domains })} /></Fld>
+        <span className="text-xs text-muted-foreground">Stable/testing/preview get an auto host <code className="font-mono">{'{app}.{project}.<base-domain>'}</code>; a domain here is a production custom domain (Cloudflare + edge).</span>
+        <Fld label="Additional production domains"><ListEditor values={draft.ingress.domains} placeholder="www.example.com" onChange={(domains) => set('ingress', { ...draft.ingress, domains })} /></Fld>
       </Section>
 
       <Section label="Health check" on={draft.health.on} onToggle={(on) => set('health', { ...draft.health, on })}>

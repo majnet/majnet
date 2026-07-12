@@ -48,9 +48,12 @@ pub enum DbEngine {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Ingress {
-    /// Primary public hostname. For `production` this drives Cloudflare + edge
-    /// routing (ADR 0007); for stable/ephemeral it is the tailnet ingress name.
-    pub host: String,
+    /// Primary public hostname. Optional (ADR 0013): non-production classes get
+    /// an auto-assigned `{app}.{project}.{base_domain}` at render time, so the
+    /// app declares only `port`. For `production` this is the app's real custom
+    /// domain and drives Cloudflare + edge routing (ADR 0007).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
     /// Container port the ingress forwards to.
     pub port: u16,
     /// Additional public hostnames, possibly across several Cloudflare zones
@@ -60,9 +63,11 @@ pub struct Ingress {
 }
 
 impl Ingress {
-    /// Every public hostname this ingress serves — primary first.
+    /// Every public hostname this ingress serves — primary first, if set.
     pub fn hosts(&self) -> Vec<&str> {
-        std::iter::once(self.host.as_str())
+        self.host
+            .as_deref()
+            .into_iter()
             .chain(self.domains.iter().map(String::as_str))
             .collect()
     }
