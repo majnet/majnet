@@ -100,22 +100,41 @@ pub async fn sync_org(
         protect_app_main(&client, org, &app.name).await?;
     }
     for (repo, archived) in &existing {
-        // Never touch the ops repo, the platform config repo (only present
-        // when the root org is mistakenly registered as a project — archiving
-        // it takes the whole platform read-only), or already-archived repos.
-        if repo == "ops" || repo == "platform" || *archived {
+        // Never touch the ops repo or the platform config repo (the latter is
+        // only present when the root org is mistakenly registered as a project —
+        // archiving it takes the whole platform read-only).
+        if repo == "ops" || repo == "platform" {
             continue;
         }
-        if !project.apps.iter().any(|a| &a.name == repo) {
-            // Archival is the safe terminal state — never delete (§2).
-            let _: serde_json::Value = client
-                .patch(
-                    format!("/repos/{org}/{repo}"),
-                    Some(&json!({ "archived": true })),
-                )
-                .await?;
-            tracing::info!(org, repo, "archived (removed from project.yaml)");
-            state.store.log_event("repo-archived", Some(org), repo)?;
+        let declared = project.apps.iter().any(|a| &a.name == repo);
+        match (declared, *archived) {
+            // Reconcile archived state to the declaration (project.yaml is the
+            // source of truth): a declared app's repo must be active. This also
+            // heals the race where a manifest commit archived a repo before its
+            // declaration landed.
+            (true, true) => {
+                let _: serde_json::Value = client
+                    .patch(
+                        format!("/repos/{org}/{repo}"),
+                        Some(&json!({ "archived": false })),
+                    )
+                    .await?;
+                tracing::info!(org, repo, "unarchived (declared in project.yaml)");
+                state.store.log_event("repo-unarchived", Some(org), repo)?;
+            }
+            // Archival is the safe terminal state for a removed app — never
+            // delete (§2).
+            (false, false) => {
+                let _: serde_json::Value = client
+                    .patch(
+                        format!("/repos/{org}/{repo}"),
+                        Some(&json!({ "archived": true })),
+                    )
+                    .await?;
+                tracing::info!(org, repo, "archived (removed from project.yaml)");
+                state.store.log_event("repo-archived", Some(org), repo)?;
+            }
+            _ => {}
         }
     }
 

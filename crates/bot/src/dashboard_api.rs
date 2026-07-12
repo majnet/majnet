@@ -641,35 +641,21 @@ pub async fn apps_post(
     ))
 }
 
-/// Commit `base.yaml` + the selected class overlays, then declare the app in
-/// `project.yaml` (the canonical app list). Shared by direct creation and the
-/// import background task. For imports, the source repo already exists by the
-/// time this runs, so org-sync sees it and skips its template-scaffold path.
+/// Declare the app in `project.yaml` (the canonical app list) **first**, then
+/// commit `base.yaml` + the selected class overlays. Shared by direct creation
+/// and the import background task.
+///
+/// The declaration must precede the manifest commits: each ops-main commit
+/// triggers an org-sync, and org-sync archives repos not yet in `project.yaml`.
+/// If the manifests were committed first, that intervening sync would archive
+/// the (existing, imported) repo before it's declared. For imports the repo
+/// already exists, so org-sync sees it declared + present and leaves it alone.
 pub(crate) async fn scaffold_and_declare(
     state: &AppState,
     org: &str,
     req: &NewApp,
     actor: &str,
 ) -> Result<()> {
-    let base = scaffold_base(req)?;
-    commit_file(
-        state,
-        org,
-        &format!("apps/{}/base.yaml", req.name),
-        &base,
-        &format!("manifest({}): scaffold via dashboard by {actor}", req.name),
-    )
-    .await?;
-    for class in &req.classes {
-        commit_file(
-            state,
-            org,
-            &format!("apps/{}/{class}.yaml", req.name),
-            "{}\n",
-            &format!("manifest({}): add {class} overlay via dashboard by {actor}", req.name),
-        )
-        .await?;
-    }
     let mut project = read_project(state, org).await?;
     if !project.apps.iter().any(|a| a.name == req.name) {
         project.apps.push(AppDecl {
@@ -686,6 +672,25 @@ pub(crate) async fn scaffold_and_declare(
                 "project({}): declare app (template {}) via dashboard by {actor}",
                 req.name, req.template
             ),
+        )
+        .await?;
+    }
+    let base = scaffold_base(req)?;
+    commit_file(
+        state,
+        org,
+        &format!("apps/{}/base.yaml", req.name),
+        &base,
+        &format!("manifest({}): scaffold via dashboard by {actor}", req.name),
+    )
+    .await?;
+    for class in &req.classes {
+        commit_file(
+            state,
+            org,
+            &format!("apps/{}/{class}.yaml", req.name),
+            "{}\n",
+            &format!("manifest({}): add {class} overlay via dashboard by {actor}", req.name),
         )
         .await?;
     }
