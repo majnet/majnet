@@ -41,6 +41,10 @@ pub fn manifest(state: &SetupState, public_base: Option<&str>, nonce: &str) -> s
         "public": true,
         "default_permissions": {
             "contents": "write",
+            // Writing `.github/workflows/*` (app-repo scaffolding + migration
+            // import) requires the dedicated Workflows permission — a plain
+            // `contents: write` git write is rejected without it.
+            "workflows": "write",
             "pull_requests": "write",
             "administration": "write",
             "members": "write",

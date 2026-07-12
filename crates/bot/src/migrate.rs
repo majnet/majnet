@@ -343,9 +343,16 @@ async fn commit_snapshot(
             .await
             .context("initializing empty repo via the Contents API")?;
     }
-    let head = crate::git::get_branch_head(client, &repo, "main")
-        .await?
-        .context("repo has no main branch after initialization")?;
+    // The `main` ref can lag briefly after `create_file` — poll for it.
+    let mut head = None;
+    for _ in 0..10 {
+        if let Some(h) = crate::git::get_branch_head(client, &repo, "main").await? {
+            head = Some(h);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    let head = head.context("repo has no main branch after initialization")?;
 
     let mut blobs = BTreeMap::new();
     for (path, content) in files {
