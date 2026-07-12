@@ -23,7 +23,7 @@ use crate::dashboard_api::NewApp;
 use crate::AppState;
 
 /// Where an imported app's source comes from (New-app "Import existing" form).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct ImportSource {
     /// Old repo, e.g. `https://github.com/old-org/blog`.
     pub repo: String,
@@ -50,9 +50,19 @@ pub async fn import_app(
         .store
         .log_event("app-import", Some(org), &format!("{app} <- {}", source.repo))?;
 
+    // Record a secret-stripped copy of the request so a failed import is
+    // retryable — the token + env carry secrets and must never hit disk.
+    let mut stored = req.clone();
+    if let Some(imp) = stored.import.as_mut() {
+        imp.token = None;
+        imp.env = None;
+    }
+    state
+        .store
+        .begin_import(org, app, &serde_json::to_string(&stored)?)?;
+
     // Snapshot the source tree, add the MajNet CI workflows, and write it all as
     // one commit onto the new repo's `main`.
-    state.store.set_import(org, app, "running", "snapshot", &source.repo)?;
     let mut files = fetch_repo_snapshot(state, source).await?;
     anyhow::ensure!(!files.is_empty(), "source repo snapshot is empty");
     let platform = crate::dashboard_api::read_platform(state).await?;

@@ -499,7 +499,7 @@ pub async fn apps_get(
     Ok(Json(out))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct NewApp {
     pub name: String,
     /// Digest-pinned image. Optional — when omitted, a placeholder at the app's
@@ -559,12 +559,21 @@ pub async fn apps_post(
         .await
         .map_err(|e| (StatusCode::FORBIDDEN, format!("{e:#}")))?;
 
-    // Refuse to clobber an existing app.
+    // Refuse to clobber an existing app — unless a failed import is on record
+    // for it, in which case re-submitting resumes/overwrites that import.
     let mut files = app_files(&state, &org, &req.name)
         .await
         .map_err(bad_gateway)?;
     if !files.is_empty() {
-        return Err(bad_request(format!("app {} already exists", req.name)));
+        let retrying = state
+            .store
+            .imports(&org)
+            .map_err(bad_gateway)?
+            .iter()
+            .any(|i| i.app == req.name && i.status == "failed");
+        if !retrying {
+            return Err(bad_request(format!("app {} already exists", req.name)));
+        }
     }
 
     // The source repo is scaffolded from this template by org-sync; validate it
@@ -695,6 +704,48 @@ pub async fn imports_get(
     Path(org): Path<String>,
 ) -> Result<Json<Vec<crate::state::ImportStatus>>, ApiError> {
     state.store.imports(&org).map(Json).map_err(bad_gateway)
+}
+
+/// `POST /api/imports/{org}/{app}/retry` — re-run a failed import from its
+/// stored request. Tokens + env secrets are not persisted, so a private source
+/// or env-secret import must be re-run from the form for those parts.
+pub async fn imports_retry(
+    State(state): State<Arc<AppState>>,
+    Path((org, app)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<String, ApiError> {
+    let req_json = state
+        .store
+        .import_request(&org, &app)
+        .map_err(bad_gateway)?
+        .filter(|s| s != "{}")
+        .ok_or_else(|| bad_request(format!("no import on record to retry for {app}")))?;
+    let req: NewApp = serde_json::from_str(&req_json)
+        .map_err(|e| bad_request(format!("stored import request is invalid: {e}")))?;
+    let Some(source) = req.import.clone() else {
+        return Err(bad_request("the stored request is not an import"));
+    };
+    let min_role = if req.classes.iter().any(|c| c == "production") {
+        Role::Admin
+    } else {
+        Role::Developer
+    };
+    let actor = crate::authz::require(&state, &headers, &org, min_role)
+        .await
+        .map_err(|e| (StatusCode::FORBIDDEN, format!("{e:#}")))?;
+
+    let st = state.clone();
+    let org2 = org.clone();
+    tokio::spawn(async move {
+        if let Err(e) = crate::migrate::import_app(&st, &org2, &req, &actor, &source).await {
+            tracing::error!(org = org2, app = req.name, error = format!("{e:#}"), "app import retry failed");
+            let _ = st.store.fail_import(&org2, &req.name, &format!("{e:#}"));
+            let _ = st
+                .store
+                .log_event("app-import-failed", Some(&org2), &format!("{}: {e:#}", req.name));
+        }
+    });
+    Ok(format!("retrying import of {app} — watch its progress"))
 }
 
 // ── nodes ────────────────────────────────────────────────────────────────────

@@ -31,6 +31,7 @@ export function AppDetail() {
 
   const act = useApiMutation({ invalidate: [['events']] })
   const deploy = useApiMutation({ invalidate: [['deploys', org], ['events']] })
+  const retry = useApiMutation({ invalidate: [['imports', org], ['apps', org]] })
 
   return (
     <>
@@ -49,6 +50,13 @@ export function AppDetail() {
             {imp.status === 'failed' ? 'Import failed' : 'Importing…'}
           </h2>
           <ImportSteps status={imp} />
+          {imp.status === 'failed' && (
+            <div className="mt-3 flex items-center gap-3">
+              <Button size="sm" disabled={retry.isPending}
+                onClick={() => retry.mutate(() => send(urls.importRetry(org, app)))}>Retry import</Button>
+              <span className="text-xs text-muted-foreground">Re-runs from the stored request; re-enter a private-repo token or env secrets via the form.</span>
+            </div>
+          )}
         </CardContent></Card>
       )}
 

@@ -68,6 +68,7 @@ impl Store {
                  status TEXT NOT NULL,
                  step TEXT NOT NULL,
                  detail TEXT NOT NULL DEFAULT '',
+                 request TEXT NOT NULL DEFAULT '{}',
                  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
                  PRIMARY KEY (org, app)
              );",
@@ -117,6 +118,35 @@ impl Store {
             rusqlite::params![org, app, version, commit, app_image],
         )?;
         Ok(())
+    }
+
+    /// Start (or restart) an import: status running, step `snapshot`, and store
+    /// the (secret-stripped) request JSON so a failed import can be retried.
+    pub fn begin_import(&self, org: &str, app: &str, request: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO imports (org, app, status, step, detail, request)
+             VALUES (?1, ?2, 'running', 'snapshot', '', ?3)
+             ON CONFLICT(org, app) DO UPDATE SET
+                 status = 'running', step = 'snapshot', detail = '',
+                 request = excluded.request, updated_at = datetime('now')",
+            rusqlite::params![org, app, request],
+        )?;
+        Ok(())
+    }
+
+    /// The stored (secret-stripped) request JSON for a retry, if any.
+    pub fn import_request(&self, org: &str, app: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        match conn.query_row(
+            "SELECT request FROM imports WHERE org = ?1 AND app = ?2",
+            [org, app],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(s) => Ok(Some(s)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Upsert the live import status for `org/app` (ADR 0010).

@@ -99,6 +99,7 @@ export const urls = {
   projects: `${BOT}/projects`,
   apps: (org: string) => `${BOT}/apps/${encodeURIComponent(org)}`,
   imports: (org: string) => `${BOT}/imports/${encodeURIComponent(org)}`,
+  importRetry: (org: string, app: string) => `${BOT}/imports/${encodeURIComponent(org)}/${encodeURIComponent(app)}/retry`,
   nodes: `${BOT}/nodes`,
   events: (limit = 300) => `${RECON}/events?limit=${limit}`,
   deploys: (org: string) => `${BOT}/deploys/${encodeURIComponent(org)}`,
