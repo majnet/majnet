@@ -106,11 +106,13 @@ The reconciler's existing §12 pre-rollout migration step runs `migration.image`
 
 ## Phasing
 
-1. **`EnvClass::Testing`** — schema + render + converge + dashboard (unblocks
-   the gradient; independently shippable).
-2. **Release descriptor + bot release-watch + store + events.**
-3. **Dashboard Releases tab + promote-from-release.**
-4. **Reusable workflow + starter template.**
+1. ✅ **`EnvClass::Testing`** — schema + render + converge + dashboard.
+2. ✅ **Release descriptor + bot release-watch + store** — `Release` type,
+   SQLite `releases` table, `release` webhook, `GET /api/releases/{org}/{app}`.
+3. ✅ **Dashboard Releases tab + promote-from-release** — `migration.image`,
+   `POST …/releases/…/promote/{version}`, per-app Releases panel.
+4. **Reusable workflow + starter template** — the app-side CI that builds the
+   artifacts and publishes the release descriptor.
 5. **Build-tier wiring** — main/PR push → image bumps into testing/ephemeral.
 
 ## Open items
