@@ -70,9 +70,11 @@ echo "[majnet-export] dumping $engine from container '$db_container'"
 case "$engine" in
   postgres)
     # Uses the DB container's own POSTGRES_USER/DB so no credentials are passed.
-    # --clean --if-exists makes the dump safe to load into a fresh database.
+    # --clean --if-exists: safe to load into a non-empty DB. --no-owner
+    # --no-privileges: strip the source's roles/grants so the dump restores under
+    # MajNet's derived app user (whom the reconciler restores as).
     docker exec "$db_container" sh -c \
-      'pg_dump --clean --if-exists -U "${POSTGRES_USER:-postgres}" "${POSTGRES_DB:-postgres}"' \
+      'pg_dump --clean --if-exists --no-owner --no-privileges -U "${POSTGRES_USER:-postgres}" "${POSTGRES_DB:-postgres}"' \
       > "$dump_file"
     ;;
   mariadb|mysql)

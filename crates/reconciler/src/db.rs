@@ -119,6 +119,7 @@ valkey-cli -a "$AUTH" --no-auth-warning ACL SAVE"#
 /// logical DB. Forward-only: a partial restore left behind is the operator's to
 /// reset (drop/recreate) before retrying.
 pub async fn restore(
+    config: &Config,
     docker: &Docker,
     project: &str,
     app: &str,
@@ -127,8 +128,9 @@ pub async fn restore(
     dump: &[u8],
 ) -> Result<()> {
     let db = db_name(project, app, class);
+    let password = derive_password(config, engine, project, app, class)?;
     let container = engine_container(engine);
-    let script = restore_script(engine, &db)?;
+    let script = restore_script(engine, &db, &password)?;
 
     upload_dump(docker, container, dump)
         .await
@@ -143,13 +145,16 @@ pub async fn restore(
 
 const RESTORE_PATH: &str = "/tmp/majnet-restore.dump";
 
-/// The superuser restore command per engine (SQL text dumps). Postgres and
-/// MariaDB only for v1; Mongo/Valkey return a clear error.
-fn restore_script(engine: DbEngine, db: &str) -> Result<String> {
+/// The restore command per engine (SQL text dumps). Postgres restores **as the
+/// app's own role** (over localhost TCP) so restored objects are owned by the
+/// user the app connects as — the source's roles/grants are stripped at dump
+/// time (`--no-owner --no-privileges`). MariaDB restores as root into the app's
+/// DB (its user already holds `GRANT ALL` on it). Mongo/Valkey unsupported (v1).
+fn restore_script(engine: DbEngine, db: &str, password: &str) -> Result<String> {
     Ok(match engine {
-        DbEngine::Postgres => {
-            format!(r#"psql -U postgres -v ON_ERROR_STOP=1 -d "{db}" -f {RESTORE_PATH}"#)
-        }
+        DbEngine::Postgres => format!(
+            r#"PGPASSWORD='{password}' psql -h 127.0.0.1 -U "{db}" -d "{db}" -v ON_ERROR_STOP=1 -f {RESTORE_PATH}"#
+        ),
         DbEngine::Mariadb => format!(
             r#"mariadb -uroot -p"$(cat /run/secrets/mariadb-root)" "{db}" < {RESTORE_PATH}"#
         ),
@@ -335,14 +340,14 @@ mod tests {
     fn restore_script_targets_the_app_db_and_rejects_unsupported() {
         use super::restore_script;
         use majnet_common::manifest::DbEngine;
-        assert!(restore_script(DbEngine::Postgres, "proj_app_production")
-            .unwrap()
-            .contains(r#"-d "proj_app_production""#));
-        assert!(restore_script(DbEngine::Mariadb, "d")
+        let pg = restore_script(DbEngine::Postgres, "proj_app_production", "deadbeef").unwrap();
+        assert!(pg.contains(r#"-U "proj_app_production" -d "proj_app_production""#));
+        assert!(pg.contains("PGPASSWORD='deadbeef'")); // restores as the app user
+        assert!(restore_script(DbEngine::Mariadb, "d", "pw")
             .unwrap()
             .contains("mariadb -uroot"));
-        assert!(restore_script(DbEngine::Mongodb, "d").is_err());
-        assert!(restore_script(DbEngine::Valkey, "d").is_err());
+        assert!(restore_script(DbEngine::Mongodb, "d", "pw").is_err());
+        assert!(restore_script(DbEngine::Valkey, "d", "pw").is_err());
     }
 
     #[test]

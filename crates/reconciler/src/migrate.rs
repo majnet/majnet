@@ -57,7 +57,7 @@ pub async fn restore_db(
     crate::db::ensure(&state.config, &docker, project, app, class, engine, false)
         .await
         .context("provisioning database before restore")?;
-    crate::db::restore(&docker, project, app, class, engine, dump).await?;
+    crate::db::restore(&state.config, &docker, project, app, class, engine, dump).await?;
 
     state
         .store
