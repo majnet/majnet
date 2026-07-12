@@ -1,19 +1,19 @@
 name: app-release
 
 # Reusable release pipeline for MajNet app repos (ADR 0009). Called on a tag
-# `vX.Y.Z`: build + push the app image (and an optional migration image) to
-# GHCR by digest, write the `majnet-release.yaml` descriptor, and publish a
-# GitHub Release with it attached. The bot reads that asset off the `release`
-# webhook and records the release; an operator then promotes it to production.
+# `vX.Y.Z`: build + push the app image to GHCR tagged with the version. A
+# `vX.Y.Z`-tagged image publish IS the release — the `registry_package` webhook
+# carries the tag + digest, and the bot records the release and auto-tracks it
+# into `stable`. There is no release descriptor: the migration lives in the ops
+# overlay (`base.yaml`), and an operator promotes a chosen version to
+# production from the dashboard.
 #
 #   # .github/workflows/release.yaml in the app repo:
 #   on: { push: { tags: ['v*'] } }
 #   jobs:
 #     release:
 #       uses: maxa-ondrej/majnet/.github/workflows/app-release.yaml@main
-#       permissions: { contents: write, packages: write }
-#       with:
-#         migration_command: '["dbmate", "up"]'   # optional
+#       permissions: { contents: read, packages: write }
 
 on:
   workflow_call:
@@ -28,20 +28,12 @@ on:
       context:
         type: string
         default: .
-      migration_command:
-        description: Migration argv as a JSON array; omit for no migration.
-        type: string
-        default: ''
-      migration_dockerfile:
-        description: Separate migration image; omit to run the command in the app image.
-        type: string
-        default: ''
 
 jobs:
   release:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
       packages: write
     steps:
       - uses: actions/checkout@v4
@@ -59,8 +51,7 @@ jobs:
           [ -n "$IMG" ] || IMG="ghcr.io/${{ github.repository }}"
           echo "image=${IMG,,}" >> "$GITHUB_OUTPUT"
 
-      - name: build + push app image
-        id: app
+      - name: build + push app image (tagged with the version)
         uses: docker/build-push-action@v6
         with:
           context: ${{ inputs.context }}
@@ -69,36 +60,3 @@ jobs:
           tags: ${{ steps.img.outputs.image }}:${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      - name: build + push migration image
-        id: mig
-        if: inputs.migration_dockerfile != ''
-        uses: docker/build-push-action@v6
-        with:
-          context: ${{ inputs.context }}
-          file: ${{ inputs.migration_dockerfile }}
-          push: true
-          tags: ${{ steps.img.outputs.image }}-migrate:${{ github.ref_name }}
-
-      - name: write majnet-release.yaml
-        run: |
-          {
-            echo "version: ${{ github.ref_name }}"
-            echo "commit: ${{ github.sha }}"
-            echo "app: ${{ steps.img.outputs.image }}@${{ steps.app.outputs.digest }}"
-            if [ -n '${{ inputs.migration_command }}' ]; then
-              echo "migration:"
-              if [ -n "${{ steps.mig.outputs.digest }}" ]; then
-                echo "  image: ${{ steps.img.outputs.image }}-migrate@${{ steps.mig.outputs.digest }}"
-              fi
-              echo "  command: ${{ inputs.migration_command }}"
-            fi
-          } > majnet-release.yaml
-          echo "── majnet-release.yaml ──"; cat majnet-release.yaml
-
-      - name: publish release with descriptor
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          files: majnet-release.yaml
-          fail_on_unmatched_files: true

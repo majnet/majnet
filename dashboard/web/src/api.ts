@@ -28,8 +28,7 @@ export interface DeployPr {
 export interface ManifestFile { yaml: string; data: unknown }
 export interface Member { user: string; role: string }
 export interface StoredRelease {
-  app: string; version: string; commit: string; app_image: string
-  migration_image: string | null; migration_command: string[] | null; published_at: string
+  app: string; version: string; commit: string; app_image: string; published_at: string
 }
 
 /** Parse a reconciler event timestamp (SQLite `datetime('now')`, UTC). */

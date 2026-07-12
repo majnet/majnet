@@ -1,9 +1,10 @@
-//! Build-tier digest bumps (ADR 0009 phase 5, §11.4): a GHCR container publish
-//! for `<org>/<app>` becomes a commit on the project ops repo `main`. A `main`
-//! build bumps `apps/<app>/testing.yaml` (continuous, latest main); `pr-<N>`
-//! builds feed the ephemeral flow. Releases (tags) drive `stable` — see
-//! `releases::on_release` — and `production` moves only via promote; the review
-//! gate lives downstream in the `env/production` render PR.
+//! Build-tier digest bumps (ADR 0009, §11.4): a GHCR container publish for
+//! `<org>/<app>` becomes a commit on the project ops repo `main`. The image tag
+//! selects the tier: `pr-<N>` → ephemeral preview; `vX.Y.Z` → a release,
+//! recorded + auto-tracked into `stable` (see `releases::record`); anything
+//! else (`latest`, `sha-…`) → `apps/<app>/testing.yaml`. `production` moves
+//! only via promote; the review gate lives downstream in the `env/production`
+//! render PR.
 //!
 //! Commits go through the contents API, so GitHub signs them as the App
 //! (verified). Overlay-presence is opt-in (matching `render`): an app runs a
@@ -57,13 +58,19 @@ pub async fn on_package_published(
         })
         .context("package payload carries no sha256 digest")?;
 
-    // Builds of main move stable; pr-<N> builds feed the ephemeral flow.
+    let image = format!("ghcr.io/{org}/{app}@{digest}");
+
+    // The image tag selects the tier (ADR 0009): `pr-<N>` → ephemeral preview;
+    // `vX.Y.Z` → a release (record it + auto-track stable); anything else
+    // (`latest`, `sha-…`) is a main build → testing.
     if let Some(pr) = tag.strip_prefix("pr-").and_then(|n| n.parse::<u64>().ok()) {
-        let image = format!("ghcr.io/{org}/{app}@{digest}");
         return crate::ephemeral::on_pr_build(state, org, app, pr, &image).await;
     }
+    if is_version_tag(tag) {
+        tracing::info!(org, app, tag, %image, "release publish — recording");
+        return crate::releases::record(state, org, app, tag, &image).await;
+    }
 
-    let image = format!("ghcr.io/{org}/{app}@{digest}");
     tracing::info!(org, app, %image, "main build — bumping testing digest");
     if bump_class_digest(state, org, app, &image, "testing").await? {
         state
@@ -71,6 +78,14 @@ pub async fn on_package_published(
             .log_event("digest-bump", Some(org), &format!("{app} testing → {digest}"))?;
     }
     Ok(())
+}
+
+/// A `vX.Y.Z` release tag: `v` followed by a digit (excludes `latest`, `valkey`,
+/// `sha-…`). The full semver shape is validated downstream by the git tag.
+fn is_version_tag(tag: &str) -> bool {
+    tag.strip_prefix('v')
+        .and_then(|rest| rest.chars().next())
+        .is_some_and(|c| c.is_ascii_digit())
 }
 
 /// Bump the top-level `image:` digest in `apps/{app}/{class}.yaml` on ops `main`.
@@ -153,7 +168,19 @@ pub(crate) fn replace_image_line(content: &str, image: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::replace_image_line;
+    use super::{is_version_tag, replace_image_line};
+
+    #[test]
+    fn version_tags_are_recognized() {
+        assert!(is_version_tag("v1.4.2"));
+        assert!(is_version_tag("v2"));
+        assert!(is_version_tag("v0.1.0-rc1"));
+        assert!(!is_version_tag("latest"));
+        assert!(!is_version_tag("valkey"));
+        assert!(!is_version_tag("sha-abc123"));
+        assert!(!is_version_tag("v"));
+        assert!(!is_version_tag("main"));
+    }
 
     #[test]
     fn replaces_top_level_image_preserving_rest() {

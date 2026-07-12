@@ -5,8 +5,10 @@
 //!   (ADR 0001: the native package webhook *is* the "GHA → bot" notification)
 //! - `push` to `env/<class>` branches of an ops repo, or to the root platform
 //!   repo → notify the reconciler; `push` to ops `main` → render
-//! - `release` → record the app's release descriptor (ADR 0009)
 //! - `pull_request` → ephemeral preview lifecycle
+//!
+//! Releases are not a distinct event: a `vX.Y.Z`-tagged image publish arrives
+//! as `registry_package` and is recorded there (ADR 0009).
 //! - `ping` → 200
 
 use axum::body::Bytes;
@@ -95,7 +97,6 @@ async fn dispatch(state: &AppState, event: &str, payload: serde_json::Value) -> 
             crate::digest::on_package_published(state, &org, &payload).await?;
         }
         "push" => on_push(state, &org, &payload).await?,
-        "release" => crate::releases::on_release(state, &org, &payload).await?,
         "pull_request" => {
             let action = payload["action"].as_str().unwrap_or_default();
             let number = payload["number"].as_u64().unwrap_or_default();

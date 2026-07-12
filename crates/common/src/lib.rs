@@ -10,7 +10,6 @@ pub mod manifest;
 pub mod merge;
 pub mod platform;
 pub mod project;
-pub mod release;
 pub mod tarball;
 
 /// Environment classes — see design doc §8.

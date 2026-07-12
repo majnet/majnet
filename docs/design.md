@@ -164,7 +164,7 @@ bumps; releases (tags `vX.Y.Z`) are immutable, versioned bundles.
 
 Config inheritance: `base.yaml` + thin class overlays (`testing`/`stable`/`production`/`ephemeral`.yaml); ephemeral manifests generated, never hand-written. Dedicated domains point only at production; non-prod lives at `<app>.<project>.majksa.net` / `<app>-pr<N>.<project>.majksa.net` via split DNS on the tailnet.
 
-**Promotion:** merge → `testing`; tag `vX.Y.Z` → `stable`; promote a release → bot opens the `env/production` render PR → review + merge → prod converges. See ADR 0009 for the release descriptor + CI.
+**Promotion:** merge → `testing`; tag `vX.Y.Z` → `stable`; promote a release → bot opens the `env/production` render PR → review + merge → prod converges. See ADR 0009 for the release pipeline + CI (a release is a `vX.Y.Z`-tagged image publish).
 
 ## 9. Project `ops` Repo
 

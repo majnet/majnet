@@ -69,7 +69,7 @@ impl Ingress {
 }
 
 /// Enforce `repo@sha256:<64 hex>` — images are pinned by digest, never by tag
-/// (§5). Shared by the manifest and the release descriptor (ADR 0009).
+/// (§5).
 pub fn validate_digest_pinned(image: &str) -> Result<()> {
     let Some((repo, digest)) = image.split_once('@') else {
         bail!("image '{image}' is not digest-pinned (expected repo@sha256:…)");

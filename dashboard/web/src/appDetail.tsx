@@ -5,7 +5,6 @@ import { useApiMutation } from './mutations'
 import { ConfirmButton, DeployStatus, QueryState, short, StatusBadge } from './ui'
 import { Crumbs, PageHead } from './views'
 import { fromData, ManifestForm, toManifest, type ManifestDraft } from './manifestForm'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -87,7 +86,7 @@ function Releases({ org, app, prodImage }: { org: string; app: string; prodImage
       <h2 className="mb-2 text-sm font-semibold">Releases</h2>
       {releases.length === 0 && (
         <p className="text-sm text-muted-foreground">
-          No releases yet. Tag <code className="font-mono">vX.Y.Z</code> in the app repo (with a <code className="font-mono">majnet-release.yaml</code>) to publish one.
+          No releases yet. Tag <code className="font-mono">vX.Y.Z</code> in the app repo to publish one.
         </p>
       )}
       <div className="flex flex-col gap-2">
@@ -99,7 +98,6 @@ function Releases({ org, app, prodImage }: { org: string; app: string; prodImage
                 <div className="flex flex-wrap items-center gap-2 font-medium">
                   {r.version}
                   {onProd && <StatusBadge tone="success" dot>on production</StatusBadge>}
-                  {r.migration_command && <Badge variant="secondary">migration</Badge>}
                 </div>
                 <div className="truncate font-mono text-xs text-muted-foreground">
                   {short(r.app_image)} · {r.commit.slice(0, 7)} · {r.published_at}
