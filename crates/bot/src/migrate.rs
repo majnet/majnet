@@ -319,8 +319,10 @@ async fn fetch_repo_snapshot(
     majnet_common::tarball::untar(&bytes).context("unpacking source tarball")
 }
 
-/// Write `files` as a single commit on the new repo's `main` (create the ref, or
-/// force-update it if a prior partial import left one).
+/// Write `files` as a single commit on the new repo's `main`, then force-update
+/// the ref. A zero-commit repo has no writable git object DB, so bootstrap
+/// `main` via the Contents API first (same fix as `ensure_ops_repo`); the
+/// snapshot commit then replaces that placeholder tree.
 async fn commit_snapshot(
     client: &octocrab::Octocrab,
     org: &str,
@@ -329,6 +331,22 @@ async fn commit_snapshot(
     message: &str,
 ) -> Result<()> {
     let repo = format!("/repos/{org}/{app}");
+    if crate::git::get_branch_head(client, &repo, "main").await?.is_none() {
+        client
+            .repos(org, app)
+            .create_file(
+                ".majnet-init",
+                "chore: initialize repo",
+                "placeholder — replaced by the import commit\n",
+            )
+            .send()
+            .await
+            .context("initializing empty repo via the Contents API")?;
+    }
+    let head = crate::git::get_branch_head(client, &repo, "main")
+        .await?
+        .context("repo has no main branch after initialization")?;
+
     let mut blobs = BTreeMap::new();
     for (path, content) in files {
         let sha = crate::git::create_blob(client, &repo, content)
@@ -337,16 +355,8 @@ async fn commit_snapshot(
         blobs.insert(path.clone(), sha);
     }
     let tree = crate::git::create_tree_from_blobs(client, &repo, &blobs).await?;
-    match crate::git::get_branch_head(client, &repo, "main").await? {
-        Some(head) => {
-            let commit = crate::git::create_commit(client, &repo, &tree, &[&head], message).await?;
-            crate::git::force_update_ref(client, &repo, "main", &commit).await
-        }
-        None => {
-            let commit = crate::git::create_commit(client, &repo, &tree, &[], message).await?;
-            crate::git::create_ref(client, &repo, "main", &commit).await
-        }
-    }
+    let commit = crate::git::create_commit(client, &repo, &tree, &[&head], message).await?;
+    crate::git::force_update_ref(client, &repo, "main", &commit).await
 }
 
 /// `owner`, `repo` from a GitHub URL (`https://github.com/owner/repo[.git]`).
