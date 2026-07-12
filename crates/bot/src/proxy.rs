@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, HeaderName, StatusCode};
 use axum::response::IntoResponse;
+use axum::Json;
 use secrecy::ExposeSecret;
 use std::sync::Arc;
 
@@ -91,4 +92,31 @@ pub(crate) async fn fetch_snapshot(
         "snapshot cached"
     );
     Ok((sha, bytes))
+}
+
+/// A short-lived GHCR pull credential (ADR 0012). The reconciler uses it as
+/// Docker registry auth to pull an org's **private** app images.
+#[derive(serde::Serialize)]
+pub struct RegistryAuth {
+    pub username: String,
+    pub password: String,
+}
+
+/// `GET /api/registry-auth/{org}` (WG-internal) — mint a GHCR credential for the
+/// reconciler. The App holds `packages: read`, so its installation token
+/// authenticates a pull of the org's private packages. Trust is the WireGuard
+/// bind (same as the snapshot API); the reconciler never holds the App key.
+pub async fn registry_auth(
+    State(state): State<Arc<AppState>>,
+    Path(org): Path<String>,
+) -> Result<Json<RegistryAuth>, (StatusCode, String)> {
+    let (_, token) = state
+        .github
+        .org_client_and_token(&org)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
+    Ok(Json(RegistryAuth {
+        username: "x-access-token".to_string(),
+        password: token.expose_secret().to_string(),
+    }))
 }

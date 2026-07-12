@@ -73,6 +73,7 @@ async fn main() -> Result<()> {
     let internal_app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/snapshot/{org}/{repo}/{branch}", get(proxy::snapshot))
+        .route("/api/registry-auth/{org}", get(proxy::registry_auth))
         .route("/api/tailscale-authkey/{project}", post(tailscale::authkey))
         .route("/api/promote/{org}/{app}", post(promote::promote))
         .route("/api/rollback/{org}", post(promote::rollback))

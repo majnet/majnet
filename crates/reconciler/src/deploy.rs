@@ -28,6 +28,9 @@ pub struct DeployCtx<'a> {
     pub class: EnvClass,
     pub commit: &'a str,
     pub dry_run: bool,
+    /// For fetching a GHCR pull credential from the bot (ADR 0012).
+    pub http: &'a reqwest::Client,
+    pub bot_url: &'a str,
 }
 
 pub const LABEL_PROJECT: &str = "majnet.project";
@@ -66,7 +69,7 @@ pub async fn converge_app(
         ));
     }
 
-    pull_image(ctx.docker, &manifest.image).await?;
+    pull_image(ctx, &manifest.image).await?;
 
     // Secrets land on the node's tmpfs before anything runs.
     let secrets_dir = crate::secrets::host_dir(ctx.project, &manifest.name, ctx.class);
@@ -363,7 +366,7 @@ async fn run_migration(
 
     // The app image was already pulled; a distinct migration image needs its own.
     if image != manifest.image {
-        pull_image(ctx.docker, image).await?;
+        pull_image(ctx, image).await?;
     }
 
     let body = ContainerCreateBody {
@@ -454,26 +457,61 @@ async fn await_healthy(docker: &Docker, name: &str, manifest: &AppManifest) -> R
     }
 }
 
-async fn pull_image(docker: &Docker, image: &str) -> Result<()> {
-    if docker.inspect_image(image).await.is_ok() {
+async fn pull_image(ctx: &DeployCtx<'_>, image: &str) -> Result<()> {
+    if ctx.docker.inspect_image(image).await.is_ok() {
         return Ok(()); // digests are immutable — a present image is the image
     }
-    // NOTE: private GHCR packages need node-level pull auth (docker login on
-    // the node, done at bootstrap) — the reconciler itself holds no GitHub
-    // credentials by design (§6). Tracked in roadmap open questions.
-    docker
+    // Private GHCR app images need pull auth. The reconciler holds no GitHub
+    // credentials by design (§6), so it fetches a short-lived GHCR credential
+    // from the bot (which holds the App + `packages: read`) — ADR 0012.
+    let credentials = ghcr_credentials(ctx, image).await;
+    ctx.docker
         .create_image(
             Some(qp::CreateImageOptions {
                 from_image: Some(image.into()),
                 ..Default::default()
             }),
             None,
-            None,
+            credentials,
         )
         .try_collect::<Vec<_>>()
         .await
         .with_context(|| format!("pulling {image}"))?;
     Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct RegistryAuth {
+    username: String,
+    password: String,
+}
+
+/// A GHCR pull credential from the bot for `ghcr.io/<org>/…` images (ADR 0012).
+/// `None` for non-GHCR images (public registries need no auth) or if the bot is
+/// unreachable — the pull then proceeds unauthenticated (fine for public images).
+async fn ghcr_credentials(
+    ctx: &DeployCtx<'_>,
+    image: &str,
+) -> Option<bollard::auth::DockerCredentials> {
+    let org = image.strip_prefix("ghcr.io/")?.split('/').next()?;
+    let url = format!("{}/api/registry-auth/{}", ctx.bot_url, org);
+    match ctx.http.get(&url).send().await.and_then(|r| r.error_for_status()) {
+        Ok(resp) => match resp.json::<RegistryAuth>().await {
+            Ok(auth) => Some(bollard::auth::DockerCredentials {
+                username: Some(auth.username),
+                password: Some(auth.password),
+                ..Default::default()
+            }),
+            Err(e) => {
+                tracing::warn!(image, error = %e, "registry-auth parse failed; pulling unauthenticated");
+                None
+            }
+        },
+        Err(e) => {
+            tracing::warn!(image, error = %e, "registry-auth fetch failed; pulling unauthenticated");
+            None
+        }
+    }
 }
 
 async fn list_app_containers(ctx: &DeployCtx<'_>, app: &str) -> Result<Vec<ContainerSummary>> {

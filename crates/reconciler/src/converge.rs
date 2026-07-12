@@ -112,6 +112,8 @@ async fn converge_project_class(
         class,
         commit: &snapshot.commit,
         dry_run: state.config.dry_run,
+        http: &state.http,
+        bot_url: &state.config.bot_url,
     };
 
     // Rendered env branch layout (§9): `<app>.yaml` at root, `secrets/<app>.yaml`.

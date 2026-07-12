@@ -165,6 +165,8 @@ async fn do_restart(
         class,
         commit: "imperative",
         dry_run: false,
+        http: &state.http,
+        bot_url: &state.config.bot_url,
     };
     let restarted = crate::deploy::restart_app(&ctx, app).await?;
     anyhow::ensure!(
