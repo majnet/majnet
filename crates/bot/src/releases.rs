@@ -81,6 +81,21 @@ pub async fn on_release(state: &AppState, org: &str, payload: &serde_json::Value
         &format!("{app} {} ({})", descriptor.version, &descriptor.app),
     )?;
     tracing::info!(org, app, version = %descriptor.version, "release recorded");
+
+    // Stable auto-tracks the latest tag (ADR 0009 phase 5): re-point
+    // `apps/{app}/stable.yaml` at the newest recorded release — opt-in, so only
+    // if the app committed a stable overlay. The store orders by publish time,
+    // so editing/re-publishing an older release won't demote stable off the
+    // true latest; `production` moves only via promote.
+    if let Some(latest) = state.store.releases(org, app)?.into_iter().next() {
+        if crate::digest::bump_class_digest(state, org, app, &latest.app_image, "stable").await? {
+            state.store.log_event(
+                "digest-bump",
+                Some(org),
+                &format!("{app} stable → {} ({})", latest.version, latest.app_image),
+            )?;
+        }
+    }
     Ok(())
 }
 

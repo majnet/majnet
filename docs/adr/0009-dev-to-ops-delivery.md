@@ -118,15 +118,17 @@ The reconciler's existing §12 pre-rollout migration step runs `migration.image`
    (build → push by digest → publish Release with `majnet-release.yaml` asset);
    `release.yaml` added to the web-app + rust-service templates. Bot reads the
    descriptor from the release asset.
-5. **Build-tier wiring** — main/PR push → image bumps into testing/ephemeral.
+5. ✅ **Build-tier wiring** — a `main` build bumps `apps/<app>/testing.yaml`
+   (was `stable.yaml`); a published release re-points `apps/<app>/stable.yaml`
+   at the newest tag. Both are **opt-in by overlay-presence** (matching
+   `render`): an absent overlay skips the bump, never creates it. `pr-<N>`
+   builds still feed `ephemeral`.
 
 ## Open items
 
 - **Release backfill** — a periodic reconcile listing releases + assets from
   GitHub, so a missed/out-of-order `release` webhook (e.g. asset attached just
   after publish) still populates the store. The webhook is the fast path.
-- Build-tier trigger for `testing` (main push → bump `testing.yaml`): auto vs
-  opt-in per app.
 - Production promote: allow any release, or only newer-than-current?
 - Descriptor provenance/signing (attestations) — later.
 - `ephemeral` still builds per-PR; confirm it stays digest-from-PR-build (yes).

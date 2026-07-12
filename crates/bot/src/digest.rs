@@ -1,9 +1,14 @@
-//! Digest bumps (§11.4): a GHCR container publish for `<org>/<app>` becomes a
-//! commit on the project ops repo `main`, updating the `image:` digest in
-//! `apps/<app>/stable.yaml`. Commits go through the contents API, so GitHub
-//! signs them as the App (verified). The production digest moves only via the
-//! promote action (phase 4); the review gate lives downstream in the
-//! `env/production` render PR.
+//! Build-tier digest bumps (ADR 0009 phase 5, §11.4): a GHCR container publish
+//! for `<org>/<app>` becomes a commit on the project ops repo `main`. A `main`
+//! build bumps `apps/<app>/testing.yaml` (continuous, latest main); `pr-<N>`
+//! builds feed the ephemeral flow. Releases (tags) drive `stable` — see
+//! `releases::on_release` — and `production` moves only via promote; the review
+//! gate lives downstream in the `env/production` render PR.
+//!
+//! Commits go through the contents API, so GitHub signs them as the App
+//! (verified). Overlay-presence is opt-in (matching `render`): an app runs a
+//! class only if it commits that overlay, so an absent overlay skips the bump —
+//! we never create the overlay on the app's behalf.
 
 use anyhow::{bail, Context, Result};
 use base64::Engine;
@@ -59,17 +64,28 @@ pub async fn on_package_published(
     }
 
     let image = format!("ghcr.io/{org}/{app}@{digest}");
-    tracing::info!(org, app, %image, "bumping stable digest");
-    bump_stable_digest(state, org, app, &image).await?;
-    state
-        .store
-        .log_event("digest-bump", Some(org), &format!("{app} → {digest}"))?;
+    tracing::info!(org, app, %image, "main build — bumping testing digest");
+    if bump_class_digest(state, org, app, &image, "testing").await? {
+        state
+            .store
+            .log_event("digest-bump", Some(org), &format!("{app} testing → {digest}"))?;
+    }
     Ok(())
 }
 
-async fn bump_stable_digest(state: &AppState, org: &str, app: &str, image: &str) -> Result<()> {
+/// Bump the top-level `image:` digest in `apps/{app}/{class}.yaml` on ops `main`.
+/// Overlay-presence is opt-in (ADR 0009 phase 5): an absent overlay means the
+/// app doesn't run this class, so we skip rather than create it. Returns whether
+/// a commit was made (`false` = opted out, or the digest was already current).
+pub(crate) async fn bump_class_digest(
+    state: &AppState,
+    org: &str,
+    app: &str,
+    image: &str,
+    class: &str,
+) -> Result<bool> {
     let client = state.github.org_client(org).await?;
-    let path = format!("apps/{app}/stable.yaml");
+    let path = format!("apps/{app}/{class}.yaml");
     let repos = client.repos(org, "ops");
 
     let existing = repos.get_content().path(&path).r#ref("main").send().await;
@@ -82,19 +98,19 @@ async fn bump_stable_digest(state: &AppState, org: &str, app: &str, image: &str)
                 .context("empty contents response")?;
             let encoded = item.content.unwrap_or_default().replace(['\n', ' '], "");
             let decoded = base64::engine::general_purpose::STANDARD.decode(encoded)?;
-            (String::from_utf8(decoded)?, Some(item.sha))
+            (String::from_utf8(decoded)?, item.sha)
         }
-        Err(octocrab::Error::GitHub { source, .. }) if source.status_code == 404 => (
-            format!("# stable overlay for {app} — digest managed by the bot\nimage: {image}\n"),
-            None,
-        ),
-        Err(e) => return Err(e).context("fetching stable overlay"),
+        Err(octocrab::Error::GitHub { source, .. }) if source.status_code == 404 => {
+            tracing::info!(org, app, class, "no {class} overlay — app not opted into this class");
+            return Ok(false);
+        }
+        Err(e) => return Err(e).context("fetching class overlay"),
     };
 
     let updated = replace_image_line(&current, image)?;
-    if updated == current && sha.is_some() {
-        tracing::info!(org, app, "digest unchanged, nothing to commit");
-        return Ok(());
+    if updated == current {
+        tracing::info!(org, app, class, "digest unchanged, nothing to commit");
+        return Ok(false);
     }
 
     let short = image
@@ -102,24 +118,13 @@ async fn bump_stable_digest(state: &AppState, org: &str, app: &str, image: &str)
         .next()
         .map(|d| &d[..12.min(d.len())])
         .unwrap_or("?");
-    let message = format!("chore({app}): bump stable digest to {short}");
-    match sha {
-        Some(sha) => {
-            repos
-                .update_file(&path, &message, &updated, &sha)
-                .branch("main")
-                .send()
-                .await?;
-        }
-        None => {
-            repos
-                .create_file(&path, &message, &updated)
-                .branch("main")
-                .send()
-                .await?;
-        }
-    }
-    Ok(())
+    let message = format!("chore({app}): bump {class} digest to {short}");
+    repos
+        .update_file(&path, &message, &updated, &sha)
+        .branch("main")
+        .send()
+        .await?;
+    Ok(true)
 }
 
 /// Replace the value of the top-level `image:` line, leaving everything else
