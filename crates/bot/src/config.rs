@@ -37,6 +37,11 @@ pub struct Config {
     /// disables origin-cert issuance (DNS-only). Get it with
     /// `age-keygen -y /etc/majnet/age/age-production.key`.
     pub age_production_recipient: Option<String>,
+    /// A GHCR credential (fine-grained/classic PAT with `read:packages`) served
+    /// to the reconciler so nodes can pull **private** app images (ADR 0012).
+    /// GitHub App installation tokens are not honored by GHCR for package pulls,
+    /// so a PAT is required. `None` = only public images pull.
+    pub ghcr_token: Option<String>,
 }
 
 impl Config {
@@ -65,6 +70,9 @@ impl Config {
                 .ok()
                 .filter(|v| !v.is_empty()),
             age_production_recipient: std::env::var("MAJNET_AGE_PRODUCTION_RECIPIENT")
+                .ok()
+                .filter(|v| !v.is_empty()),
+            ghcr_token: std::env::var("MAJNET_GHCR_TOKEN")
                 .ok()
                 .filter(|v| !v.is_empty()),
         })

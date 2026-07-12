@@ -16,13 +16,23 @@ had needed node→GHCR auth before.
 
 ## Decision
 
-**The bot mints a short-lived GHCR pull credential; the reconciler uses it as
-Docker registry auth.** The GitHub App already holds `packages: read`, so its
-per-org installation token can pull the org's private packages.
+**The bot serves a GHCR pull credential; the reconciler uses it as Docker
+registry auth.**
+
+> **Note (implementation finding):** the first cut used the GitHub App's
+> installation token (the App holds `packages: read`). **GHCR does not honor App
+> installation tokens for package pulls** — the token authenticates but the pull
+> 403/404s on the package. So the served credential is a **configured PAT**
+> (`MAJNET_GHCR_TOKEN`, a fine-grained or classic token with `read:packages`),
+> not the App token. The plumbing below is unchanged; only the credential
+> differs. The App-token path remains as a fallback (enough for *public*
+> packages, which need no real auth anyway).
 
 - **Bot** exposes `GET /api/registry-auth/{org}` on the WG-internal listener,
-  returning `{ username: "x-access-token", password: <installation token> }`.
-  Trust is the WireGuard bind — same model as the snapshot API. (`proxy.rs`.)
+  returning `{ username: "x-access-token", password: <MAJNET_GHCR_TOKEN, or the
+  installation token if unset> }`. Trust is the WireGuard bind — same model as
+  the snapshot API. (`proxy.rs`.) `MAJNET_GHCR_TOKEN` lives in the bot's env
+  (`/etc/majnet/bot.env`), never on disk in the reconciler.
 - **Reconciler**, before pulling a `ghcr.io/<org>/…` image, fetches that
   credential over WG and passes it to `create_image` as `DockerCredentials`
   (`deploy::ghcr_credentials` / `pull_image`). Non-GHCR images (public

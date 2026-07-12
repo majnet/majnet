@@ -102,21 +102,29 @@ pub struct RegistryAuth {
     pub password: String,
 }
 
-/// `GET /api/registry-auth/{org}` (WG-internal) — mint a GHCR credential for the
-/// reconciler. The App holds `packages: read`, so its installation token
-/// authenticates a pull of the org's private packages. Trust is the WireGuard
-/// bind (same as the snapshot API); the reconciler never holds the App key.
+/// `GET /api/registry-auth/{org}` (WG-internal) — a GHCR credential for the
+/// reconciler to pull the org's private app images (ADR 0012). Prefers the
+/// configured `MAJNET_GHCR_TOKEN` PAT (GHCR does **not** honor GitHub App
+/// installation tokens for package pulls); falls back to the installation token
+/// (enough for public packages). Trust is the WireGuard bind (like the snapshot
+/// API); the reconciler never holds the App key.
 pub async fn registry_auth(
     State(state): State<Arc<AppState>>,
     Path(org): Path<String>,
 ) -> Result<Json<RegistryAuth>, (StatusCode, String)> {
-    let (_, token) = state
-        .github
-        .org_client_and_token(&org)
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
+    let password = match &state.config.ghcr_token {
+        Some(pat) => pat.clone(),
+        None => {
+            let (_, token) = state
+                .github
+                .org_client_and_token(&org)
+                .await
+                .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
+            token.expose_secret().to_string()
+        }
+    };
     Ok(Json(RegistryAuth {
         username: "x-access-token".to_string(),
-        password: token.expose_secret().to_string(),
+        password,
     }))
 }
