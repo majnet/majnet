@@ -79,6 +79,30 @@ pub async fn ensure_domains(state: &AppState, rendered: &BTreeMap<String, String
     Ok(())
 }
 
+/// Ensure the split-DNS CNAME for a project's VPN ingress (ADR 0013 phase 4):
+/// `*.{project}.{base_domain}` (DNS-only) → the project ingress's MagicDNS name
+/// `{project}.{tailnet}`. On the tailnet, MagicDNS resolves that target to the
+/// ingress sidecar's `100.x` address; off-tailnet the target is unresolvable,
+/// so VPN hosts publish no tailnet IPs and stay VPN-only. No-op without a
+/// Cloudflare token or a configured tailnet, or if the base domain's zone isn't
+/// on this Cloudflare account (logged, non-fatal to the caller).
+pub async fn ensure_ingress_dns(state: &AppState, project: &str, base_domain: &str) -> Result<()> {
+    let (Some(token), Some(tailnet)) = (
+        state.config.cloudflare_token.clone(),
+        state.config.tailnet.clone(),
+    ) else {
+        tracing::debug!(project, "Cloudflare token or tailnet unset — skipping ingress DNS");
+        return Ok(());
+    };
+    let cf = Cloudflare::new(state.http.clone(), token);
+    let zone = cf.zone_for(&format!("{project}.{base_domain}")).await?;
+    let name = format!("*.{project}.{base_domain}");
+    let target = format!("{project}.{tailnet}");
+    cf.ensure_dns_cname(&zone, &name, &target).await?;
+    tracing::info!(project, %name, %target, "ingress split-DNS CNAME ensured");
+    Ok(())
+}
+
 /// Issue + commit a Cloudflare Origin CA certificate for `zone` if one isn't
 /// already in the platform repo. The cert lands plaintext, the private key
 /// age-encrypted to the production recipient — only the reconciler decrypts it.
@@ -320,6 +344,42 @@ impl Cloudflare {
                 )
                 .await
                 .with_context(|| format!("creating DNS record for {name}")),
+        }
+    }
+
+    /// Ensure a **DNS-only** (unproxied) CNAME `name → target` (create or
+    /// update). Used for the VPN ingress split DNS (ADR 0013): Cloudflare can't
+    /// proxy to a tailnet address, and we want the tailnet resolver to follow
+    /// the target directly.
+    pub async fn ensure_dns_cname(&self, zone: &Zone, name: &str, target: &str) -> Result<()> {
+        let existing: Vec<DnsRecord> = self
+            .get(&format!(
+                "/zones/{}/dns_records?type=CNAME&name={name}",
+                zone.id
+            ))
+            .await
+            .context("listing CNAME records")?;
+        let body = serde_json::json!({
+            "type": "CNAME", "name": name, "content": target, "proxied": false, "ttl": 1
+        });
+        match existing.first() {
+            Some(rec) if rec.content == target && !rec.proxied => Ok(()),
+            Some(rec) => self
+                .send(
+                    reqwest::Method::PATCH,
+                    &format!("/zones/{}/dns_records/{}", zone.id, rec.id),
+                    Some(body),
+                )
+                .await
+                .with_context(|| format!("updating CNAME for {name}")),
+            None => self
+                .send(
+                    reqwest::Method::POST,
+                    &format!("/zones/{}/dns_records", zone.id),
+                    Some(body),
+                )
+                .await
+                .with_context(|| format!("creating CNAME for {name}")),
         }
     }
 

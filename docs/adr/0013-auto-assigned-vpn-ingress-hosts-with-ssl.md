@@ -1,6 +1,6 @@
 # 0013 — Auto-assigned VPN ingress hosts with SSL
 
-**Status:** accepted · **Date:** 2026-07-13 · Phases 1–3 coded; 4 next. 3 unverified until the private node is enrolled
+**Status:** accepted · **Date:** 2026-07-13 · All four phases coded; 3–4 unverified until the private node is enrolled
 
 ## Context
 
@@ -162,7 +162,11 @@ edits inside the bot's existing Cloudflare + Tailscale ownership.)*
    cert-hash change (`majnet.config-hash` label). No committed cert → Traefik
    still comes up on its self-signed default (untrusted). *Code-complete;
    unverified until the private node runs it.*
-4. **Split DNS.** Bot ensures the `*.{project}.{base_domain}` → MagicDNS CNAME.
+4. ✅ **Split DNS.** `cloudflare::ensure_ingress_dns` ensures a DNS-only CNAME
+   `*.{project}.{base_domain}` → `{project}.{tailnet}` (`Cloudflare::ensure_dns_cname`),
+   hooked into org-sync per project (non-fatal). No-op without a Cloudflare
+   token or configured tailnet. *Code-complete; unverified until the private
+   node is enrolled.*
 
 ## Consequences
 

@@ -82,6 +82,18 @@ pub async fn sync_all(state: &AppState) -> Result<()> {
                 .store
                 .log_event("ingress-cert", Some(name), &format!("FAILED: {e:#}"))?;
         }
+        // Split DNS so the wildcard resolves to the project ingress over the
+        // tailnet (ADR 0013 phase 4). Independent of the cert; non-fatal.
+        if let Err(e) = crate::cloudflare::ensure_ingress_dns(state, name, &base_domain).await {
+            tracing::error!(
+                project = name,
+                error = format!("{e:#}"),
+                "ingress DNS ensure failed"
+            );
+            state
+                .store
+                .log_event("ingress-dns", Some(name), &format!("FAILED: {e:#}"))?;
+        }
     }
     Ok(())
 }
