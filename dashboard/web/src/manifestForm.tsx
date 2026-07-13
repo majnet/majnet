@@ -16,6 +16,7 @@ export interface ManifestDraft {
   env: [string, string][]
   secrets: string[]
   migration: { on: boolean; command: string[] }
+  volumes: [string, string][]
 }
 
 type Rec = Record<string, unknown>
@@ -33,6 +34,9 @@ export function fromData(data: unknown): ManifestDraft {
     env: Object.entries(env).map(([k, v]) => [k, String(v)] as [string, string]),
     secrets: Array.isArray(d.secrets) ? d.secrets.map(String) : [],
     migration: { on: !!d.migration, command: Array.isArray(mig.command) ? mig.command.map(String) : [] },
+    volumes: Array.isArray(d.volumes)
+      ? d.volumes.map((v) => { const r = asRec(v); return [str(r.name), str(r.path)] as [string, string] })
+      : [],
   }
 }
 
@@ -60,6 +64,10 @@ export function toManifest(d: ManifestDraft, file: string, app: string): Rec {
     const command = d.migration.command.map((s) => s.trim()).filter(Boolean)
     if (command.length) out.migration = { command }
   }
+  const volumes = d.volumes
+    .map(([name, path]) => ({ name: name.trim(), path: path.trim() }))
+    .filter((v) => v.name && v.path)
+  if (volumes.length) out.volumes = volumes
   return out
 }
 
@@ -90,14 +98,14 @@ function ListEditor({ values, onChange, placeholder }: { values: string[]; onCha
   )
 }
 
-function KvEditor({ pairs, onChange }: { pairs: [string, string][]; onChange: (v: [string, string][]) => void }) {
+function KvEditor({ pairs, onChange, kPlaceholder = 'KEY', vPlaceholder = 'value' }: { pairs: [string, string][]; onChange: (v: [string, string][]) => void; kPlaceholder?: string; vPlaceholder?: string }) {
   const set = (i: number, k: string, val: string) => onChange(pairs.map((p, j) => (j === i ? [k, val] : p)))
   return (
     <div className="flex flex-col gap-1.5">
       {pairs.map(([k, v], i) => (
         <div key={i} className="grid grid-cols-[1fr_1fr_auto] gap-1.5">
-          <Input value={k} placeholder="KEY" onChange={(e) => set(i, e.target.value, v)} />
-          <Input value={v} placeholder="value" onChange={(e) => set(i, k, e.target.value)} />
+          <Input value={k} placeholder={kPlaceholder} onChange={(e) => set(i, e.target.value, v)} />
+          <Input value={v} placeholder={vPlaceholder} onChange={(e) => set(i, k, e.target.value)} />
           <Button type="button" variant="ghost" size="icon" onClick={() => onChange(pairs.filter((_, j) => j !== i))}><X className="size-4" /></Button>
         </div>
       ))}
@@ -151,6 +159,11 @@ export function ManifestForm({ file, draft, onChange }: { file: string; draft: M
       <Fld label="Secrets">
         <ListEditor values={draft.secrets} placeholder="SECRET_NAME" onChange={(secrets) => set('secrets', secrets)} />
         <span className="text-xs text-muted-foreground">Names of secret env vars; the values live SOPS-encrypted and are edited outside the UI.</span>
+      </Fld>
+
+      <Fld label="Volumes">
+        <KvEditor pairs={draft.volumes} kPlaceholder="name" vPlaceholder="/app/data" onChange={(volumes) => set('volumes', volumes)} />
+        <span className="text-xs text-muted-foreground">Persistent named volumes (name → container mount path); survive redeploys, never auto-deleted.</span>
       </Fld>
 
       <Section label="Migration" on={draft.migration.on} onToggle={(on) => set('migration', { ...draft.migration, on })}>

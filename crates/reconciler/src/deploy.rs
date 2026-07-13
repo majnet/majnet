@@ -43,6 +43,58 @@ pub fn network_name(project: &str) -> String {
     format!("proj-{project}")
 }
 
+/// The Docker named volume backing a manifest volume on the app's node.
+/// Deterministic per (project, app, class, name) so blue-green redeploys reuse
+/// the same volume — data persists.
+pub fn volume_name(project: &str, app: &str, class: EnvClass, name: &str) -> String {
+    format!("majnet-{project}-{app}-{}-{}", class.as_str(), name)
+}
+
+/// The container bind mounts: the secrets tmpfs (read-only, if any) plus each
+/// declared persistent volume. `None` when there's nothing to bind.
+fn mount_binds(
+    ctx: &DeployCtx<'_>,
+    manifest: &AppManifest,
+    with_secrets: bool,
+    secrets_dir: &str,
+) -> Option<Vec<String>> {
+    let mut binds = Vec::new();
+    if with_secrets {
+        binds.push(format!("{secrets_dir}:/run/secrets:ro"));
+    }
+    for v in &manifest.volumes {
+        let vol = volume_name(ctx.project, &manifest.name, ctx.class, &v.name);
+        binds.push(format!("{vol}:{}", v.path));
+    }
+    (!binds.is_empty()).then_some(binds)
+}
+
+/// Create the app's persistent volumes on the node (idempotent — Docker returns
+/// the existing volume for a name that's already there). Never deleted on
+/// teardown: data is preserved ("archive, never delete").
+async fn ensure_volumes(ctx: &DeployCtx<'_>, manifest: &AppManifest) -> Result<()> {
+    for v in &manifest.volumes {
+        let name = volume_name(ctx.project, &manifest.name, ctx.class, &v.name);
+        if ctx.dry_run {
+            tracing::info!(volume = name, "DRY RUN: would ensure volume");
+            continue;
+        }
+        ctx.docker
+            .create_volume(bollard::models::VolumeCreateRequest {
+                name: Some(name.clone()),
+                labels: Some(HashMap::from([
+                    (LABEL_PROJECT.to_string(), ctx.project.to_string()),
+                    (LABEL_APP.to_string(), manifest.name.clone()),
+                    (LABEL_CLASS.to_string(), ctx.class.as_str().to_string()),
+                ])),
+                ..Default::default()
+            })
+            .await
+            .with_context(|| format!("creating volume {name}"))?;
+    }
+    Ok(())
+}
+
 /// Converge one app to its rendered manifest. Returns a human summary.
 /// `extra_env` carries injected platform values (DB connection, §15).
 pub async fn converge_app(
@@ -78,6 +130,9 @@ pub async fn converge_app(
             .await
             .context("delivering secrets")?;
     }
+
+    // Persistent volumes exist before the container mounts them.
+    ensure_volumes(ctx, manifest).await?;
 
     // Migrations: one-shot, must exit 0 before the rollout (§12.6). Runs in its
     // own image when the manifest gives one (ADR 0009), else the app image.
@@ -340,7 +395,7 @@ fn container_spec(
         healthcheck: health,
         host_config: Some(HostConfig {
             network_mode: Some(network_name(ctx.project)),
-            binds: with_secrets.then(|| vec![format!("{secrets_dir}:/run/secrets:ro")]),
+            binds: mount_binds(ctx, manifest, with_secrets, secrets_dir),
             restart_policy: Some(RestartPolicy {
                 name: Some(RestartPolicyNameEnum::UNLESS_STOPPED),
                 ..Default::default()
@@ -383,7 +438,7 @@ async fn run_migration(
         )])),
         host_config: Some(HostConfig {
             network_mode: Some(network_name(ctx.project)),
-            binds: with_secrets.then(|| vec![format!("{secrets_dir}:/run/secrets:ro")]),
+            binds: mount_binds(ctx, manifest, with_secrets, secrets_dir),
             ..Default::default()
         }),
         ..Default::default()

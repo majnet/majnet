@@ -28,6 +28,22 @@ pub struct AppManifest {
     /// on the class-appropriate engine instance and injects connection env.
     #[serde(default)]
     pub database: Option<Database>,
+    /// Persistent named volumes mounted into the container. Each is backed by a
+    /// Docker named volume on the app's node, survives redeploys (blue-green
+    /// reuses it), and is never deleted on teardown — data is preserved
+    /// ("archive, never delete"). For stateful apps that write to disk.
+    #[serde(default)]
+    pub volumes: Vec<Volume>,
+}
+
+/// A persistent named volume mounted into the app container. `name` identifies
+/// it within the app (→ the Docker volume `majnet-<project>-<app>-<class>-<name>`);
+/// `path` is the absolute in-container mount point.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Volume {
+    pub name: String,
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,6 +192,36 @@ impl AppManifest {
                 "secret name '{secret}' must be a bare file name"
             );
         }
+        let mut seen_names = std::collections::BTreeSet::new();
+        let mut seen_paths = std::collections::BTreeSet::new();
+        for v in &self.volumes {
+            ensure!(
+                !v.name.is_empty()
+                    && v.name.len() <= 63
+                    && v.name
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+                    && !v.name.starts_with('-')
+                    && !v.name.ends_with('-'),
+                "volume name '{}' must be lowercase alphanumeric/hyphens (DNS label)",
+                v.name
+            );
+            ensure!(
+                v.path.starts_with('/') && !v.path.contains(".."),
+                "volume path '{}' must be an absolute path",
+                v.path
+            );
+            ensure!(
+                seen_names.insert(v.name.as_str()),
+                "duplicate volume name '{}'",
+                v.name
+            );
+            ensure!(
+                seen_paths.insert(v.path.as_str()),
+                "duplicate volume mount path '{}'",
+                v.path
+            );
+        }
         Ok(())
     }
 }
@@ -245,6 +291,36 @@ mod tests {
             ingress.hosts(),
             vec!["app.majksa.cz", "www.majksa.cz", "app.majksa.net"]
         );
+    }
+
+    #[test]
+    fn parses_volumes() {
+        let yaml = format!(
+            "name: api\nimage: ghcr.io/org/api@{DIGEST}\nvolumes:\n  - name: data\n    path: /app/data\n"
+        );
+        let m = AppManifest::parse(&yaml).unwrap();
+        assert_eq!(m.volumes.len(), 1);
+        assert_eq!(m.volumes[0].name, "data");
+        assert_eq!(m.volumes[0].path, "/app/data");
+    }
+
+    #[test]
+    fn rejects_relative_volume_path() {
+        let yaml = format!(
+            "name: api\nimage: ghcr.io/org/api@{DIGEST}\nvolumes:\n  - name: data\n    path: app/data\n"
+        );
+        assert!(AppManifest::parse(&yaml)
+            .unwrap_err()
+            .to_string()
+            .contains("absolute path"));
+    }
+
+    #[test]
+    fn rejects_duplicate_volume_path() {
+        let yaml = format!(
+            "name: api\nimage: ghcr.io/org/api@{DIGEST}\nvolumes:\n  - name: a\n    path: /d\n  - name: b\n    path: /d\n"
+        );
+        assert!(AppManifest::parse(&yaml).is_err());
     }
 
     #[test]
