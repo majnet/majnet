@@ -14,4 +14,4 @@ jobs:
     permissions:
       contents: read
       packages: write
-    uses: maxa-ondrej/majnet/.github/workflows/app-release.yaml@main
+    uses: majnet/majnet/.github/workflows/app-release.yaml@main

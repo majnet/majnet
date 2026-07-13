@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # MajNet one-line installer — MAIN node only (ADR 0004, roadmap phase 6):
 #
-#   curl -fsSL https://raw.githubusercontent.com/maxa-ondrej/majnet/main/bootstrap/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/majnet/majnet/main/bootstrap/install.sh | bash
 #
 # Bootstraps this node as `main`, builds and installs the control plane
 # (bot, reconciler, setup) as systemd services, generates all local key
@@ -15,7 +15,7 @@
 
 set -euo pipefail
 
-REPO_URL=${MAJNET_REPO_URL:-https://github.com/maxa-ondrej/majnet}
+REPO_URL=${MAJNET_REPO_URL:-https://github.com/majnet/majnet}
 REF=${MAJNET_REF:-main}
 DOMAIN=${MAJNET_DOMAIN:-}
 DIR=/opt/majnet
@@ -147,8 +147,8 @@ fi
 # bot + reconciler + dashboard run as compose services from the GHCR image;
 # `setup` rides along in the image but runs native (it drives systemctl/wg).
 # Nothing compiles here.
-CP_IMAGE=${MAJNET_CONTROL_PLANE_IMAGE:-ghcr.io/maxa-ondrej/majnet/control-plane:latest}
-DASH_IMAGE=${MAJNET_DASHBOARD_IMAGE:-ghcr.io/maxa-ondrej/majnet/dashboard:latest}
+CP_IMAGE=${MAJNET_CONTROL_PLANE_IMAGE:-ghcr.io/majnet/majnet/control-plane:latest}
+DASH_IMAGE=${MAJNET_DASHBOARD_IMAGE:-ghcr.io/majnet/majnet/dashboard:latest}
 log "pulling control-plane images"
 docker pull -q "$CP_IMAGE"
 docker pull -q "$DASH_IMAGE"

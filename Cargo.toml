@@ -12,7 +12,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 authors = ["Ondrej Maxa"]
-repository = "https://github.com/maxa-ondrej/majnet"
+repository = "https://github.com/majnet/majnet"
 
 [workspace.dependencies]
 # async runtime + web

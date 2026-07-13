@@ -9,5 +9,5 @@
 #         stability; the `:latest` defaults below auto-deploy on every push.
 control_plane:
   ref: main
-  image: ghcr.io/maxa-ondrej/majnet/control-plane:latest
-  dashboard: ghcr.io/maxa-ondrej/majnet/dashboard:latest
+  image: ghcr.io/majnet/majnet/control-plane:latest
+  dashboard: ghcr.io/majnet/majnet/dashboard:latest

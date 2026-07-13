@@ -21,7 +21,7 @@ Three custom Rust services form the control plane:
 Create the root GitHub org by hand (the one manual step, §2), then on a fresh Debian machine — the future **main** node:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/maxa-ondrej/majnet/main/bootstrap/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/majnet/majnet/main/bootstrap/install.sh | bash
 ```
 
 The installer bootstraps the node, generates all key material, starts the control plane, and prints a **setup-wizard URL**: create the GitHub App there (manifest flow — one click), seed the platform repo, and enroll the prod/private nodes by handing the wizard SSH access. See [ADR 0004](docs/adr/0004-setup-service-auto-provisioning.md) and [`crates/setup/README.md`](crates/setup/README.md).
@@ -33,7 +33,7 @@ Break-glass / manual path: the [`bootstrap/`](bootstrap/README.md) scripts remai
 Everything you need comes from **nix + direnv** ([hook direnv into your shell](https://direnv.net/docs/hook.html) first):
 
 ```sh
-git clone git@github.com:maxa-ondrej/majnet.git && cd majnet
+git clone git@github.com:majnet/majnet.git && cd majnet
 direnv allow          # builds the dev shell: Rust, clippy, rust-analyzer, sops, age, plantuml
 cargo test --workspace && cargo clippy --workspace
 ```
