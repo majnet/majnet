@@ -405,8 +405,14 @@ mod tests {
 
     #[test]
     fn project_role_is_distinct_from_app_dbs() {
-        assert_eq!(project_role("zpevnik", EnvClass::Production), "zpevnik_production");
-        assert_eq!(project_role("majksa-cz", EnvClass::Stable), "majksa_cz_stable");
+        assert_eq!(
+            project_role("zpevnik", EnvClass::Production),
+            "zpevnik_production"
+        );
+        assert_eq!(
+            project_role("majksa-cz", EnvClass::Stable),
+            "majksa_cz_stable"
+        );
         // Never collides with any app DB/role in the same project+class: the
         // app segment always sits between project and class.
         let role = project_role("demo", EnvClass::Production);

@@ -46,9 +46,11 @@ pub async fn import_app(
 ) -> Result<()> {
     let app = req.name.as_str();
     let client = state.github.org_client(org).await?;
-    state
-        .store
-        .log_event("app-import", Some(org), &format!("{app} <- {}", source.repo))?;
+    state.store.log_event(
+        "app-import",
+        Some(org),
+        &format!("{app} <- {}", source.repo),
+    )?;
 
     // Record a secret-stripped copy of the request so a failed import is
     // retryable — the token + env carry secrets and must never hit disk.
@@ -70,9 +72,13 @@ pub async fn import_app(
         files.insert(path, content.into_bytes());
     }
 
-    state.store.set_import(org, app, "running", "repo", &source.repo)?;
+    state
+        .store
+        .set_import(org, app, "running", "repo", &source.repo)?;
     ensure_repo(&client, org, app).await?;
-    state.store.set_import(org, app, "running", "commit", &source.repo)?;
+    state
+        .store
+        .set_import(org, app, "running", "commit", &source.repo)?;
     commit_snapshot(
         &client,
         org,
@@ -85,12 +91,16 @@ pub async fn import_app(
 
     // The repo now exists → declaring it in project.yaml won't re-scaffold from
     // the template (org-sync skips existing repos).
-    state.store.set_import(org, app, "running", "configure", &source.repo)?;
+    state
+        .store
+        .set_import(org, app, "running", "configure", &source.repo)?;
     crate::dashboard_api::scaffold_and_declare(state, org, req, actor, true).await?;
 
     // Phase 2: import env vars as SOPS-encrypted secrets for the target class.
     if let Some(env_text) = source.env.as_deref().filter(|s| !s.trim().is_empty()) {
-        state.store.set_import(org, app, "running", "secrets", &source.repo)?;
+        state
+            .store
+            .set_import(org, app, "running", "secrets", &source.repo)?;
         import_secrets(state, org, req, env_text).await?;
     }
 
@@ -109,12 +119,7 @@ pub async fn import_app(
 /// are delivered as tmpfs files, never env vars (§14) — a migrated app reads
 /// them from its secrets dir. Encryption uses the ops `.sops.yaml` recipients,
 /// exactly as an operator running `sops apps/<app>/secrets.<class>.yaml` would.
-async fn import_secrets(
-    state: &AppState,
-    org: &str,
-    req: &NewApp,
-    env_text: &str,
-) -> Result<()> {
+async fn import_secrets(state: &AppState, org: &str, req: &NewApp, env_text: &str) -> Result<()> {
     let app = req.name.as_str();
     let class = target_class(&req.classes);
 
@@ -125,7 +130,12 @@ async fn import_secrets(
         if valid_secret_name(&k) {
             secrets.insert(k, v);
         } else {
-            tracing::warn!(org, app, key = k, "skipping env var — not a valid secret name");
+            tracing::warn!(
+                org,
+                app,
+                key = k,
+                "skipping env var — not a valid secret name"
+            );
         }
     }
     if secrets.is_empty() {
@@ -149,7 +159,10 @@ async fn import_secrets(
         org,
         &format!("apps/{app}/secrets.{class}.yaml"),
         &encrypted,
-        &format!("migrate({app}): import {} secrets into {class}", secrets.len()),
+        &format!(
+            "migrate({app}): import {} secrets into {class}",
+            secrets.len()
+        ),
     )
     .await?;
     declare_secrets_in_overlay(state, org, app, class, secrets.keys()).await?;
@@ -190,7 +203,11 @@ async fn declare_secrets_in_overlay<'a>(
     let mut names: std::collections::BTreeSet<String> = map
         .get("secrets")
         .and_then(|s| s.as_sequence())
-        .map(|seq| seq.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     names.extend(keys.cloned());
     let seq: Vec<serde_yaml::Value> = names.into_iter().map(serde_yaml::Value::from).collect();
@@ -371,7 +388,10 @@ async fn commit_snapshot(
     message: &str,
 ) -> Result<()> {
     let repo = format!("/repos/{org}/{app}");
-    if crate::git::get_branch_head(client, &repo, "main").await?.is_none() {
+    if crate::git::get_branch_head(client, &repo, "main")
+        .await?
+        .is_none()
+    {
         client
             .repos(org, app)
             .create_file(
@@ -508,7 +528,10 @@ mod tests {
                 "repo-templates/rust-service/.github/workflows/build.yaml".to_string(),
                 "x\n".to_string(),
             ),
-            ("repo-templates/web-app/Dockerfile".to_string(), "FROM x\n".to_string()),
+            (
+                "repo-templates/web-app/Dockerfile".to_string(),
+                "FROM x\n".to_string(),
+            ),
         ]);
         let out = ci_workflow_files(&platform, "web-app", "acme", "blog").unwrap();
         assert_eq!(out.len(), 2);
@@ -549,7 +572,10 @@ mod tests {
     #[test]
     fn target_class_prefers_production_then_stability() {
         let c = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(super::target_class(&c(&["testing", "production"])), "production");
+        assert_eq!(
+            super::target_class(&c(&["testing", "production"])),
+            "production"
+        );
         assert_eq!(super::target_class(&c(&["ephemeral", "stable"])), "stable");
         assert_eq!(super::target_class(&c(&["testing"])), "testing");
         assert_eq!(super::target_class(&[]), "production");

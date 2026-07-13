@@ -23,7 +23,10 @@ pub async fn restore_db(
     engine: DbEngine,
     dump: &[u8],
 ) -> Result<String> {
-    if state.store.data_migration_done(project, app, class.as_str())? {
+    if state
+        .store
+        .data_migration_done(project, app, class.as_str())?
+    {
         return Ok(format!(
             "{project}/{app} ({}) already restored — skipping",
             class.as_str()
@@ -41,12 +44,7 @@ pub async fn restore_db(
     )
     .await?
     .context("platform snapshot unavailable")?;
-    let nodes = NodesFile::parse(
-        platform
-            .files
-            .get("nodes.yaml")
-            .context("no nodes.yaml")?,
-    )?;
+    let nodes = NodesFile::parse(platform.files.get("nodes.yaml").context("no nodes.yaml")?)?;
     let node = nodes
         .by_role(class.node_role())
         .context("no node for class")?;

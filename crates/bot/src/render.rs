@@ -296,7 +296,9 @@ mod tests {
             ),
             ("apps/web/base.yaml", "env: {}\n"), // no stable overlay → not rendered
         ]);
-        let rendered = render_class(&src, EnvClass::Stable, "proj", "majksa.net").unwrap().unwrap();
+        let rendered = render_class(&src, EnvClass::Stable, "proj", "majksa.net")
+            .unwrap()
+            .unwrap();
         assert_eq!(rendered.keys().collect::<Vec<_>>(), vec!["api.yaml"]);
         assert!(rendered["api.yaml"].contains("name: api"));
         assert!(rendered["api.yaml"].contains("RUST_LOG"));
@@ -305,7 +307,11 @@ mod tests {
     #[test]
     fn empty_class_renders_none() {
         let src = sources(&[("apps/api/base.yaml", "env: {}\n")]);
-        assert!(render_class(&src, EnvClass::Production, "proj", "majksa.net").unwrap().is_none());
+        assert!(
+            render_class(&src, EnvClass::Production, "proj", "majksa.net")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -345,7 +351,9 @@ mod tests {
                 "db-url: ENC[AES256_GCM,...]\n",
             ),
         ]);
-        let rendered = render_class(&src, EnvClass::Stable, "proj", "majksa.net").unwrap().unwrap();
+        let rendered = render_class(&src, EnvClass::Stable, "proj", "majksa.net")
+            .unwrap()
+            .unwrap();
         assert_eq!(
             rendered["secrets/api.yaml"],
             "db-url: ENC[AES256_GCM,...]\n"
@@ -372,7 +380,10 @@ mod tests {
         let m = AppManifest::parse(&rendered["api.yaml"]).unwrap();
         let ingress = m.ingress.unwrap();
         assert_eq!(ingress.host.as_deref(), Some("api.zpevnik.majksa.net"));
-        assert!(ingress.domains.is_empty(), "custom domains dropped for non-prod");
+        assert!(
+            ingress.domains.is_empty(),
+            "custom domains dropped for non-prod"
+        );
         assert_eq!(ingress.port, 8080);
     }
 

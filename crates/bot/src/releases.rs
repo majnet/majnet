@@ -97,9 +97,7 @@ pub async fn backfill(state: &AppState, org: &str, app: &str) -> Result<usize> {
     for page in 1..=10u32 {
         let versions: Vec<serde_json::Value> = client
             .get(
-                format!(
-                    "/orgs/{org}/packages/container/{app}/versions?per_page=100&page={page}"
-                ),
+                format!("/orgs/{org}/packages/container/{app}/versions?per_page=100&page={page}"),
                 None::<&()>,
             )
             .await
@@ -142,7 +140,9 @@ pub async fn backfill_post(
     let n = backfill(&state, &org, &app)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
-    Ok(format!("backfilled {n} release(s) for {app} from the registry"))
+    Ok(format!(
+        "backfilled {n} release(s) for {app} from the registry"
+    ))
 }
 
 /// `GET /api/releases/{org}/{app}` — recorded releases, newest first.
@@ -258,7 +258,8 @@ mod tests {
     fn promote_preserves_hand_managed_production_config() {
         // The drift case: ingress was hand-added to production.yaml. A promote
         // must swap only the image and keep the ingress (ADR 0013).
-        let current = "image: ghcr.io/o/a@sha256:old\ningress:\n  host: a.example.com\n  port: 8080\n";
+        let current =
+            "image: ghcr.io/o/a@sha256:old\ningress:\n  host: a.example.com\n  port: 8080\n";
         let out = production_overlay(Some(current), "a", "v1.2.3", NEW).unwrap();
         assert!(out.contains("image: ghcr.io/o/a@sha256:new"));
         assert!(out.contains("host: a.example.com"));

@@ -213,8 +213,7 @@ async fn load_wildcard_cert(
 ) -> Result<Option<BTreeMap<String, Vec<u8>>>> {
     let crt_path = format!("platform/ingress-certs/{project}.crt");
     let key_path = format!("platform/ingress-certs/{project}.key.age");
-    let (Some(crt), Some(key_enc)) =
-        (platform.files.get(&crt_path), platform.files.get(&key_path))
+    let (Some(crt), Some(key_enc)) = (platform.files.get(&crt_path), platform.files.get(&key_path))
     else {
         return Ok(None);
     };

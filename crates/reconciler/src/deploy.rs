@@ -499,7 +499,13 @@ async fn ghcr_credentials(
 ) -> Option<bollard::auth::DockerCredentials> {
     let org = image.strip_prefix("ghcr.io/")?.split('/').next()?;
     let url = format!("{}/api/registry-auth/{}", ctx.bot_url, org);
-    match ctx.http.get(&url).send().await.and_then(|r| r.error_for_status()) {
+    match ctx
+        .http
+        .get(&url)
+        .send()
+        .await
+        .and_then(|r| r.error_for_status())
+    {
         Ok(resp) => match resp.json::<RegistryAuth>().await {
             Ok(auth) => Some(bollard::auth::DockerCredentials {
                 username: Some(auth.username),

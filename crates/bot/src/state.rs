@@ -58,11 +58,9 @@ impl Store {
     /// Runtime config value (ADR 0012), e.g. the GHCR pull token.
     pub fn get_config(&self, key: &str) -> Result<Option<String>> {
         let conn = self.conn.lock().unwrap();
-        match conn.query_row(
-            "SELECT value FROM config WHERE key = ?1",
-            [key],
-            |row| row.get::<_, String>(0),
-        ) {
+        match conn.query_row("SELECT value FROM config WHERE key = ?1", [key], |row| {
+            row.get::<_, String>(0)
+        }) {
             Ok(v) => Ok(Some(v)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),

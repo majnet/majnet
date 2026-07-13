@@ -281,18 +281,31 @@ mod tests {
     #[test]
     fn no_ingress_means_no_preview_url() {
         let image = format!("ghcr.io/o/worker@{DIGEST}");
-        let (yaml, url) =
-            generate_manifest(b"env: {}\n", b"{}\n", "p", "majksa.net", "worker", 3, &image)
-                .unwrap();
+        let (yaml, url) = generate_manifest(
+            b"env: {}\n",
+            b"{}\n",
+            "p",
+            "majksa.net",
+            "worker",
+            3,
+            &image,
+        )
+        .unwrap();
         assert!(yaml.contains("name: worker-pr3"));
         assert!(url.is_none());
     }
 
     #[test]
     fn tag_pinned_patch_is_rejected() {
-        assert!(
-            generate_manifest(b"{}\n", b"{}\n", "p", "majksa.net", "a", 1, "ghcr.io/o/a:pr-1")
-                .is_err()
-        );
+        assert!(generate_manifest(
+            b"{}\n",
+            b"{}\n",
+            "p",
+            "majksa.net",
+            "a",
+            1,
+            "ghcr.io/o/a:pr-1"
+        )
+        .is_err());
     }
 }

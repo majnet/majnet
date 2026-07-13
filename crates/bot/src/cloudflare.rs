@@ -91,7 +91,10 @@ pub async fn ensure_ingress_dns(state: &AppState, project: &str, base_domain: &s
         state.config.cloudflare_token.clone(),
         state.config.tailnet.clone(),
     ) else {
-        tracing::debug!(project, "Cloudflare token or tailnet unset — skipping ingress DNS");
+        tracing::debug!(
+            project,
+            "Cloudflare token or tailnet unset — skipping ingress DNS"
+        );
         return Ok(());
     };
     let cf = Cloudflare::new(state.http.clone(), token);

@@ -85,7 +85,11 @@ pub async fn create_tree_incremental(
 
 /// Create a blob from raw bytes (base64-encoded, so binary content survives —
 /// unlike the inline-`content` tree items). Returns the blob SHA.
-pub async fn create_blob(client: &octocrab::Octocrab, repo: &str, content: &[u8]) -> Result<String> {
+pub async fn create_blob(
+    client: &octocrab::Octocrab,
+    repo: &str,
+    content: &[u8],
+) -> Result<String> {
     let encoded = base64::engine::general_purpose::STANDARD.encode(content);
     let blob: serde_json::Value = client
         .post(

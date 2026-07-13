@@ -73,9 +73,11 @@ pub async fn on_package_published(
 
     tracing::info!(org, app, %image, "main build — bumping testing digest");
     if bump_class_digest(state, org, app, &image, "testing").await? {
-        state
-            .store
-            .log_event("digest-bump", Some(org), &format!("{app} testing → {digest}"))?;
+        state.store.log_event(
+            "digest-bump",
+            Some(org),
+            &format!("{app} testing → {digest}"),
+        )?;
     }
     Ok(())
 }
@@ -116,7 +118,12 @@ pub(crate) async fn bump_class_digest(
             (String::from_utf8(decoded)?, item.sha)
         }
         Err(octocrab::Error::GitHub { source, .. }) if source.status_code == 404 => {
-            tracing::info!(org, app, class, "no {class} overlay — app not opted into this class");
+            tracing::info!(
+                org,
+                app,
+                class,
+                "no {class} overlay — app not opted into this class"
+            );
             return Ok(false);
         }
         Err(e) => return Err(e).context("fetching class overlay"),

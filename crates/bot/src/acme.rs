@@ -42,9 +42,15 @@ pub async fn ensure_ingress_cert(state: &AppState, project: &str, base_domain: &
     let lego_dir = state.config.data_dir.join("lego");
     tokio::fs::create_dir_all(&lego_dir).await?;
 
-    let cert = obtain_or_renew(&lego_dir, &cf_token, &email, &domain, state.config.acme_staging)
-        .await
-        .with_context(|| format!("lego issuance for {domain}"))?;
+    let cert = obtain_or_renew(
+        &lego_dir,
+        &cf_token,
+        &email,
+        &domain,
+        state.config.acme_staging,
+    )
+    .await
+    .with_context(|| format!("lego issuance for {domain}"))?;
 
     // Skip the commit when git already has this exact cert — a renew that found
     // >30 days left changes nothing, and re-committing would nudge the
@@ -221,10 +227,7 @@ mod tests {
     fn wildcard_maps_to_legos_underscore_filename() {
         assert_eq!(cert_basename("*.p.majksa.net"), "_.p.majksa.net");
         let f = crt_file(Path::new("/data/lego"), "*.p.majksa.net");
-        assert_eq!(
-            f,
-            Path::new("/data/lego/certificates/_.p.majksa.net.crt")
-        );
+        assert_eq!(f, Path::new("/data/lego/certificates/_.p.majksa.net.crt"));
     }
 
     #[test]
@@ -239,7 +242,7 @@ mod tests {
         assert!(args.contains(&"run".to_string()));
         assert!(!args.iter().any(|a| a == "--days"));
         assert!(!args.iter().any(|a| a == "--server")); // production by default
-        // globals precede the subcommand
+                                                        // globals precede the subcommand
         let run = args.iter().position(|a| a == "run").unwrap();
         let dns = args.iter().position(|a| a == "--dns").unwrap();
         assert!(dns < run);

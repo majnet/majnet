@@ -596,7 +596,9 @@ pub async fn apps_post(
         // it exists now so a typo is rejected here rather than failing later in
         // a background sync.
         if req.template.trim().is_empty() {
-            return Err(bad_request("a source-repo template is required (e.g. web-app)"));
+            return Err(bad_request(
+                "a source-repo template is required (e.g. web-app)",
+            ));
         }
         let platform = read_platform(&state).await.map_err(bad_gateway)?;
         let tprefix = format!("repo-templates/{}/", req.template);
@@ -637,7 +639,12 @@ pub async fn apps_post(
         let org2 = org.clone();
         tokio::spawn(async move {
             if let Err(e) = crate::migrate::import_app(&st, &org2, &req, &actor, &source).await {
-                tracing::error!(org = org2, app = req.name, error = format!("{e:#}"), "app import failed");
+                tracing::error!(
+                    org = org2,
+                    app = req.name,
+                    error = format!("{e:#}"),
+                    "app import failed"
+                );
                 let _ = st.store.fail_import(&org2, &req.name, &format!("{e:#}"));
                 let _ = st.store.log_event(
                     "app-import-failed",
@@ -726,7 +733,10 @@ pub(crate) async fn scaffold_and_declare(
             org,
             &format!("apps/{}/{class}.yaml", req.name),
             "{}\n",
-            &format!("manifest({}): add {class} overlay via dashboard by {actor}", req.name),
+            &format!(
+                "manifest({}): add {class} overlay via dashboard by {actor}",
+                req.name
+            ),
         )
         .await?;
     }
@@ -779,11 +789,18 @@ pub async fn imports_retry(
     let org2 = org.clone();
     tokio::spawn(async move {
         if let Err(e) = crate::migrate::import_app(&st, &org2, &req, &actor, &source).await {
-            tracing::error!(org = org2, app = req.name, error = format!("{e:#}"), "app import retry failed");
+            tracing::error!(
+                org = org2,
+                app = req.name,
+                error = format!("{e:#}"),
+                "app import retry failed"
+            );
             let _ = st.store.fail_import(&org2, &req.name, &format!("{e:#}"));
-            let _ = st
-                .store
-                .log_event("app-import-failed", Some(&org2), &format!("{}: {e:#}", req.name));
+            let _ = st.store.log_event(
+                "app-import-failed",
+                Some(&org2),
+                &format!("{}: {e:#}", req.name),
+            );
         }
     });
     Ok(format!("retrying import of {app} — watch its progress"))
@@ -807,7 +824,11 @@ pub struct GhcrTokenReq {
 pub async fn registry_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<RegistryStatus>, ApiError> {
-    let configured = state.store.get_config("ghcr_token").map_err(bad_gateway)?.is_some()
+    let configured = state
+        .store
+        .get_config("ghcr_token")
+        .map_err(bad_gateway)?
+        .is_some()
         || state.config.ghcr_token.is_some();
     Ok(Json(RegistryStatus { configured }))
 }
