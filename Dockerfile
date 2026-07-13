@@ -23,6 +23,8 @@ FROM debian:bookworm-slim
 ARG SOPS_VERSION=3.11.0
 # lego: ACME DNS-01 client for the per-project VPN ingress wildcard certs (ADR 0013).
 ARG LEGO_VERSION=4.21.0
+# curl stays in the image: it fetches the tools below AND is the bot's compose
+# healthcheck command (the reconciler waits on it — see deploy/compose.yaml).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates age openssl curl \
     && curl -fsSL -o /usr/local/bin/sops \
@@ -31,7 +33,6 @@ RUN apt-get update \
     && curl -fsSL "https://github.com/go-acme/lego/releases/download/v${LEGO_VERSION}/lego_v${LEGO_VERSION}_linux_amd64.tar.gz" \
        | tar -xz -C /usr/local/bin lego \
     && chmod +x /usr/local/bin/lego \
-    && apt-get purge -y curl && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 # bot + reconciler run as containers; setup rides along so majnet-update can
 # extract it to the host (it drives systemctl/wireguard, so it stays native).

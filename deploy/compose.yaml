@@ -19,6 +19,16 @@ services:
     container_name: majnet-bot
     restart: unless-stopped
     network_mode: host
+    # The reconciler's first converge races the bot's listeners binding; gate it
+    # on this so the "snapshot API unreachable" startup blip stops recurring. The
+    # webhook listener (0.0.0.0:8080 by default) binds together with the internal
+    # snapshot listener, so /healthz answering here means the internal API is up.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
     # Optional so compose parses on a fresh install before the wizard writes
     # bot.env; the bot restart-loops (missing App creds) until the wizard does.
     env_file:
@@ -36,6 +46,10 @@ services:
     container_name: majnet-reconciler
     restart: unless-stopped
     network_mode: host
+    # Wait for the bot's snapshot API before the first converge (see above).
+    depends_on:
+      bot:
+        condition: service_healthy
     env_file: /etc/majnet/reconciler.env
     volumes:
       - /etc/majnet/age:/etc/majnet/age:ro    # age keys + db-master.key
