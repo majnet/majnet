@@ -6,6 +6,7 @@ use axum::extract::{DefaultBodyLimit, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::AppState;
@@ -21,6 +22,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/notify", post(notify))
         .route("/api/events", get(events))
         .route("/api/restart/{project}/{class}/{app}", post(restart))
+        .route("/api/secrets/{project}/{class}/{app}", get(secrets_get))
         .route("/api/ephemeral/extend/{project}/{app}", post(extend))
         .route(
             "/api/migrate/{project}/{app}",
@@ -90,6 +92,47 @@ async fn restart(
     do_restart(&state, &project, class, &app, &actor)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))
+}
+
+/// `GET /api/secrets/{project}/{class}/{app}` — decrypt and return an app's
+/// current secret values for the dashboard editor. Reads the SOPS source of
+/// truth `apps/{app}/secrets.{class}.yaml` from ops `main` and decrypts it with
+/// the class age key. Production is admin-gated. This is the one place secret
+/// plaintext leaves the reconciler for a reader (the VPN-only dashboard); every
+/// other path keeps it write-only (§14).
+async fn secrets_get(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path((project, class, app)): axum::extract::Path<(String, String, String)>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<BTreeMap<String, String>>, (StatusCode, String)> {
+    let class_e: majnet_common::EnvClass = serde_yaml::from_str(&class).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "class must be production|stable|testing|ephemeral".into(),
+        )
+    })?;
+    let min_role = if class_e == majnet_common::EnvClass::Production {
+        majnet_common::project::Role::Admin
+    } else {
+        majnet_common::project::Role::Developer
+    };
+    crate::authz::require(&state, &headers, &project, min_role)
+        .await
+        .map_err(|e| (StatusCode::FORBIDDEN, format!("{e:#}")))?;
+
+    let snap = crate::snapshot::fetch(&state.http, &state.config, &project, "ops", "main")
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
+    let Some(snap) = snap else {
+        return Ok(Json(BTreeMap::new()));
+    };
+    let Some(enc) = snap.files.get(&format!("apps/{app}/secrets.{class}.yaml")) else {
+        return Ok(Json(BTreeMap::new())); // no secrets set for this class yet
+    };
+    let values = crate::secrets::decrypt(&state.config, class_e, enc)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
+    Ok(Json(values))
 }
 
 /// Dashboard TTL extension (§8): postpone a preview's GC. State-adjacent but

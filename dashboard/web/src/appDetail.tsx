@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams } from '@tanstack/react-router'
-import { send, urls, useApps, useEvents, useImports, useManifest, useProjects, useReleases, type ManifestFile } from './api'
+import { send, urls, useApps, useAppSecrets, useEvents, useImports, useManifest, useProjects, useReleases, type ManifestFile } from './api'
 import { useApiMutation } from './mutations'
 import { ConfirmButton, DeployStatus, QueryState, short, StatusBadge } from './ui'
 import { Crumbs, PageHead, ImportSteps } from './views'
@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Textarea } from '@/components/ui/textarea'
+import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 
 const FILES = ['base.yaml', 'testing.yaml', 'stable.yaml', 'production.yaml', 'ephemeral.yaml']
@@ -182,33 +183,78 @@ function RestartControl({ org, app, classes, run, busy }: {
   )
 }
 
-// ── secret values: encrypt (SOPS) + commit, per class ─────────────────────────
+// ── secret values: fields/bulk editor, values decrypted for display ───────────
+type Row = { key: string; value: string }
+
 function SecretsEditor({ org, app, classes }: { org: string; app: string; classes: string[] }) {
   const opts = classes.length ? classes : ['production']
   const [cls, setCls] = useState(opts.includes('production') ? 'production' : opts[0]!)
-  const [env, setEnv] = useState('')
+  const [mode, setMode] = useState<'fields' | 'bulk'>('fields')
+  const [rows, setRows] = useState<Row[]>([{ key: '', value: '' }])
+  const [bulk, setBulk] = useState('')
+  const q = useAppSecrets(org, cls, app)
+
+  // Seed the editor from the decrypted current values whenever they load or the
+  // class changes — so you edit what's actually set, not a blank slate.
+  useEffect(() => {
+    if (!q.data) return
+    const entries = Object.entries(q.data)
+    setRows(entries.length ? entries.map(([key, value]) => ({ key, value })) : [{ key: '', value: '' }])
+    setBulk(entries.map(([k, v]) => `${k}=${v}`).join('\n'))
+  }, [q.data, cls])
+
   const m = useApiMutation({
-    invalidate: [['deploys', org], ['manifest', org, app], ['events']],
-    onDone: () => setEnv(''),
+    invalidate: [['deploys', org], ['manifest', org, app], ['secrets', org, cls, app], ['events']],
   })
+
+  // Both modes serialize to a dotenv blob for the set endpoint (full replace).
+  const env = mode === 'bulk'
+    ? bulk.trim()
+    : rows.filter((r) => r.key.trim()).map((r) => `${r.key.trim()}=${r.value}`).join('\n')
+
+  const setRow = (i: number, patch: Partial<Row>) =>
+    setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)))
+
   return (
     <Card className="mb-4"><CardContent className="flex flex-col gap-3 pt-6">
-      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         <h2 className="text-sm font-semibold">Secrets</h2>
-        <span className="text-xs text-muted-foreground">SOPS-encrypted to the project key; delivered as tmpfs files at <code className="font-mono">/run/secrets/&lt;NAME&gt;</code>, never env vars.</span>
+        <Select value={cls} onValueChange={setCls}>
+          <SelectTrigger size="sm" className="w-36"><SelectValue /></SelectTrigger>
+          <SelectContent>{opts.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent>
+        </Select>
+        <div className="flex-1" />
+        <div className="inline-flex rounded-md border p-0.5">
+          <Button size="sm" variant={mode === 'fields' ? 'secondary' : 'ghost'} className="h-7 px-2.5" onClick={() => setMode('fields')}>Fields</Button>
+          <Button size="sm" variant={mode === 'bulk' ? 'secondary' : 'ghost'} className="h-7 px-2.5" onClick={() => setMode('bulk')}>Bulk</Button>
+        </div>
       </div>
-      <Select value={cls} onValueChange={setCls}>
-        <SelectTrigger size="sm" className="w-40"><SelectValue /></SelectTrigger>
-        <SelectContent>{opts.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent>
-      </Select>
-      <Textarea value={env} onChange={(e) => setEnv(e.target.value)} className="min-h-24 font-mono text-xs"
-        placeholder={'DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/…\nAPI_KEY=…'} />
+
+      <QueryState isLoading={q.isLoading} error={q.error}>
+        {mode === 'fields' ? (
+          <div className="flex flex-col gap-2">
+            {rows.map((r, i) => (
+              <div key={i} className="flex items-center gap-2">
+                <Input value={r.key} placeholder="SECRET_NAME" className="w-64 font-mono text-xs" onChange={(e) => setRow(i, { key: e.target.value })} />
+                <Input value={r.value} placeholder="value" className="flex-1 font-mono text-xs" onChange={(e) => setRow(i, { value: e.target.value })} />
+                <Button size="sm" variant="ghost" className="text-destructive" onClick={() => setRows((rs) => { const next = rs.filter((_, j) => j !== i); return next.length ? next : [{ key: '', value: '' }] })}>×</Button>
+              </div>
+            ))}
+            <div><Button size="sm" variant="outline" onClick={() => setRows((rs) => [...rs, { key: '', value: '' }])}>+ Add secret</Button></div>
+          </div>
+        ) : (
+          <Textarea value={bulk} onChange={(e) => setBulk(e.target.value)} className="min-h-28 font-mono text-xs"
+            placeholder={'DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/…\nAPI_KEY=…'} />
+        )}
+      </QueryState>
+
       <span className="text-xs text-muted-foreground">
-        Replaces <em>all</em> secret values for this class — existing encrypted values can't be read back to merge.
+        Values shown are decrypted from the current SOPS file (VPN-only). Saving <em>replaces</em> the whole set for
+        this class; they're re-encrypted to the project key and delivered as tmpfs files at <code className="font-mono">/run/secrets/&lt;NAME&gt;</code>, never env vars.
         Production writes open a render PR you review before it deploys.
       </span>
       <div>
-        <ConfirmButton size="sm" disabled={!env.trim() || m.isPending}
+        <ConfirmButton size="sm" disabled={!env || m.isPending}
           title={`Set ${cls} secrets for ${app}?`}
           description={cls === 'production'
             ? 'Encrypts + commits the values; a render PR will gate the deploy.'

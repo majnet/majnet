@@ -111,6 +111,8 @@ export const urls = {
     `${BOT}/manifest/${encodeURIComponent(org)}/${encodeURIComponent(app)}/${file}`,
   members: (org: string) => `${BOT}/members/${encodeURIComponent(org)}`,
   appSecrets: (org: string, app: string) => `${BOT}/secrets/${encodeURIComponent(org)}/${encodeURIComponent(app)}`,
+  appSecretValues: (org: string, cls: string, app: string) =>
+    `${RECON}/secrets/${encodeURIComponent(org)}/${encodeURIComponent(cls)}/${encodeURIComponent(app)}`,
   releases: (org: string, app: string) => `${BOT}/releases/${encodeURIComponent(org)}/${encodeURIComponent(app)}`,
   releasePromote: (org: string, app: string, version: string) =>
     `${BOT}/releases/${encodeURIComponent(org)}/${encodeURIComponent(app)}/promote/${encodeURIComponent(version)}`,
@@ -148,6 +150,8 @@ export const useManifest = (org: string, app: string) =>
   useQuery({ queryKey: ['manifest', org, app], queryFn: () => getJSON<Record<string, ManifestFile>>(urls.manifest(org, app)) })
 export const useMembers = (org: string) =>
   useQuery({ queryKey: ['members', org], queryFn: () => getJSON<Member[]>(urls.members(org)) })
+export const useAppSecrets = (org: string, cls: string, app: string) =>
+  useQuery({ queryKey: ['secrets', org, cls, app], queryFn: () => getJSON<Record<string, string>>(urls.appSecretValues(org, cls, app)) })
 export const useVersion = () =>
   useQuery({ queryKey: ['version'], queryFn: () => getText(urls.version) })
 export const useRegistry = () =>
