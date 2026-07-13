@@ -102,6 +102,10 @@ async fn main() -> Result<()> {
             "/api/apps/{org}",
             get(dashboard_api::apps_get).post(dashboard_api::apps_post),
         )
+        .route(
+            "/api/secrets/{org}/{app}",
+            post(dashboard_api::secrets_post),
+        )
         .route("/api/nodes", get(dashboard_api::nodes_get))
         .route("/api/imports/{org}", get(dashboard_api::imports_get))
         .route(

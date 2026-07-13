@@ -120,9 +120,27 @@ pub async fn import_app(
 /// them from its secrets dir. Encryption uses the ops `.sops.yaml` recipients,
 /// exactly as an operator running `sops apps/<app>/secrets.<class>.yaml` would.
 async fn import_secrets(state: &AppState, org: &str, req: &NewApp, env_text: &str) -> Result<()> {
-    let app = req.name.as_str();
     let class = target_class(&req.classes);
+    set_app_secrets(state, org, &req.name, class, env_text).await?;
+    Ok(())
+}
 
+/// Encrypt a dotenv blob into `apps/<app>/secrets.<class>.yaml` and declare the
+/// keys in the class overlay — the shared path behind both app-import (ADR 0010
+/// phase 2) and the dashboard "set secrets" action. Returns the number of
+/// secrets written.
+///
+/// The bot holds only the *public* age recipient (via ops `.sops.yaml`), never
+/// a private key, so it cannot read an existing encrypted file to merge into
+/// it: this **replaces** the class's secret set with exactly what's passed.
+/// Secrets are delivered to apps as tmpfs files, never env vars (§14).
+pub(crate) async fn set_app_secrets(
+    state: &AppState,
+    org: &str,
+    app: &str,
+    class: &str,
+    env_text: &str,
+) -> Result<usize> {
     // Only keys that are valid bare secret filenames (§14) — skip + warn on the
     // rest so a stray key can't break the render.
     let mut secrets = BTreeMap::new();
@@ -139,7 +157,7 @@ async fn import_secrets(state: &AppState, org: &str, req: &NewApp, env_text: &st
         }
     }
     if secrets.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
 
     let client = state.github.org_client(org).await?;
@@ -150,7 +168,7 @@ async fn import_secrets(state: &AppState, org: &str, req: &NewApp, env_text: &st
         .context(".sops.yaml missing in ops — configure secret recipients first")?;
     let encrypted = sops_encrypt(&sops_config, app, class, &secrets)
         .await
-        .context("encrypting imported env")?;
+        .context("encrypting secrets")?;
 
     // Commit the encrypted file first, then declare the keys in the overlay, so
     // a render triggered in between never sees a declaration without its file.
@@ -159,21 +177,18 @@ async fn import_secrets(state: &AppState, org: &str, req: &NewApp, env_text: &st
         org,
         &format!("apps/{app}/secrets.{class}.yaml"),
         &encrypted,
-        &format!(
-            "migrate({app}): import {} secrets into {class}",
-            secrets.len()
-        ),
+        &format!("secrets({app}): set {} value(s) in {class}", secrets.len()),
     )
     .await?;
     declare_secrets_in_overlay(state, org, app, class, secrets.keys()).await?;
 
     state.store.log_event(
-        "app-import-secrets",
+        "app-secrets-set",
         Some(org),
         &format!("{app}: {} secrets → {class}", secrets.len()),
     )?;
-    tracing::info!(org, app, class, count = secrets.len(), "imported secrets");
-    Ok(())
+    tracing::info!(org, app, class, count = secrets.len(), "set app secrets");
+    Ok(secrets.len())
 }
 
 /// Add `secrets: [keys…]` to the class overlay (merged with any existing, then

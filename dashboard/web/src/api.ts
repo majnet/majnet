@@ -110,6 +110,7 @@ export const urls = {
   manifestFile: (org: string, app: string, file: string) =>
     `${BOT}/manifest/${encodeURIComponent(org)}/${encodeURIComponent(app)}/${file}`,
   members: (org: string) => `${BOT}/members/${encodeURIComponent(org)}`,
+  appSecrets: (org: string, app: string) => `${BOT}/secrets/${encodeURIComponent(org)}/${encodeURIComponent(app)}`,
   releases: (org: string, app: string) => `${BOT}/releases/${encodeURIComponent(org)}/${encodeURIComponent(app)}`,
   releasePromote: (org: string, app: string, version: string) =>
     `${BOT}/releases/${encodeURIComponent(org)}/${encodeURIComponent(app)}/promote/${encodeURIComponent(version)}`,

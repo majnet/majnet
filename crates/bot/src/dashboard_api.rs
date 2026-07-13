@@ -1046,6 +1046,58 @@ fn scaffold_base(req: &NewApp) -> Result<String> {
     Ok(yaml)
 }
 
+/// `POST /api/secrets/{org}/{app}` — set an app's secret values for a class.
+/// The values are SOPS-encrypted (to the ops `.sops.yaml` recipients) and
+/// committed as `apps/{app}/secrets.{class}.yaml`, and the keys are declared in
+/// the class overlay. Production is admin-gated (a render PR then gates deploy);
+/// other classes are developer-gated. This replaces the class's secret set —
+/// the bot can't read existing encrypted values to merge (§14).
+#[derive(Deserialize)]
+pub struct SetSecrets {
+    pub class: String,
+    /// dotenv blob: `KEY=VALUE`, one per line.
+    pub env: String,
+}
+
+pub async fn secrets_post(
+    State(state): State<Arc<AppState>>,
+    Path((org, app)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(req): Json<SetSecrets>,
+) -> Result<String, ApiError> {
+    check_name(&app)?;
+    let valid_classes = ["testing", "stable", "production", "ephemeral"];
+    if !valid_classes.contains(&req.class.as_str()) {
+        return Err(bad_request(
+            "class must be one of testing|stable|production|ephemeral",
+        ));
+    }
+    let min_role = if req.class == "production" {
+        Role::Admin
+    } else {
+        Role::Developer
+    };
+    crate::authz::require(&state, &headers, &org, min_role)
+        .await
+        .map_err(|e| (StatusCode::FORBIDDEN, format!("{e:#}")))?;
+
+    let n = crate::migrate::set_app_secrets(&state, &org, &app, &req.class, &req.env)
+        .await
+        .map_err(bad_gateway)?;
+    if n == 0 {
+        return Err(bad_request("no valid secrets provided"));
+    }
+    Ok(format!(
+        "set {n} secret value(s) for {app} ({}); {}",
+        req.class,
+        if req.class == "production" {
+            "review the render PR to deploy"
+        } else {
+            "auto-deploys on render"
+        }
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -96,6 +96,8 @@ export function AppDetail() {
         {manifest.data && <ManifestEditor org={org} app={app} files={manifest.data} />}
       </QueryState>
 
+      {a && <SecretsEditor org={org} app={app} classes={a.classes} />}
+
       {appEvents.length > 0 && (
         <Card className="mt-4"><CardContent className="pt-6">
           <h2 className="mb-2 text-sm font-semibold">Recent deploys</h2>
@@ -177,6 +179,46 @@ function RestartControl({ org, app, classes, run, busy }: {
       </Select>
       <Button variant="outline" size="sm" disabled={busy} onClick={() => run(() => send(urls.restart(org, cls, app)))}>Restart</Button>
     </div>
+  )
+}
+
+// ── secret values: encrypt (SOPS) + commit, per class ─────────────────────────
+function SecretsEditor({ org, app, classes }: { org: string; app: string; classes: string[] }) {
+  const opts = classes.length ? classes : ['production']
+  const [cls, setCls] = useState(opts.includes('production') ? 'production' : opts[0]!)
+  const [env, setEnv] = useState('')
+  const m = useApiMutation({
+    invalidate: [['deploys', org], ['manifest', org, app], ['events']],
+    onDone: () => setEnv(''),
+  })
+  return (
+    <Card className="mb-4"><CardContent className="flex flex-col gap-3 pt-6">
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+        <h2 className="text-sm font-semibold">Secrets</h2>
+        <span className="text-xs text-muted-foreground">SOPS-encrypted to the project key; delivered as tmpfs files at <code className="font-mono">/run/secrets/&lt;NAME&gt;</code>, never env vars.</span>
+      </div>
+      <Select value={cls} onValueChange={setCls}>
+        <SelectTrigger size="sm" className="w-40"><SelectValue /></SelectTrigger>
+        <SelectContent>{opts.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent>
+      </Select>
+      <Textarea value={env} onChange={(e) => setEnv(e.target.value)} className="min-h-24 font-mono text-xs"
+        placeholder={'DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/…\nAPI_KEY=…'} />
+      <span className="text-xs text-muted-foreground">
+        Replaces <em>all</em> secret values for this class — existing encrypted values can't be read back to merge.
+        Production writes open a render PR you review before it deploys.
+      </span>
+      <div>
+        <ConfirmButton size="sm" disabled={!env.trim() || m.isPending}
+          title={`Set ${cls} secrets for ${app}?`}
+          description={cls === 'production'
+            ? 'Encrypts + commits the values; a render PR will gate the deploy.'
+            : 'Encrypts + commits the values; auto-deploys on render.'}
+          confirmText="Encrypt & save"
+          onConfirm={() => m.mutate(() => send(urls.appSecrets(org, app), { json: { class: cls, env } }))}>
+          Save secrets
+        </ConfirmButton>
+      </div>
+    </CardContent></Card>
   )
 }
 
