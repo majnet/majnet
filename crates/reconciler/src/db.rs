@@ -17,6 +17,12 @@
 //! Valkey has no per-user keyspace primitive, so its ACL users share one
 //! keyspace: the credential is authentication, not isolation (zone trust
 //! still applies, same as the design assumes for engines generally).
+//!
+//! **Two credential tiers (ADR 0014):** apps authenticate with their own
+//! per-`(project,app,class)` role (above). Additionally a per-`(project,class)`
+//! *human* role (`project_role`) is granted membership in each app role, so it
+//! inherits access to every database in the project — the login the per-project
+//! Adminer uses. It is never injected into apps. Postgres only for now.
 
 use anyhow::{Context, Result};
 use bollard::query_parameters as qp;
@@ -88,11 +94,21 @@ pub async fn ensure(
     // The engine must be reachable from the app's project network.
     connect_engine_to_network(docker, container, project).await?;
 
+    // Per-project human login role (ADR 0014): granted membership in the app
+    // role so it inherits access to this app's DB. One role per project+class
+    // accumulates access to every app in the project — the login the per-project
+    // Adminer uses. Postgres only for now (the engine humans browse).
+    let proj_role = project_role(project, class);
+    let proj_pw = derive_project_password(config, engine, project, class)?;
+
     let script = match engine {
         DbEngine::Postgres => format!(
             r#"psql -U postgres -tc "SELECT 1 FROM pg_roles WHERE rolname='{name}'" | grep -q 1 || psql -U postgres -c "CREATE ROLE \"{name}\" LOGIN PASSWORD '{password}'"
 psql -U postgres -c "ALTER ROLE \"{name}\" WITH PASSWORD '{password}'"
-psql -U postgres -tc "SELECT 1 FROM pg_database WHERE datname='{name}'" | grep -q 1 || psql -U postgres -c "CREATE DATABASE \"{name}\" OWNER \"{name}\"""#
+psql -U postgres -tc "SELECT 1 FROM pg_database WHERE datname='{name}'" | grep -q 1 || psql -U postgres -c "CREATE DATABASE \"{name}\" OWNER \"{name}\""
+psql -U postgres -tc "SELECT 1 FROM pg_roles WHERE rolname='{proj_role}'" | grep -q 1 || psql -U postgres -c "CREATE ROLE \"{proj_role}\" LOGIN PASSWORD '{proj_pw}'"
+psql -U postgres -c "ALTER ROLE \"{proj_role}\" WITH PASSWORD '{proj_pw}'"
+psql -U postgres -c "GRANT \"{name}\" TO \"{proj_role}\"""#
         ),
         DbEngine::Mariadb => format!(
             r#"mariadb -uroot -p"$(cat /run/secrets/mariadb-root)" -e "CREATE DATABASE IF NOT EXISTS \`{name}\`; CREATE USER IF NOT EXISTS '{name}'@'%' IDENTIFIED BY '{password}'; ALTER USER '{name}'@'%' IDENTIFIED BY '{password}'; GRANT ALL ON \`{name}\`.* TO '{name}'@'%';""#
@@ -195,6 +211,17 @@ pub fn db_name(project: &str, app: &str, class: EnvClass) -> String {
     name
 }
 
+/// Per-project human login role (ADR 0014): `{project}_{class}`. It never
+/// collides with an app DB/role (`{project}_{app}_{class}`) — the app segment
+/// always sits between. Granted membership in each of the project's app roles,
+/// so it inherits access to every app database — the identity the per-project
+/// Adminer logs in as.
+pub fn project_role(project: &str, class: EnvClass) -> String {
+    let mut name = format!("{project}_{}", class.as_str()).replace('-', "_");
+    name.truncate(63);
+    name
+}
+
 fn derive_password(
     config: &Config,
     engine: DbEngine,
@@ -205,6 +232,20 @@ fn derive_password(
     hmac16(
         config,
         &format!("{engine:?}:{project}:{app}:{}", class.as_str()),
+    )
+}
+
+/// Password for the per-project human role. Distinct input namespace
+/// (`project:`) so it can never coincide with an app password.
+fn derive_project_password(
+    config: &Config,
+    engine: DbEngine,
+    project: &str,
+    class: EnvClass,
+) -> Result<String> {
+    hmac16(
+        config,
+        &format!("{engine:?}:project:{project}:{}", class.as_str()),
     )
 }
 
@@ -313,7 +354,7 @@ async fn exec(docker: &Docker, container: &str, script: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{db_name, hmac16_with};
+    use super::{db_name, hmac16_with, project_role};
     use majnet_common::EnvClass;
 
     #[test]
@@ -360,5 +401,16 @@ mod tests {
             db_name("zpevnik", "api", EnvClass::Production),
             "zpevnik_api_production"
         );
+    }
+
+    #[test]
+    fn project_role_is_distinct_from_app_dbs() {
+        assert_eq!(project_role("zpevnik", EnvClass::Production), "zpevnik_production");
+        assert_eq!(project_role("majksa-cz", EnvClass::Stable), "majksa_cz_stable");
+        // Never collides with any app DB/role in the same project+class: the
+        // app segment always sits between project and class.
+        let role = project_role("demo", EnvClass::Production);
+        assert_ne!(role, db_name("demo", "blog", EnvClass::Production));
+        assert_ne!(role, db_name("demo", "space-alert", EnvClass::Production));
     }
 }
