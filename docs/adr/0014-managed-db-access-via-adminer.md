@@ -1,6 +1,6 @@
 # 0014 — Managed database access via per-project Adminer
 
-**Status:** accepted · **Date:** 2026-07-13 · Phase 1 (per-project role) done; 2–3 pending the private node
+**Status:** accepted · **Date:** 2026-07-13 · Phases 1–3 done (prod, via the main-node Tailscale route); the reconciler-managed/per-project-tailnet-ingress form still waits on the private node
 
 ## Context
 
@@ -83,8 +83,20 @@ per-project routed Adminer exists.
    project's tailnet ingress, auto-login plugin fed the project-role password,
    routed at `adminer.{project}.{base_domain}` (ADR 0013 wildcard). Needs the
    private node + `MAJNET_TAILNET`.
-3. **Dashboard button.** "Open in Adminer" on DB-backed apps, per class,
-   against a configurable base-URL.
+3. ✅ **Dashboard button.** "Open in Adminer ↗" on DB-backed apps (app detail),
+   deep-linking `https://adminer.prod.majksa.net/?pgsql=majnet-postgres&db={project}_{app}_{class}`.
+   Prod-only for now (the only env with an Adminer); Adminer host hardcoded to
+   `adminer.prod.majksa.net` until non-prod Adminers exist.
+
+## Interim realisation (pre-private-node)
+
+Phases 2–3 shipped without the per-project tailnet ingress by reusing the main
+node: the prod Adminer runs on the prod node (auto-login plugin, WG-bound
+`10.88.0.2:8081`), and the **main node's Caddy** serves `adminer.prod.majksa.net`
+over Tailscale, reverse-proxying to it over WireGuard. TLS is an LE cert (lego
+DNS-01) with a daily renewal timer. This is **manual, not GitOps-managed** — the
+reconciler-owned, per-project-tailnet-ingress form (the clean end state) still
+waits on the private node.
 
 ## Consequences
 

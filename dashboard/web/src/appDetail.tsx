@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams } from '@tanstack/react-router'
-import { send, urls, useApps, useEvents, useImports, useManifest, useReleases, type ManifestFile } from './api'
+import { send, urls, useApps, useEvents, useImports, useManifest, useProjects, useReleases, type ManifestFile } from './api'
 import { useApiMutation } from './mutations'
 import { ConfirmButton, DeployStatus, QueryState, short, StatusBadge } from './ui'
 import { Crumbs, PageHead, ImportSteps } from './views'
@@ -28,6 +28,15 @@ export function AppDetail() {
   const appEvents = (events.data ?? []).filter((e) => e.action.trim().split(/\s+/).pop() === app)
   const imageOf = (f?: ManifestFile) => (f?.data as { image?: string } | null)?.image
   const prodImage = imageOf(manifest.data?.['production.yaml']) ?? imageOf(manifest.data?.['base.yaml'])
+
+  // "Open in Adminer" (ADR 0014): the managed DB name is {project}_{app}_{class}
+  // (hyphens → underscores), and the per-project Adminer auto-logs-in scoped to
+  // the project. Prod-only for now — that's the only env with an Adminer.
+  const project = useProjects().data?.find((p) => p.org === org)?.name
+  const adminerUrl =
+    project && a?.database && a.classes.includes('production')
+      ? `https://adminer.prod.majksa.net/?pgsql=majnet-postgres&db=${`${project}_${app}_production`.replace(/-/g, '_')}`
+      : null
 
   const act = useApiMutation({ invalidate: [['events']] })
   const deploy = useApiMutation({ invalidate: [['deploys', org], ['events']] })
@@ -66,7 +75,18 @@ export function AppDetail() {
           <Kv k="Classes">{a.classes.join(', ') || '—'}</Kv>
           <Kv k="Domains">{a.domains.join(', ') || '—'}</Kv>
           <Kv k="Image">{short(a.image)}</Kv>
-          {a.database && <Kv k="Database">{a.database}</Kv>}
+          {a.database && (
+            <Kv k="Database">
+              <span className="inline-flex items-center gap-3">
+                {a.database}
+                {adminerUrl && (
+                  <Button asChild variant="outline" size="sm">
+                    <a href={adminerUrl} target="_blank" rel="noreferrer">Open in Adminer ↗</a>
+                  </Button>
+                )}
+              </span>
+            </Kv>
+          )}
         </CardContent></Card>
       )}
 
