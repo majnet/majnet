@@ -12,6 +12,30 @@ import type { Event } from './api'
 export const short = (img: string | null | undefined) =>
   String(img ?? '').replace(/(@sha256:[0-9a-f]{8})[0-9a-f]+/, '$1…')
 
+/// A dependency-free sparkline: filled area + line, scaled to `max`. Themed via
+/// the primary accent. Renders nothing meaningful until ≥2 points arrive.
+export function Sparkline({ values, max = 100, h = 32 }: { values: number[]; max?: number; h?: number }) {
+  const w = 100 // viewBox units; SVG stretches to container width
+  if (values.length < 2) {
+    return (
+      <svg width="100%" height={h} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" className="text-muted-foreground/40 block">
+        <line x1={0} y1={h - 1} x2={w} y2={h - 1} stroke="currentColor" strokeWidth={1} strokeDasharray="2 3" vectorEffect="non-scaling-stroke" />
+      </svg>
+    )
+  }
+  const n = values.length
+  const y = (v: number) => h - 1 - (Math.min(Math.max(v, 0), max) / max) * (h - 2)
+  const pts = values.map((v, i) => [(i / (n - 1)) * w, y(v)] as const)
+  const line = pts.map(([x, yy], i) => `${i ? 'L' : 'M'}${x.toFixed(2)} ${yy.toFixed(2)}`).join(' ')
+  const area = `${line} L${w} ${h} L0 ${h} Z`
+  return (
+    <svg width="100%" height={h} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" role="img" className="block">
+      <path d={area} className="fill-primary/15" />
+      <path d={line} className="fill-none stroke-primary" strokeWidth={1.5} strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+    </svg>
+  )
+}
+
 /// A hostname/URL rendered as a link that opens the site in a new tab. A bare
 /// host (`app.example.com`) gets an `https://` scheme; anything already a URL is
 /// used as-is. Shows a `↗` affordance.

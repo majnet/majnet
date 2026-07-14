@@ -4,7 +4,7 @@ import { useApps, useDeploys, useEvents, useImports, useNodeMetrics, useNodes, u
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { DeployStatus, Empty, ExtLink, latestEventFor, QueryState, short, StatusBadge } from './ui'
+import { DeployStatus, Empty, ExtLink, latestEventFor, QueryState, short, Sparkline, StatusBadge } from './ui'
 
 /** Step-by-step progress of an in-flight (or failed) app import. */
 export function ImportSteps({ status }: { status: ImportStatus }) {
@@ -168,6 +168,22 @@ function Stat({ label, value }: { label: string; value: string }) {
 export function Nodes() {
   const q = useNodes()
   const m = useNodeMetrics()
+  // Accumulate a rolling window (~last 60 samples ≈ 10 min at 10s) client-side
+  // so the charts build up live while the page is open.
+  const [hist, setHist] = useState<Record<string, { cpu: number[]; mem: number[] }>>({})
+  useEffect(() => {
+    if (!m.data) return
+    setHist((h) => {
+      const next = { ...h }
+      for (const nd of m.data!) {
+        if (!nd.reachable) continue
+        const cur = next[nd.name] ?? { cpu: [], mem: [] }
+        const memPct = nd.mem_total ? (nd.mem_used / nd.mem_total) * 100 : 0
+        next[nd.name] = { cpu: [...cur.cpu, nd.host_cpu_pct].slice(-60), mem: [...cur.mem, memPct].slice(-60) }
+      }
+      return next
+    })
+  }, [m.data])
   return (
     <>
       <PageHead title="Nodes" />
@@ -198,6 +214,16 @@ export function Nodes() {
                       <Stat label="Containers" value={`${mm.containers_running}/${mm.containers}`} />
                       <Stat label="Docker" value={mm.server_version} />
                       <Stat label="OS" value={mm.os} />
+                    </div>
+                    <div className="mt-3 grid grid-cols-2 gap-3">
+                      <div className="rounded-md border p-2">
+                        <div className="mb-1 flex items-center justify-between text-xs"><span className="text-muted-foreground">CPU</span><span className="font-mono">{mm.host_cpu_pct.toFixed(0)}%</span></div>
+                        <Sparkline values={hist[n.name]?.cpu ?? []} />
+                      </div>
+                      <div className="rounded-md border p-2">
+                        <div className="mb-1 flex items-center justify-between text-xs"><span className="text-muted-foreground">Memory</span><span className="font-mono">{mm.mem_total ? Math.round((mm.mem_used / mm.mem_total) * 100) : 0}%</span></div>
+                        <Sparkline values={hist[n.name]?.mem ?? []} />
+                      </div>
                     </div>
                     {mm.apps.length > 0 && (
                       <div className="mt-3 overflow-x-auto">
