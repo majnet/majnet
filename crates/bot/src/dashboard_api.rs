@@ -1141,8 +1141,9 @@ pub async fn app_rename_post(
         return Err(bad_request(format!("app {new} already exists")));
     }
 
-    // M1 guard: refuse stateful apps rather than orphan their volume/DB data —
-    // data-preserving rename ships separately.
+    // A stateful app (persistent volume or managed DB) needs its data migrated
+    // to the new names — the reconciler brackets the git flip with a freeze +
+    // volume/DB migration; a stateless app just blue-greens on the next converge.
     let manifests: BTreeMap<String, String> = dir
         .iter()
         .filter(|(p, _)| MANIFEST_FILES.contains(&p.as_str()))
@@ -1150,11 +1151,7 @@ pub async fn app_rename_post(
         .collect::<Result<_>>()
         .map_err(bad_gateway)?;
     let manifest = merged_manifest(&app, &manifests).map_err(|e| bad_request(format!("{e:#}")))?;
-    if !manifest.volumes.is_empty() || manifest.database.is_some() {
-        return Err(bad_request(
-            "this app has a persistent volume or managed database — data-preserving rename for stateful apps is not enabled yet",
-        ));
-    }
+    let stateful = !manifest.volumes.is_empty() || manifest.database.is_some();
 
     // Declared in project.yaml ⇒ it has a source repo to rename.
     let mut project = read_project(&state, &org).await.map_err(bad_gateway)?;
@@ -1198,27 +1195,78 @@ pub async fn app_rename_post(
         .await
         .map_err(bad_gateway)?;
 
-    // 3. The ops-main push drives the render pipeline (the push webhook renders +
-    //    org-syncs, exactly like a manifest edit): non-production auto-merges;
-    //    wait for the production render PR(s) to appear and merge them — the
-    //    admin authorized this by initiating the rename.
+    // 3. Freeze the rename in the reconciler *before* the env branch flips, so
+    //    the drift-poll converge can't create an empty new stack or GC the old
+    //    one mid-migration. Reads the still-old env branches to find the classes.
+    if stateful {
+        reconciler_rename(&state, &org, "prepare", &app, &new)
+            .await
+            .map_err(bad_gateway)?;
+    }
+
+    // 4. The ops-main push drives the render pipeline (webhook, like a manifest
+    //    edit): non-production auto-merges; wait for + merge the production
+    //    render PR(s). This flips env/<class> to the new name.
     let merged = merge_render_prs(&state, &org, &app_classes(&manifests))
         .await
         .map_err(bad_gateway)?;
+
+    // 5. Migrate the data (stop old, copy volumes, rename DB) now that the env
+    //    branch has the new name, then converge onto the migrated storage.
+    if stateful {
+        reconciler_rename(&state, &org, "commit", &app, &new)
+            .await
+            .map_err(bad_gateway)?;
+        crate::notify::notify_reconciler(&state, &org, "ops", "main", "rename").await;
+    }
 
     state
         .store
         .log_event("app-renamed", Some(&org), &format!("{app} → {new} by {actor}"))
         .map_err(bad_gateway)?;
     Ok(format!(
-        "renamed {app} → {new}{}; render propagated{}",
+        "renamed {app} → {new}{}; render propagated{}{}",
         if declared { " (source repo renamed)" } else { "" },
         if merged.is_empty() {
             String::new()
         } else {
             format!("; deployed: {}", merged.join(", "))
+        },
+        if stateful {
+            " (data migrated — brief downtime during cutover)"
+        } else {
+            ""
         }
     ))
+}
+
+/// Call one of the reconciler's imperative rename phases (`prepare` | `commit`).
+async fn reconciler_rename(
+    state: &AppState,
+    org: &str,
+    phase: &str,
+    old: &str,
+    new: &str,
+) -> Result<()> {
+    anyhow::ensure!(
+        !state.config.reconciler_url.is_empty(),
+        "reconciler URL not configured — cannot migrate a stateful app's data"
+    );
+    let url = format!(
+        "{}/api/rename/{phase}/{org}",
+        state.config.reconciler_url.trim_end_matches('/')
+    );
+    let resp = state
+        .http
+        .post(&url)
+        .json(&serde_json::json!({ "old": old, "new": new }))
+        .send()
+        .await
+        .with_context(|| format!("calling reconciler rename {phase}"))?;
+    let ok = resp.status().is_success();
+    let body = resp.text().await.unwrap_or_default();
+    anyhow::ensure!(ok, "reconciler rename {phase} failed: {body}");
+    Ok(())
 }
 
 /// Every file under `apps/<app>/` on ops `main`, keyed by path relative to that

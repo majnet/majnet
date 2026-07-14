@@ -161,6 +161,59 @@ pub async fn restore(
 
 const RESTORE_PATH: &str = "/tmp/majnet-restore.dump";
 
+/// Rename a logical database (+ its owning role) in place, preserving data —
+/// the DB-side half of an app/project rename. Idempotent: the guards skip if
+/// the new name already exists (a re-run after a partial rename).
+///
+/// Postgres renames both the database and the role (so the app's freshly
+/// `ensure`d new role owns the moved DB + objects). MariaDB has no rename-
+/// database, so it moves every base table into a new DB and drops the old
+/// (views/routines are not moved — a v1 limit). Valkey shares one keyspace with
+/// no per-user isolation, so there's nothing to migrate; Mongo is unsupported.
+pub async fn rename_database(
+    docker: &Docker,
+    engine: DbEngine,
+    old_db: &str,
+    new_db: &str,
+) -> Result<()> {
+    if let Some(script) = rename_script(engine, old_db, new_db)? {
+        exec(docker, engine_container(engine), &script)
+            .await
+            .with_context(|| format!("renaming database {old_db} → {new_db}"))?;
+    }
+    Ok(())
+}
+
+/// The per-engine rename command. `None` = nothing to do (Valkey); `Err` =
+/// unsupported (Mongo). Pure so it can be unit-tested like `restore_script`.
+fn rename_script(engine: DbEngine, old: &str, new: &str) -> Result<Option<String>> {
+    Ok(match engine {
+        // Terminate any lingering connections to the old DB (the app is stopped
+        // during the rename), then rename the DB and its role. Guarded on the
+        // new name so a re-run is a no-op.
+        DbEngine::Postgres => Some(format!(
+            r#"psql -U postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='{old}' AND pid <> pg_backend_pid()" >/dev/null 2>&1 || true
+psql -U postgres -tc "SELECT 1 FROM pg_database WHERE datname='{new}'" | grep -q 1 || psql -U postgres -c "ALTER DATABASE \"{old}\" RENAME TO \"{new}\""
+psql -U postgres -tc "SELECT 1 FROM pg_roles WHERE rolname='{new}'" | grep -q 1 || psql -U postgres -c "ALTER ROLE \"{old}\" RENAME TO \"{new}\"""#
+        )),
+        // No RENAME DATABASE in MariaDB: create the new DB and move each base
+        // table across, then drop the emptied old DB. The app's new user + grants
+        // are (re)created by `ensure`.
+        DbEngine::Mariadb => Some(format!(
+            r#"ROOT="$(cat /run/secrets/mariadb-root)"
+mariadb -uroot -p"$ROOT" -e "CREATE DATABASE IF NOT EXISTS \`{new}\`"
+for t in $(mariadb -uroot -p"$ROOT" -N -B -e "SELECT table_name FROM information_schema.tables WHERE table_schema='{old}' AND table_type='BASE TABLE'"); do
+  mariadb -uroot -p"$ROOT" -e "RENAME TABLE \`{old}\`.\`$t\` TO \`{new}\`.\`$t\`"
+done
+mariadb -uroot -p"$ROOT" -e "DROP DATABASE IF EXISTS \`{old}\`""#
+        )),
+        DbEngine::Valkey => None,
+        DbEngine::Mongodb => {
+            anyhow::bail!("database rename for Mongo is not supported yet (v1: postgres + mariadb)")
+        }
+    })
+}
+
 /// The restore command per engine (SQL text dumps). Postgres restores **as the
 /// app's own role** (over localhost TCP) so restored objects are owned by the
 /// user the app connects as — the source's roles/grants are stripped at dump
@@ -389,6 +442,28 @@ mod tests {
             .contains("mariadb -uroot"));
         assert!(restore_script(DbEngine::Mongodb, "d", "pw").is_err());
         assert!(restore_script(DbEngine::Valkey, "d", "pw").is_err());
+    }
+
+    #[test]
+    fn rename_script_per_engine() {
+        use super::rename_script;
+        use majnet_common::manifest::DbEngine;
+        let pg = rename_script(DbEngine::Postgres, "demo_app_production", "demo_new_production")
+            .unwrap()
+            .unwrap();
+        assert!(pg.contains(r#"ALTER DATABASE \"demo_app_production\" RENAME TO \"demo_new_production\""#));
+        assert!(pg.contains(r#"ALTER ROLE \"demo_app_production\" RENAME TO \"demo_new_production\""#));
+        assert!(pg.contains("pg_terminate_backend"));
+        let maria = rename_script(DbEngine::Mariadb, "old_db", "new_db")
+            .unwrap()
+            .unwrap();
+        assert!(maria.contains("RENAME TABLE"));
+        assert!(maria.contains("information_schema.tables WHERE table_schema='old_db'"));
+        assert!(maria.contains("DROP DATABASE IF EXISTS")); // backticks are shell-escaped
+        // Valkey has no per-user data isolation → nothing to run.
+        assert!(rename_script(DbEngine::Valkey, "a", "b").unwrap().is_none());
+        // Mongo is unsupported (matches the restore limitation).
+        assert!(rename_script(DbEngine::Mongodb, "a", "b").is_err());
     }
 
     #[test]

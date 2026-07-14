@@ -130,8 +130,22 @@ async fn converge_project_class(
         })
         .collect();
 
+    // In-flight renames for this project+class: convergence + GC skip both the
+    // old and new names until the data migration completes (see `rename`).
+    let frozen = state.store.renames_pending(project, class.as_str())?;
+
     let mut converged_apps = Vec::new();
     for (app, content) in &manifests {
+        // Don't create the new stack until its data has been migrated.
+        if frozen.iter().any(|(_, n)| n.as_str() == *app) {
+            tracing::info!(
+                project,
+                class = class.as_str(),
+                app,
+                "frozen for in-flight rename — skipping convergence"
+            );
+            continue;
+        }
         // Hard TTL (§8): an ephemeral stack dies at 7 days even if its
         // manifest lingers (safety net for PRs that never close).
         if class == EnvClass::Ephemeral && state.store.ephemeral_ttl_expired(project, app)? {
@@ -190,6 +204,14 @@ async fn converge_project_class(
                 )?;
                 converged_apps.push(app.to_string());
             }
+        }
+    }
+
+    // Keep frozen OLD apps in the GC keep-list: a rename in flight must not
+    // remove the still-serving old container before its data is migrated.
+    for (old, _) in &frozen {
+        if !converged_apps.iter().any(|a| a == old) {
+            converged_apps.push(old.clone());
         }
     }
 

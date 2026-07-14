@@ -27,6 +27,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/logs/{project}/{class}/{app}", get(logs_get))
         .route("/api/settings/alerts", get(alerts_get).post(alerts_set))
         .route("/api/settings/alerts/test", post(alerts_test))
+        .route("/api/rename/prepare/{org}", post(rename_prepare))
+        .route("/api/rename/commit/{org}", post(rename_commit))
         .route("/api/ephemeral/extend/{project}/{app}", post(extend))
         .route(
             "/api/migrate/{project}/{app}",
@@ -96,6 +98,57 @@ async fn restart(
     do_restart(&state, &project, class, &app, &actor)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))
+}
+
+#[derive(serde::Deserialize)]
+struct RenameBody {
+    old: String,
+    new: String,
+}
+
+/// `POST /api/rename/prepare/{org}` — freeze the rename (convergence + GC skip
+/// the app) before the bot flips git. Platform-admin (infra) gated.
+async fn rename_prepare(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(org): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(b): Json<RenameBody>,
+) -> Result<String, (StatusCode, String)> {
+    crate::authz::require_platform_admin(&state, &headers)
+        .await
+        .map_err(|e| (StatusCode::FORBIDDEN, format!("{e:#}")))?;
+    let classes = crate::rename::prepare(&state, &org, &b.old, &b.new)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
+    Ok(format!(
+        "froze {} → {} for [{}]",
+        b.old,
+        b.new,
+        classes.join(", ")
+    ))
+}
+
+/// `POST /api/rename/commit/{org}` — migrate the data (volumes + DB) for every
+/// frozen class and clear the freeze. Run after the git flip updated the env
+/// branches. Platform-admin (infra) gated.
+async fn rename_commit(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(org): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(b): Json<RenameBody>,
+) -> Result<String, (StatusCode, String)> {
+    crate::authz::require_platform_admin(&state, &headers)
+        .await
+        .map_err(|e| (StatusCode::FORBIDDEN, format!("{e:#}")))?;
+    let done = crate::rename::commit(&state, &org, &b.old, &b.new)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
+    Ok(format!(
+        "migrated {} → {} for [{}]",
+        b.old,
+        b.new,
+        done.join(", ")
+    ))
 }
 
 #[derive(serde::Serialize)]

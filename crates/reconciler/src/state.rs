@@ -61,6 +61,49 @@ impl Store {
         Ok(())
     }
 
+    // ── Rename freeze (data-preserving rename) ─────────────────────────────
+
+    /// Freeze a `(project, old_app, class)` rename: convergence + GC skip both
+    /// the old and new names until it's completed.
+    pub fn rename_add_pending(
+        &self,
+        project: &str,
+        old_app: &str,
+        new_app: &str,
+        class: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO renames (project, old_app, new_app, class) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (project, old_app, class) DO UPDATE SET new_app = ?3",
+            rusqlite::params![project, old_app, new_app, class],
+        )?;
+        Ok(())
+    }
+
+    /// The in-flight renames for a project+class as `(old_app, new_app)` pairs.
+    pub fn renames_pending(&self, project: &str, class: &str) -> Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT old_app, new_app FROM renames WHERE project = ?1 AND class = ?2",
+        )?;
+        let rows = stmt
+            .query_map([project, class], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// Clear the freeze for one `(project, old_app, class)` — the migration is
+    /// done, so normal convergence resumes (creates the new stack, GCs the old).
+    pub fn rename_complete(&self, project: &str, old_app: &str, class: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM renames WHERE project = ?1 AND old_app = ?2 AND class = ?3",
+            [project, old_app, class],
+        )?;
+        Ok(())
+    }
+
     pub fn record(
         &self,
         commit: &str,

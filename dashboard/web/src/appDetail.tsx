@@ -190,7 +190,7 @@ function RenameControl({ org, app, stateful }: { org: string; app: string; state
       <ConfirmButton variant="outline" size="sm" disabled={!valid || m.isPending}
         title={`Rename ${app} → ${name}?`}
         description={stateful
-          ? 'This app has a managed database — data-preserving rename for stateful apps is not enabled yet, so this will be refused.'
+          ? 'Renames the source repo + manifests, then migrates the managed database (and any volumes) to the new names — a brief cutover downtime while the data moves.'
           : 'Renames the source repo and moves the app’s manifests in one ops commit, then re-renders. Non-production deploys immediately; production merges its render PR.'}
         confirmText="Rename"
         onConfirm={() => m.mutate(() => send(urls.appRename(org, app), { json: { new: name } }))}>
