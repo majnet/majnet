@@ -370,6 +370,17 @@ fn container_spec(
             format!("traefik.http.services.{router}.loadbalancer.server.port"),
             ingress.port.to_string(),
         );
+        // Load-balancer healthcheck → true zero-downtime rollout: during the
+        // blue-green overlap Traefik only routes to backends passing this
+        // check, so the still-starting new container gets no traffic until it's
+        // healthy (and the old one is drained only after `await_healthy`).
+        if let Some(health) = &manifest.health {
+            let svc = format!("traefik.http.services.{router}.loadbalancer.healthcheck");
+            labels.insert(format!("{svc}.path"), health.path.clone());
+            labels.insert(format!("{svc}.port"), health.port.to_string());
+            labels.insert(format!("{svc}.interval"), "3s".into());
+            labels.insert(format!("{svc}.timeout"), "2s".into());
+        }
     }
 
     let health = manifest.health.as_ref().map(|h| HealthConfig {
