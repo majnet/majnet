@@ -39,6 +39,13 @@ pub const LABEL_CLASS: &str = "majnet.class";
 pub const LABEL_COMMIT: &str = "majnet.commit";
 pub const LABEL_CONFIG: &str = "majnet.config-hash";
 
+/// Salt folded into `config_hash`. Bump when container-spec *generation* changes
+/// in a way not reflected in the manifest/secrets inputs (e.g. a new derived
+/// label) so running apps re-converge onto the fresh spec via a normal
+/// blue-green rollout instead of silently keeping a stale one.
+/// History: "2" — added the Traefik LB healthcheck labels.
+const SPEC_VERSION: &str = "2";
+
 pub fn network_name(project: &str) -> String {
     format!("proj-{project}")
 }
@@ -306,6 +313,8 @@ fn config_hash(
     extra_env: &[(String, String)],
 ) -> String {
     let mut hasher = sha2::Sha256::new();
+    hasher.update(SPEC_VERSION);
+    hasher.update([0]);
     hasher.update(serde_yaml::to_string(manifest).expect("manifest serializes"));
     for (k, v) in secrets
         .into_iter()
