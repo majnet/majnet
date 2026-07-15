@@ -228,6 +228,13 @@ async fn converge_project_class(
             .record(&snapshot.commit, project, &node.name, "gc", &entry)?;
         tracing::info!(project, class = class.as_str(), entry, "removed");
     }
+    // Drop build-info rows for apps no longer present in this class (GC'd,
+    // renamed away, or archived) so they don't linger past their containers.
+    if !state.config.dry_run {
+        state
+            .store
+            .app_info_prune(project, class.as_str(), &converged_apps)?;
+    }
     Ok(())
 }
 
