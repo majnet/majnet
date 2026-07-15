@@ -14,14 +14,10 @@ use crate::AppState;
 
 const INTERVAL: Duration = Duration::from_secs(60);
 
-/// Public sites + control-plane health endpoints to watch.
-const SITES: &[(&str, &str)] = &[
-    ("net.majksa.com", "https://net.majksa.com/"),
-    ("majksa.cz", "https://majksa.cz/"),
-    ("words.majksa.net", "https://words.majksa.net/"),
-    ("poletime-ultimate.cz", "https://poletime-ultimate.cz/"),
-    ("control-plane bot", "http://10.88.0.1:8081/healthz"),
-];
+/// The control-plane bot health endpoint (WG-internal) — always watched. The
+/// public app sites are discovered from the deployed manifests, not hardcoded,
+/// so a domain change or rename keeps monitoring in sync automatically.
+const CONTROL_PLANE: (&str, &str) = ("control-plane bot", "http://10.88.0.1:8081/healthz");
 
 pub async fn run_loop(state: Arc<AppState>) {
     loop {
@@ -80,8 +76,8 @@ async fn tick(state: &AppState) -> anyhow::Result<()> {
         }
     }
 
-    for (name, url) in SITES {
-        if !site_ok(state, url).await {
+    for (name, url) in discover_sites(state).await {
+        if !site_ok(state, &url).await {
             current.insert(
                 format!("site:{name}"),
                 format!("**{name}** is DOWN — {url}"),
@@ -140,6 +136,65 @@ async fn enrolled_nodes(state: &AppState) -> anyhow::Result<HashSet<String>> {
         .filter(|n| !n.wireguard_pubkey.is_empty())
         .map(|n| n.name.clone())
         .collect())
+}
+
+/// Sites to probe: the control-plane bot plus every production ingress host of
+/// every deployed app, read from the `env/production` branches. Derived rather
+/// than hardcoded, so a domain change or app/project rename keeps the monitored
+/// set in sync on the next tick. Degrades to just the control-plane check if the
+/// registry/branches can't be read.
+async fn discover_sites(state: &AppState) -> Vec<(String, String)> {
+    let mut sites = vec![(CONTROL_PLANE.0.to_string(), CONTROL_PLANE.1.to_string())];
+    if let Ok(Some(platform)) = crate::snapshot::fetch(
+        &state.http,
+        &state.config,
+        &state.config.root_org,
+        "platform",
+        "main",
+    )
+    .await
+    {
+        if let Some(projects) = platform
+            .files
+            .get("projects.yaml")
+            .and_then(|b| majnet_common::platform::ProjectsFile::parse(b).ok())
+        {
+            for proj in projects.projects {
+                let Ok(Some(env)) = crate::snapshot::fetch(
+                    &state.http,
+                    &state.config,
+                    &proj.org,
+                    "ops",
+                    "env/production",
+                )
+                .await
+                else {
+                    continue;
+                };
+                for (path, bytes) in &env.files {
+                    // `<app>.yaml` at the root — skip `secrets/<app>.yaml`.
+                    if !path.ends_with(".yaml") || path.contains('/') {
+                        continue;
+                    }
+                    let Ok(manifest) = std::str::from_utf8(bytes)
+                        .ok()
+                        .context("utf8")
+                        .and_then(majnet_common::manifest::AppManifest::parse)
+                    else {
+                        continue;
+                    };
+                    if let Some(ingress) = manifest.ingress {
+                        for h in ingress.hosts() {
+                            sites.push((h.to_string(), format!("https://{h}/")));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    sites.sort();
+    sites.dedup();
+    sites
 }
 
 async fn site_ok(state: &AppState, url: &str) -> bool {

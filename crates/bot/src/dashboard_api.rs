@@ -1127,6 +1127,14 @@ pub async fn app_rename_post(
         .await
         .map_err(|e| (StatusCode::FORBIDDEN, format!("{e:#}")))?;
 
+    // A pending render PR means env diverges from main — renaming now could
+    // orphan an app that's running but only staged in that PR. Merge/close first.
+    if has_open_render_pr(&state, &org).await.map_err(bad_gateway)? {
+        return Err(bad_request(
+            "this project has an unmerged render PR — merge or close it in Deployments before renaming, so the rename migrates the current deployed state",
+        ));
+    }
+
     // Current app files (manifests + secrets), keyed by path relative to
     // `apps/<app>/`. Refuse if the app is missing or the target already exists.
     let dir = app_dir_files(&state, &org, &app).await.map_err(bad_gateway)?;
@@ -1276,6 +1284,13 @@ pub async fn project_rename_post(
     if registry.projects.iter().any(|p| p.name == new) {
         return Err(bad_request(format!("project name {new} is already in use")));
     }
+    // A pending render PR means env diverges from main — a running-but-staged
+    // app would be missed by the migration (its data orphaned). Settle it first.
+    if has_open_render_pr(&state, &org).await.map_err(bad_gateway)? {
+        return Err(bad_request(
+            "this project has an unmerged render PR — merge or close it in Deployments before renaming the project, so every app migrates from its current deployed state",
+        ));
+    }
 
     // 1. Freeze every app in the project before projects.yaml flips.
     reconciler_rename(&state, &org, "project-prepare", &old, &new)
@@ -1359,6 +1374,27 @@ async fn reconciler_rename(
     let body = resp.text().await.unwrap_or_default();
     anyhow::ensure!(ok, "reconciler rename {phase} failed: {body}");
     Ok(())
+}
+
+/// True if the project has an open render PR (base `env/*`). Renaming with one
+/// pending is unsafe: the migration enumerates apps from the `env` branches, so
+/// an app that's running but only pending in an unmerged render PR would be
+/// orphaned (its data left behind, the new-named stack coming up empty). Callers
+/// refuse the rename until the operator merges or closes it.
+async fn has_open_render_pr(state: &AppState, org: &str) -> Result<bool> {
+    let client = state.github.org_client(org).await?;
+    let open: serde_json::Value = client
+        .get(format!("/repos/{org}/ops/pulls?state=open"), None::<&()>)
+        .await?;
+    Ok(open
+        .as_array()
+        .is_some_and(|prs| {
+            prs.iter().any(|pr| {
+                pr["base"]["ref"]
+                    .as_str()
+                    .is_some_and(|b| b.starts_with("env/"))
+            })
+        }))
 }
 
 /// Every file under `apps/<app>/` on ops `main`, keyed by path relative to that
