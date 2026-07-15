@@ -290,7 +290,14 @@ async fn converge_one(
         None => Vec::new(),
     };
 
-    deploy::converge_app(ctx, &manifest, secrets.as_ref(), &extra_env).await
+    let summary = deploy::converge_app(ctx, &manifest, secrets.as_ref(), &extra_env).await?;
+    // On an actual rollout (not a no-op "in sync"), scrape the app's standard
+    // `/info` now that the health gate has proven it serves HTTP, and record the
+    // build metadata for the dashboard. Best-effort — never fails the deploy.
+    if !ctx.dry_run && summary.starts_with("deployed") {
+        crate::info::capture(state, ctx, &manifest).await;
+    }
+    Ok(summary)
 }
 
 async fn ensure_network(docker: &bollard::Docker, project: &str, dry_run: bool) -> Result<()> {

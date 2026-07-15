@@ -316,7 +316,9 @@ Engines run where their data belongs: production DBs on prod node, dev DBs on pr
 
 Main node, Tailscale ACL. Dozzle (over node Docker APIs), Beszel (agents on all nodes), and the **dashboard** — a web UI over the reconciler + bot APIs.
 
-**Reads** (reconciler state API): per-project deploys, env inventory, health, events, diffs.
+**Reads** (reconciler state API): per-project deploys, env inventory, health, events, diffs, per-app build info.
+
+**Standard app endpoints (convention).** Apps are encouraged to serve two HTTP endpoints on their app port: `/healthz` (liveness — the default `health.path` when a manifest declares only a `port`) and `/info` (build metadata: version, commit, build time, as JSON). Right after the blue-green health gate proves a new container serves HTTP, the reconciler scrapes `/info` (a `docker exec` GET on the loopback, the same wget/curl-in-image assumption the health check makes) and records the reported JSON per (project, app, class). The dashboard reads that recorded state — apps that don't serve `/info` simply show nothing. Never a source of truth; git + the running digest remain authoritative.
 
 **Writes go through git, never around it.** Every mutating action in the UI is translated by the **bot** into a commit or PR on the relevant `ops` repo, authored via the GitHub App with the acting user attributed (`Co-authored-by`). The reconciler then converges normally — the UI is just a friendlier way to produce commits:
 

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from '@tanstack/react-router'
-import { send, urls, useApps, useAppLogs, useAppSecrets, useEvents, useImports, useManifest, useNodeMetrics, useProjects, useReleases, type ManifestFile } from './api'
+import { send, urls, useApps, useAppInfo, useAppLogs, useAppSecrets, useEvents, useImports, useManifest, useNodeMetrics, useProjects, useReleases, type AppInfo, type ManifestFile } from './api'
 import { useApiMutation } from './mutations'
 import { ConfirmButton, DeployStatus, ExtLink, QueryState, short, StatusBadge } from './ui'
 import { Crumbs, PageHead, ImportSteps } from './views'
@@ -106,6 +106,8 @@ export function AppDetail() {
       )}
 
       {a && a.classes.length > 0 && <Containers project={project} app={app} classes={a.classes} />}
+
+      {a && <BuildInfo org={org} app={app} />}
 
       <Releases org={org} app={app} prodImage={prodImage} />
 
@@ -218,6 +220,59 @@ function Containers({ project, app, classes }: { project?: string; app: string; 
           </table>
         </div>
       )}
+    </CardContent></Card>
+  )
+}
+
+// ── build metadata from each env's `/info` endpoint (scraped at deploy) ───────
+// The app self-reports arbitrary JSON; surface the conventional keys and fall
+// back to the rest so nothing is hidden. `null` info + no error ⇒ endpoint
+// missing; only show the card once at least one env has been probed.
+const pick = (info: Record<string, unknown> | null, keys: string[]): string | null => {
+  for (const k of keys) {
+    const v = info?.[k]
+    if (v != null && typeof v !== 'object') return String(v)
+  }
+  return null
+}
+const KNOWN = ['version', 'ver', 'commit', 'git_sha', 'gitSha', 'sha', 'revision', 'build_time', 'built_at', 'buildTime', 'builtAt', 'date']
+
+function BuildInfo({ org, app }: { org: string; app: string }) {
+  const q = useAppInfo(org, app)
+  const rows = q.data ?? []
+  if (rows.length === 0) return null // no env probed yet — hide entirely
+
+  const line = (r: AppInfo) => {
+    const version = pick(r.info, ['version', 'ver'])
+    const commit = pick(r.info, ['commit', 'git_sha', 'gitSha', 'sha', 'revision'])
+    const built = pick(r.info, ['build_time', 'built_at', 'buildTime', 'builtAt', 'date'])
+    // Any reported keys the conventional set didn't cover.
+    const extra = Object.entries(r.info ?? {})
+      .filter(([k, v]) => !KNOWN.includes(k) && v != null && typeof v !== 'object')
+      .map(([k, v]) => `${k}=${String(v)}`)
+    const parts = [
+      version && `v${version.replace(/^v/, '')}`,
+      commit && commit.slice(0, 12),
+      built,
+      ...extra,
+    ].filter(Boolean)
+    if (r.error) return <span className="text-muted-foreground">{r.error}</span>
+    if (parts.length === 0) return <span className="text-muted-foreground">no build info reported</span>
+    return <span>{parts.join('  ·  ')}</span>
+  }
+
+  return (
+    <Card className="mb-4"><CardContent className="pt-6">
+      <h2 className="mb-2 text-sm font-semibold">Build info</h2>
+      <div className="flex flex-col gap-1.5">
+        {rows.map((r) => (
+          <div key={r.class} className="flex items-baseline gap-2.5 text-sm">
+            <span className="min-w-24 text-muted-foreground">{r.class}</span>
+            <span className="font-mono text-xs">{line(r)}</span>
+          </div>
+        ))}
+      </div>
+      <span className="mt-2 block text-xs text-muted-foreground">Reported by each env’s <code className="font-mono">/info</code> endpoint at its last deploy.</span>
     </CardContent></Card>
   )
 }

@@ -27,6 +27,17 @@ pub struct Event {
     pub result: String,
 }
 
+/// One env's build metadata as reported by the app's `/info` endpoint, recorded
+/// at deploy time. `info` is whatever JSON the app returned (or `null`).
+#[derive(Debug, serde::Serialize)]
+pub struct AppInfo {
+    pub class: String,
+    pub commit: String,
+    pub info: serde_json::Value,
+    pub error: Option<String>,
+    pub at: String,
+}
+
 impl Store {
     pub fn open(dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(dir)?;
@@ -84,9 +95,8 @@ impl Store {
     /// The in-flight renames for a project+class as `(old_app, new_app)` pairs.
     pub fn renames_pending(&self, project: &str, class: &str) -> Result<Vec<(String, String)>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT old_app, new_app FROM renames WHERE project = ?1 AND class = ?2",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT old_app, new_app FROM renames WHERE project = ?1 AND class = ?2")?;
         let rows = stmt
             .query_map([project, class], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<Result<_, _>>()?;
@@ -118,6 +128,58 @@ impl Store {
             rusqlite::params![commit, project, node, action, result],
         )?;
         Ok(())
+    }
+
+    // ── App `/info` build metadata (scraped at deploy time) ────────────────
+
+    /// Upsert the build metadata an app reported at `/info` for one env. `info`
+    /// is the raw JSON the app returned (None when the probe found nothing);
+    /// `error` records why it failed, if it did. Best-effort — a failure here
+    /// must never fail a deploy.
+    pub fn record_app_info(
+        &self,
+        project: &str,
+        app: &str,
+        class: &str,
+        commit: &str,
+        info: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO app_info (project, app, class, commit_sha, info, error, at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'))
+             ON CONFLICT (project, app, class) DO UPDATE
+             SET commit_sha = ?4, info = ?5, error = ?6, at = datetime('now')",
+            rusqlite::params![project, app, class, commit, info, error],
+        )?;
+        Ok(())
+    }
+
+    /// Every env's reported `/info` for an app, newest classes first is not
+    /// meaningful — ordered by class name for a stable dashboard layout.
+    pub fn app_info_for(&self, project: &str, app: &str) -> Result<Vec<AppInfo>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT class, commit_sha, info, error, at FROM app_info
+             WHERE project = ?1 AND app = ?2 ORDER BY class",
+        )?;
+        let rows = stmt.query_map([project, app], |row| {
+            let raw: Option<String> = row.get(2)?;
+            // Stored as raw JSON text — re-parse so the API emits embedded JSON
+            // rather than a quoted string. Unparseable/absent → null.
+            let info = raw
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .unwrap_or(serde_json::Value::Null);
+            Ok(AppInfo {
+                class: row.get(0)?,
+                commit: row.get(1)?,
+                info,
+                error: row.get(3)?,
+                at: row.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     // ── Data migration idempotency (ADR 0010 phase 3) ─────────────────────
@@ -298,5 +360,47 @@ mod tests {
     fn extending_untracked_app_fails() {
         let s = store();
         assert!(s.ephemeral_extend("proj", "ghost", 1).is_err());
+    }
+
+    #[test]
+    fn app_info_upserts_and_parses_json() {
+        let s = store();
+        s.record_app_info(
+            "proj",
+            "api",
+            "production",
+            "c0ffee",
+            Some(r#"{"version":"1.2.3"}"#),
+            None,
+        )
+        .unwrap();
+        // A later deploy of the same env replaces the row (upsert on PK).
+        s.record_app_info(
+            "proj",
+            "api",
+            "production",
+            "beef",
+            Some(r#"{"version":"1.3.0"}"#),
+            None,
+        )
+        .unwrap();
+        // A different env is tracked independently, and a failed probe records
+        // its error with null info.
+        s.record_app_info("proj", "api", "stable", "beef", None, Some("no /info"))
+            .unwrap();
+
+        let rows = s.app_info_for("proj", "api").unwrap();
+        assert_eq!(rows.len(), 2);
+        // Ordered by class: production before stable.
+        assert_eq!(rows[0].class, "production");
+        assert_eq!(rows[0].commit, "beef");
+        assert_eq!(rows[0].info["version"], "1.3.0");
+        assert!(rows[0].error.is_none());
+        assert_eq!(rows[1].class, "stable");
+        assert!(rows[1].info.is_null());
+        assert_eq!(rows[1].error.as_deref(), Some("no /info"));
+
+        // Unrelated app → nothing.
+        assert!(s.app_info_for("proj", "other").unwrap().is_empty());
     }
 }

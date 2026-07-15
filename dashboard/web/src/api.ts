@@ -53,6 +53,11 @@ export const IMPORT_STEPS: { key: string; label: string }[] = [
 export interface StoredRelease {
   app: string; version: string; commit: string; app_image: string; published_at: string
 }
+/** Build metadata an app reported at its `/info` endpoint, recorded per env at
+ *  deploy time. `info` is whatever JSON the app returned (or null). */
+export interface AppInfo {
+  class: string; commit: string; info: Record<string, unknown> | null; error: string | null; at: string
+}
 
 /** Parse a reconciler event timestamp (SQLite `datetime('now')`, UTC). */
 export const parseAt = (at: string): number => Date.parse(at.replace(' ', 'T') + 'Z')
@@ -118,6 +123,8 @@ export const urls = {
   alertTest: `${RECON}/settings/alerts/test`,
   appLogs: (org: string, cls: string, app: string, tail = 300) =>
     `${RECON}/logs/${encodeURIComponent(org)}/${encodeURIComponent(cls)}/${encodeURIComponent(app)}?tail=${tail}`,
+  appInfo: (org: string, app: string) =>
+    `${RECON}/info/${encodeURIComponent(org)}/${encodeURIComponent(app)}`,
   events: (limit = 300) => `${RECON}/events?limit=${limit}`,
   deploys: (org: string) => `${BOT}/deploys/${encodeURIComponent(org)}`,
   deployMerge: (org: string, n: number) => `${BOT}/deploys/${encodeURIComponent(org)}/${n}/merge`,
@@ -170,6 +177,8 @@ export const useAppLogs = (org: string, cls: string, app: string, enabled: boole
   useQuery({ queryKey: ['logs', org, cls, app], queryFn: () => getText(urls.appLogs(org, cls, app)), enabled, refetchInterval: 5000 })
 export const useNodes = () =>
   useQuery({ queryKey: ['nodes'], queryFn: () => getJSON<PlatformNode[]>(urls.nodes) })
+export const useAppInfo = (org: string, app: string) =>
+  useQuery({ queryKey: ['info', org, app], queryFn: () => getJSON<AppInfo[]>(urls.appInfo(org, app)), refetchInterval: 30000 })
 export const useEvents = (limit = 300) =>
   useQuery({ queryKey: ['events', limit], queryFn: () => getJSON<Event[]>(urls.events(limit)), refetchInterval: 15000 })
 export const useDeploys = (org: string) =>
