@@ -46,11 +46,20 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,enable={{is_default_branch}}
             type=ref,event=pr,prefix=pr-
+      - name: build metadata
+        id: bm
+        run: echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Baked into the image so the app can report them at /info (design §16).
+          # Build tier (main/PR) → version "dev"; the release tier stamps vX.Y.Z.
+          build-args: |
+            VERSION=dev
+            GIT_COMMIT=${{ github.sha }}
+            BUILD_TIME=${{ steps.bm.outputs.built_at }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
