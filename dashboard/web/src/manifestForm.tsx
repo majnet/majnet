@@ -31,7 +31,9 @@ export function fromData(data: unknown): ManifestDraft {
     ingress: { on: !!d.ingress, host: str(ing.host), port: str(ing.port), domains: Array.isArray(ing.domains) ? ing.domains.map(String) : [] },
     health: { on: !!d.health, path: str(hl.path, '/'), port: str(hl.port), retries: str(hl.retries, '5') },
     database: { on: !!d.database, engine: str(db.engine, 'postgres') },
-    env: Object.entries(env).map(([k, v]) => [k, String(v)] as [string, string]),
+    env: Object.entries(env)
+      .map(([k, v]) => [k, String(v)] as [string, string])
+      .sort((a, b) => a[0].localeCompare(b[0])),
     secrets: Array.isArray(d.secrets) ? d.secrets.map(String) : [],
     migration: { on: !!d.migration, command: Array.isArray(mig.command) ? mig.command.map(String) : [] },
     volumes: Array.isArray(d.volumes)

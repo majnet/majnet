@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from '@tanstack/react-router'
-import { send, urls, useApps, useAppLogs, useAppSecrets, useEvents, useImports, useManifest, useProjects, useReleases, type ManifestFile } from './api'
+import { send, urls, useApps, useAppLogs, useAppSecrets, useEvents, useImports, useManifest, useNodeMetrics, useProjects, useReleases, type ManifestFile } from './api'
 import { useApiMutation } from './mutations'
 import { ConfirmButton, DeployStatus, ExtLink, QueryState, short, StatusBadge } from './ui'
 import { Crumbs, PageHead, ImportSteps } from './views'
@@ -105,6 +105,8 @@ export function AppDetail() {
         </CardContent></Card>
       )}
 
+      {a && a.classes.length > 0 && <Containers project={project} app={app} classes={a.classes} />}
+
       <Releases org={org} app={app} prodImage={prodImage} />
 
       <QueryState isLoading={manifest.isLoading} error={imp && !manifest.data ? undefined : manifest.error}>
@@ -180,6 +182,42 @@ function Releases({ org, app, prodImage }: { org: string; app: string; prodImage
           )
         })}
       </div>
+    </CardContent></Card>
+  )
+}
+
+// ── live containers for this app (across its classes/nodes) ───────────────────
+function Containers({ project, app, classes }: { project?: string; app: string; classes: string[] }) {
+  const metrics = useNodeMetrics()
+  if (!project) return null
+  // Container names are `<project>-<app>-<class>-<hash>`; match on class prefixes
+  // so a sibling app whose name extends this one (blog vs blog-api) can't leak in.
+  const prefixes = classes.map((c) => `${project}-${app}-${c}-`)
+  const mine = (metrics.data ?? [])
+    .flatMap((n) => n.apps)
+    .filter((c) => prefixes.some((p) => c.name.startsWith(p)))
+  return (
+    <Card className="mb-4"><CardContent className="pt-6">
+      <h2 className="mb-2 text-sm font-semibold">Containers</h2>
+      {mine.length === 0 ? (
+        <span className="text-xs text-muted-foreground">No running containers.</span>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead><tr className="text-left text-muted-foreground"><th className="py-1 pr-3 font-medium">container</th><th className="py-1 pr-3 font-medium">state</th><th className="py-1 pr-3 font-medium">cpu</th><th className="py-1 font-medium">mem</th></tr></thead>
+            <tbody className="font-mono">
+              {mine.map((c) => (
+                <tr key={c.name} className="border-t">
+                  <td className="py-1 pr-3">{c.name}</td>
+                  <td className="py-1 pr-3">{c.state}</td>
+                  <td className="py-1 pr-3">{c.cpu_pct.toFixed(1)}%</td>
+                  <td className="py-1">{(c.mem_used / 1e6).toFixed(0)} MB{c.mem_limit ? ` / ${(c.mem_limit / 1e9).toFixed(1)} GB` : ''}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </CardContent></Card>
   )
 }
