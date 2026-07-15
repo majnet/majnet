@@ -77,6 +77,7 @@ Code ✅ / remaining ⏳:
 - [x] Valkey + MongoDB provisioning (ACL user / dbOwner user; engines + nightly dumps included)
 - [x] Full dashboard: manifest editing (validated, committed by the bot), member management (admin-only), ephemeral TTL extension, role-based authorization from `people.yaml` + `project.yaml` (`common/src/authz.rs`; `tailscale serve` is the identity trust anchor)
 - [x] Self-update: control-plane version pinned in the platform repo's `version.yaml` (seeded to the exact installed commit), converged hourly by `majnet-update` on the main node via the bot's `GET /api/platform/version`; break-glass = `majnet-update <ref>` (**ADR 0005**)
+- [x] Standard app endpoints: `/healthz` is the default `health.path`; reconciler scrapes `/info` (build metadata) at deploy time and surfaces it per app/env in the dashboard (§16)
 - [ ] First weekly restore test actually performed
 
 ## Phase 6 — One-line auto-provisioning (Coolify-style install) 🚧

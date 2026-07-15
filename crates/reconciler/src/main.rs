@@ -23,6 +23,7 @@ mod db;
 mod deploy;
 mod docker;
 mod gc;
+mod info;
 mod ingress;
 mod metrics;
 mod migrate;

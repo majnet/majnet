@@ -25,6 +25,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/secrets/{project}/{class}/{app}", get(secrets_get))
         .route("/api/metrics", get(metrics_get))
         .route("/api/logs/{project}/{class}/{app}", get(logs_get))
+        .route("/api/info/{org}/{app}", get(info_get))
         .route("/api/settings/alerts", get(alerts_get).post(alerts_set))
         .route("/api/settings/alerts/test", post(alerts_test))
         .route("/api/rename/prepare/{org}", post(rename_prepare))
@@ -168,7 +169,12 @@ async fn project_prepare(
     let classes = crate::rename::project_prepare(&state, &org, &b.old, &b.new)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
-    Ok(format!("froze project {} → {} [{}]", b.old, b.new, classes.join(", ")))
+    Ok(format!(
+        "froze project {} → {} [{}]",
+        b.old,
+        b.new,
+        classes.join(", ")
+    ))
 }
 
 /// `POST /api/rename/project-commit/{org}` — migrate every app's data to the new
@@ -185,7 +191,12 @@ async fn project_commit(
     let done = crate::rename::project_commit(&state, &org, &b.old, &b.new)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
-    Ok(format!("migrated project {} → {} [{}]", b.old, b.new, done.join(", ")))
+    Ok(format!(
+        "migrated project {} → {} [{}]",
+        b.old,
+        b.new,
+        done.join(", ")
+    ))
 }
 
 #[derive(serde::Deserialize)]
@@ -423,6 +434,35 @@ async fn logs_inner(
         }
     }
     Ok(buf)
+}
+
+/// `GET /api/info/{org}/{app}` — build metadata (version/commit/etc.) each env
+/// reported at its last deploy via the standard `/info` endpoint. Read from the
+/// state DB (scraped at deploy time, not probed live). Developer-gated — this is
+/// non-sensitive build info, not secrets or logs.
+async fn info_get(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path((org, app)): axum::extract::Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<Vec<crate::state::AppInfo>>, (StatusCode, String)> {
+    crate::authz::require(
+        &state,
+        &headers,
+        &org,
+        majnet_common::project::Role::Developer,
+    )
+    .await
+    .map_err(|e| (StatusCode::FORBIDDEN, format!("{e:#}")))?;
+    // Rows are keyed by project NAME (matching container labels); the dashboard
+    // passes the org, which can differ (e.g. org majksa-projects → project demo).
+    let project = crate::rename::resolve_project(&state, &org)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
+    state
+        .store
+        .app_info_for(&project, &app)
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))
 }
 
 /// `GET /api/secrets/{project}/{class}/{app}` — decrypt and return an app's

@@ -133,10 +133,22 @@ fn is_valid_hostname(h: &str) -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HealthCheck {
+    /// HTTP path probed for liveness. Defaults to the platform-standard
+    /// `/healthz` so an app only needs to declare its `port` to opt in — the
+    /// same path the reconciler scrapes `/info` alongside.
+    #[serde(default = "default_health_path")]
     pub path: String,
     pub port: u16,
     #[serde(default = "default_retries")]
     pub retries: u32,
+}
+
+/// The platform-standard liveness path (§ "standard endpoints"). Apps are
+/// encouraged to serve `/healthz` (liveness) and `/info` (build metadata) on
+/// their HTTP port; the reconciler health-gates on the former and records the
+/// latter per app/env.
+fn default_health_path() -> String {
+    "/healthz".into()
 }
 
 fn default_retries() -> u32 {
@@ -319,8 +331,19 @@ mod tests {
     }
 
     #[test]
+    fn health_path_defaults_to_healthz() {
+        // A health block with only a port gets the standard `/healthz` path.
+        let yaml = format!("name: api\nimage: ghcr.io/org/api@{DIGEST}\nhealth:\n  port: 8080\n");
+        let m = AppManifest::parse(&yaml).unwrap();
+        let health = m.health.unwrap();
+        assert_eq!(health.path, "/healthz");
+        assert_eq!(health.port, 8080);
+    }
+
+    #[test]
     fn replicas_default_is_one() {
-        let m = AppManifest::parse(&format!("name: api\nimage: ghcr.io/org/api@{DIGEST}\n")).unwrap();
+        let m =
+            AppManifest::parse(&format!("name: api\nimage: ghcr.io/org/api@{DIGEST}\n")).unwrap();
         assert_eq!(m.replicas, 1);
     }
 

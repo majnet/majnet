@@ -30,7 +30,7 @@ export function fromData(data: unknown): ManifestDraft {
   return {
     image: str(d.image),
     ingress: { on: !!d.ingress, host: str(ing.host), port: str(ing.port), domains: Array.isArray(ing.domains) ? ing.domains.map(String) : [] },
-    health: { on: !!d.health, path: str(hl.path, '/'), port: str(hl.port), retries: str(hl.retries, '5') },
+    health: { on: !!d.health, path: str(hl.path, '/healthz'), port: str(hl.port), retries: str(hl.retries, '5') },
     database: { on: !!d.database, engine: str(db.engine, 'postgres') },
     env: Object.entries(env)
       .map(([k, v]) => [k, String(v)] as [string, string])
@@ -151,7 +151,7 @@ export function ManifestForm({ file, draft, onChange }: { file: string; draft: M
 
       <Section label="Health check" on={draft.health.on} onToggle={(on) => set('health', { ...draft.health, on })}>
         <div className="grid grid-cols-[2fr_1fr_1fr] gap-2.5">
-          <Fld label="Path"><Input value={draft.health.path} onChange={(e) => set('health', { ...draft.health, path: e.target.value })} /></Fld>
+          <Fld label="Path"><Input placeholder="/healthz" value={draft.health.path} onChange={(e) => set('health', { ...draft.health, path: e.target.value })} /></Fld>
           <Fld label="Port"><Input type="number" value={draft.health.port} onChange={(e) => set('health', { ...draft.health, port: e.target.value })} /></Fld>
           <Fld label="Retries"><Input type="number" value={draft.health.retries} onChange={(e) => set('health', { ...draft.health, retries: e.target.value })} /></Fld>
         </div>
