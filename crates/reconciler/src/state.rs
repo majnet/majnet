@@ -182,6 +182,25 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Drop `app_info` rows for a `(project, class)` whose app is not in `keep`
+    /// (the class's rendered/kept app set) — so a GC'd, renamed, or archived app
+    /// doesn't leave a stale build-info row behind. An empty `keep` clears the
+    /// whole (project, class). Returns the number of rows removed.
+    pub fn app_info_prune(&self, project: &str, class: &str, keep: &[String]) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let mut sql = String::from("DELETE FROM app_info WHERE project = ?1 AND class = ?2");
+        if !keep.is_empty() {
+            let placeholders = (0..keep.len())
+                .map(|i| format!("?{}", i + 3))
+                .collect::<Vec<_>>()
+                .join(", ");
+            sql.push_str(&format!(" AND app NOT IN ({placeholders})"));
+        }
+        let mut params: Vec<&dyn rusqlite::ToSql> = vec![&project, &class];
+        params.extend(keep.iter().map(|k| k as &dyn rusqlite::ToSql));
+        Ok(conn.execute(&sql, params.as_slice())?)
+    }
+
     // ── Data migration idempotency (ADR 0010 phase 3) ─────────────────────
 
     /// True if a data restore already completed for this stack — the guard that
@@ -402,5 +421,37 @@ mod tests {
 
         // Unrelated app → nothing.
         assert!(s.app_info_for("proj", "other").unwrap().is_empty());
+    }
+
+    #[test]
+    fn app_info_prune_drops_only_absent_apps_in_class() {
+        let s = store();
+        let info = Some(r#"{"version":"1"}"#);
+        s.record_app_info("proj", "keep", "production", "c", info, None)
+            .unwrap();
+        s.record_app_info("proj", "gone", "production", "c", info, None)
+            .unwrap();
+        // Same-named app in another class must be untouched by a class-scoped prune.
+        s.record_app_info("proj", "gone", "stable", "c", info, None)
+            .unwrap();
+        // Another project must be untouched too.
+        s.record_app_info("other", "gone", "production", "c", info, None)
+            .unwrap();
+
+        let removed = s
+            .app_info_prune("proj", "production", &["keep".into()])
+            .unwrap();
+        assert_eq!(removed, 1);
+        assert!(!s.app_info_for("proj", "keep").unwrap().is_empty());
+        // "gone" is pruned from production but survives in stable.
+        let gone = s.app_info_for("proj", "gone").unwrap();
+        assert_eq!(gone.len(), 1);
+        assert_eq!(gone[0].class, "stable");
+        // Other project untouched.
+        assert_eq!(s.app_info_for("other", "gone").unwrap().len(), 1);
+
+        // Empty keep-list clears the whole (project, class).
+        assert_eq!(s.app_info_prune("proj", "stable", &[]).unwrap(), 1);
+        assert!(s.app_info_for("proj", "gone").unwrap().is_empty());
     }
 }
