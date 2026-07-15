@@ -1,0 +1,13 @@
+# Standalone repo when materialized; the empty [workspace] also detaches this
+# scaffold from the MajNet monorepo workspace during template development.
+[workspace]
+
+[package]
+name = "app"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+serde_json = "1"
