@@ -1240,6 +1240,98 @@ pub async fn app_rename_post(
     ))
 }
 
+/// `POST /api/projects/{org}/rename` — rename a project (platform admin). The
+/// project name prefixes every app's container/volume/DB, so this refreezes the
+/// whole project, flips `projects.yaml` + the ops `project.yaml`, then migrates
+/// each app's data to the new prefix and removes the old-prefixed containers.
+/// A brief per-app cutover (the project-label change defeats blue-green GC).
+pub async fn project_rename_post(
+    State(state): State<Arc<AppState>>,
+    Path(org): Path<String>,
+    headers: HeaderMap,
+    Json(req): Json<RenameReq>,
+) -> Result<String, ApiError> {
+    let new = req.new.trim().to_string();
+    if new.is_empty()
+        || !new
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err(bad_request("invalid project name (lowercase, digits, -)"));
+    }
+    let actor = crate::authz::require_platform_admin(&state, &headers)
+        .await
+        .map_err(|e| (StatusCode::FORBIDDEN, format!("{e:#}")))?;
+
+    let mut registry = read_projects(&state).await.map_err(bad_gateway)?;
+    let old = registry
+        .projects
+        .iter()
+        .find(|p| p.org == org)
+        .map(|p| p.name.clone())
+        .ok_or_else(|| bad_request(format!("org {org} is not a registered project")))?;
+    if new == old {
+        return Err(bad_request("new name is the same as the current name"));
+    }
+    if registry.projects.iter().any(|p| p.name == new) {
+        return Err(bad_request(format!("project name {new} is already in use")));
+    }
+
+    // 1. Freeze every app in the project before projects.yaml flips.
+    reconciler_rename(&state, &org, "project-prepare", &old, &new)
+        .await
+        .map_err(bad_gateway)?;
+
+    // 2. Flip the registry name (platform repo) + the ops project.yaml name.
+    for p in &mut registry.projects {
+        if p.org == org {
+            p.name = new.clone();
+        }
+    }
+    let yaml = format!(
+        "# Managed by the platform — project registry (§2).\n{}",
+        serde_yaml::to_string(&registry).map_err(|e| bad_gateway(e.into()))?
+    );
+    commit_platform_file(
+        &state,
+        "projects.yaml",
+        &yaml,
+        &format!("projects: rename {old} → {new} via dashboard by {actor}"),
+    )
+    .await
+    .map_err(bad_gateway)?;
+    let mut project = read_project(&state, &org).await.map_err(bad_gateway)?;
+    project.name = new.clone();
+    commit_file(
+        &state,
+        &org,
+        "project.yaml",
+        &serde_yaml::to_string(&project).map_err(|e| bad_gateway(e.into()))?,
+        &format!("project: rename {old} → {new} via dashboard by {actor}"),
+    )
+    .await
+    .map_err(bad_gateway)?;
+
+    // 3. Migrate every app's data to the new prefix + remove old containers,
+    //    then converge onto the new project.
+    reconciler_rename(&state, &org, "project-commit", &old, &new)
+        .await
+        .map_err(bad_gateway)?;
+    crate::notify::notify_reconciler(&state, &org, "platform", "main", "project-rename").await;
+
+    state
+        .store
+        .log_event(
+            "project-renamed",
+            Some(&org),
+            &format!("{old} → {new} by {actor}"),
+        )
+        .map_err(bad_gateway)?;
+    Ok(format!(
+        "renamed project {old} → {new}; every app migrated to the new prefix (brief per-app cutover)"
+    ))
+}
+
 /// Call one of the reconciler's imperative rename phases (`prepare` | `commit`).
 async fn reconciler_rename(
     state: &AppState,

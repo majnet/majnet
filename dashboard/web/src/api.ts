@@ -143,6 +143,7 @@ export const urls = {
     `${RECON}/restart/${encodeURIComponent(org)}/${encodeURIComponent(cls)}/${encodeURIComponent(app)}`,
   appRename: (org: string, app: string) =>
     `${BOT}/apps/${encodeURIComponent(org)}/${encodeURIComponent(app)}/rename`,
+  projectRename: (org: string) => `${BOT}/projects/${encodeURIComponent(org)}/rename`,
 }
 
 // ── query hooks ──────────────────────────────────────────────────────────────

@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams } from '@tanstack/react-router'
 import { ChevronRight, Plus, Loader2, CheckCircle2, Circle, AlertCircle } from 'lucide-react'
-import { useApps, useDeploys, useEvents, useImports, useNodeMetrics, useNodes, useProjects, useWhoami, IMPORT_STEPS, type ImportStatus } from './api'
+import { send, urls, useApps, useDeploys, useEvents, useImports, useNodeMetrics, useNodes, useProjects, useWhoami, IMPORT_STEPS, type ImportStatus } from './api'
+import { useApiMutation } from './mutations'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { Input } from '@/components/ui/input'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { DeployStatus, Empty, ExtLink, latestEventFor, QueryState, short, Sparkline, StatusBadge } from './ui'
+import { ConfirmButton, DeployStatus, Empty, ExtLink, latestEventFor, QueryState, short, Sparkline, StatusBadge } from './ui'
 
 /** Step-by-step progress of an in-flight (or failed) app import. */
 export function ImportSteps({ status }: { status: ImportStatus }) {
@@ -87,10 +89,29 @@ export function Projects() {
 }
 
 // ── Project detail ───────────────────────────────────────────────────────────
+function RenameProjectControl({ org, current }: { org: string; current: string }) {
+  const [name, setName] = useState('')
+  const m = useApiMutation({ invalidate: [['projects'], ['apps', org], ['events']] })
+  const valid = /^[a-z0-9-]+$/.test(name) && name !== current
+  return (
+    <div className="flex items-center gap-2">
+      <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="new-project-name" className="h-8 w-44" aria-label="new project name" />
+      <ConfirmButton variant="outline" size="sm" disabled={!valid || m.isPending}
+        title={`Rename project ${current} → ${name}?`}
+        description="The project name prefixes every app’s containers, volumes and databases — each app’s data is migrated to the new prefix with a brief per-app cutover."
+        confirmText="Rename project"
+        onConfirm={() => m.mutate(() => send(urls.projectRename(org), { json: { new: name } }))}>
+        Rename
+      </ConfirmButton>
+    </div>
+  )
+}
+
 export function ProjectDetail() {
   const { org } = useParams({ from: '/projects/$org' })
   const projects = useProjects()
   const name = projects.data?.find((x) => x.org === org)?.name ?? org
+  const isAdmin = useWhoami().data?.admin ?? false
   const apps = useApps(org)
   const imports = useImports(org)
   const events = useEvents()
@@ -106,6 +127,7 @@ export function ProjectDetail() {
         <Button asChild variant="outline" size="sm"><Link to="/projects/$org/deploys" params={{ org }}>Deployments{pending ? ` · ${pending}` : ''}</Link></Button>
         <Button asChild variant="outline" size="sm"><Link to="/projects/$org/members" params={{ org }}>Members</Link></Button>
         <Button asChild size="sm"><Link to="/projects/$org/new-app" params={{ org }}><Plus className="size-4" /> New app</Link></Button>
+        {isAdmin && <RenameProjectControl org={org} current={name} />}
       </PageHead>
 
       <h2 className="mb-2.5 text-sm font-semibold">Apps</h2>

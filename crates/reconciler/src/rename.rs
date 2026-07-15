@@ -73,7 +73,7 @@ pub async fn commit(state: &AppState, org: &str, old: &str, new: &str) -> Result
         {
             continue;
         }
-        migrate_class(state, &nodes, &project, org, old, new, class)
+        migrate_stack(state, &nodes, org, &project, old, &project, new, class)
             .await
             .with_context(|| format!("migrating {old}→{new} ({})", class.as_str()))?;
         state.store.rename_complete(&project, old, class.as_str())?;
@@ -89,13 +89,21 @@ pub async fn commit(state: &AppState, org: &str, old: &str, new: &str) -> Result
     Ok(done)
 }
 
-async fn migrate_class(
+/// Migrate one app's stack across a rename, on either axis: `(old_project,
+/// old_app)` → `(new_project, new_app)`. App rename keeps the project fixed;
+/// project rename keeps the app fixed. Removes the old container (so the volume
+/// is quiescent and the DB has no live connections), copies each named volume,
+/// and renames the managed DB. Data lives in the named volume + engine, not the
+/// container, so removing it is safe.
+#[allow(clippy::too_many_arguments)]
+async fn migrate_stack(
     state: &AppState,
     nodes: &NodesFile,
-    project: &str,
     org: &str,
-    old: &str,
-    new: &str,
+    old_project: &str,
+    old_app: &str,
+    new_project: &str,
+    new_app: &str,
     class: EnvClass,
 ) -> Result<()> {
     let node = nodes
@@ -103,34 +111,32 @@ async fn migrate_class(
         .context("no node for class")?;
     let docker = state.nodes(nodes).client_for(node).await?;
 
-    // New manifest (post-flip env branch) tells us which volumes + DB to move.
+    // The post-flip env branch carries the app under its new name (which for a
+    // project rename is unchanged) — tells us which volumes + DB to move.
     let snap = crate::snapshot::fetch(&state.http, &state.config, org, "ops", &class.env_branch())
         .await?
         .with_context(|| format!("env/{} snapshot", class.as_str()))?;
     let bytes = snap
         .files
-        .get(&format!("{new}.yaml"))
-        .with_context(|| format!("{new}.yaml missing on env/{}", class.as_str()))?;
+        .get(&format!("{new_app}.yaml"))
+        .with_context(|| format!("{new_app}.yaml missing on env/{}", class.as_str()))?;
     let manifest = AppManifest::parse(std::str::from_utf8(bytes)?)?;
 
-    let ctx = DeployCtx {
+    // Remove the OLD stack (old project/app labels).
+    let ctx_old = DeployCtx {
         docker: &docker,
-        project,
+        project: old_project,
         class,
         commit: "imperative-rename",
         dry_run: state.config.dry_run,
         http: &state.http,
         bot_url: &state.config.bot_url,
     };
-
-    // Stop the old stack so the volume is quiescent and the DB has no live
-    // connections (Postgres ALTER DATABASE RENAME needs none). Data lives in
-    // the named volume + engine, not the container, so removal is safe.
-    deploy::remove_app(&ctx, old).await?;
+    deploy::remove_app(&ctx_old, old_app).await?;
 
     for vol in &manifest.volumes {
-        let from = deploy::volume_name(project, old, class, &vol.name);
-        let to = deploy::volume_name(project, new, class, &vol.name);
+        let from = deploy::volume_name(old_project, old_app, class, &vol.name);
+        let to = deploy::volume_name(new_project, new_app, class, &vol.name);
         copy_volume(&docker, &from, &to)
             .await
             .with_context(|| format!("copying volume {from} → {to}"))?;
@@ -140,12 +146,95 @@ async fn migrate_class(
         crate::db::rename_database(
             &docker,
             db.engine,
-            &crate::db::db_name(project, old, class),
-            &crate::db::db_name(project, new, class),
+            &crate::db::db_name(old_project, old_app, class),
+            &crate::db::db_name(new_project, new_app, class),
         )
         .await?;
     }
     Ok(())
+}
+
+/// Freeze a project rename: every app in the project, across every class it's
+/// deployed in. Rows are keyed under the **new** project name so that after the
+/// git flip (projects.yaml → new name) convergence skips them until migrated.
+/// Old→new here is the app identity (unchanged), the project changes around it.
+pub async fn project_prepare(
+    state: &AppState,
+    org: &str,
+    _old_project: &str,
+    new_project: &str,
+) -> Result<Vec<String>> {
+    let mut classes = Vec::new();
+    for class in EnvClass::ALL {
+        let Some(snap) =
+            crate::snapshot::fetch(&state.http, &state.config, org, "ops", &class.env_branch())
+                .await?
+        else {
+            continue;
+        };
+        let apps: Vec<String> = snap
+            .files
+            .keys()
+            .filter_map(|p| p.strip_suffix(".yaml").filter(|p| !p.contains('/')))
+            .map(str::to_string)
+            .collect();
+        for app in &apps {
+            state
+                .store
+                .rename_add_pending(new_project, app, app, class.as_str())?;
+        }
+        if !apps.is_empty() {
+            classes.push(class.as_str().to_string());
+        }
+    }
+    Ok(classes)
+}
+
+/// Migrate every app of a renamed project from the old prefix to the new one,
+/// then clear the freeze. Run after the git flip updated projects.yaml + the
+/// env branches. GC is scoped by the project label, so the old-prefixed
+/// containers can't be reaped by a normal converge — `migrate_stack` removes
+/// them explicitly here.
+pub async fn project_commit(
+    state: &AppState,
+    org: &str,
+    old_project: &str,
+    new_project: &str,
+) -> Result<Vec<String>> {
+    let platform = crate::snapshot::fetch(
+        &state.http,
+        &state.config,
+        &state.config.root_org,
+        "platform",
+        "main",
+    )
+    .await?
+    .context("platform snapshot unavailable")?;
+    let nodes = NodesFile::parse(platform.files.get("nodes.yaml").context("no nodes.yaml")?)?;
+
+    let mut done = Vec::new();
+    for class in EnvClass::ALL {
+        let pending = state.store.renames_pending(new_project, class.as_str())?;
+        for (app, _) in &pending {
+            migrate_stack(state, &nodes, org, old_project, app, new_project, app, class)
+                .await
+                .with_context(|| {
+                    format!("migrating {old_project}/{app} → {new_project} ({})", class.as_str())
+                })?;
+            state.store.rename_complete(new_project, app, class.as_str())?;
+        }
+        if !pending.is_empty() {
+            state.store.record(
+                "imperative-rename",
+                new_project,
+                "",
+                &format!("project rename {old_project}→{new_project}"),
+                class.as_str(),
+            )?;
+            done.push(class.as_str().to_string());
+        }
+    }
+    Ok(done)
 }
 
 /// Copy a named Docker volume's contents into another (created if absent) via a

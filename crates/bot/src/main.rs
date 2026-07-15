@@ -107,6 +107,10 @@ async fn main() -> Result<()> {
             post(dashboard_api::app_rename_post),
         )
         .route(
+            "/api/projects/{org}/rename",
+            post(dashboard_api::project_rename_post),
+        )
+        .route(
             "/api/secrets/{org}/{app}",
             post(dashboard_api::secrets_post),
         )

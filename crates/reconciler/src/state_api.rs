@@ -29,6 +29,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/settings/alerts/test", post(alerts_test))
         .route("/api/rename/prepare/{org}", post(rename_prepare))
         .route("/api/rename/commit/{org}", post(rename_commit))
+        .route("/api/rename/project-prepare/{org}", post(project_prepare))
+        .route("/api/rename/project-commit/{org}", post(project_commit))
         .route("/api/ephemeral/extend/{project}/{app}", post(extend))
         .route(
             "/api/migrate/{project}/{app}",
@@ -149,6 +151,40 @@ async fn rename_commit(
         b.new,
         done.join(", ")
     ))
+}
+
+/// `POST /api/rename/project-prepare/{org}` — freeze every app of a project
+/// before its projects.yaml name flips. Body `{old, new}` = old/new project name.
+async fn project_prepare(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(org): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(b): Json<RenameBody>,
+) -> Result<String, (StatusCode, String)> {
+    crate::authz::require_platform_admin(&state, &headers)
+        .await
+        .map_err(|e| (StatusCode::FORBIDDEN, format!("{e:#}")))?;
+    let classes = crate::rename::project_prepare(&state, &org, &b.old, &b.new)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
+    Ok(format!("froze project {} → {} [{}]", b.old, b.new, classes.join(", ")))
+}
+
+/// `POST /api/rename/project-commit/{org}` — migrate every app's data to the new
+/// project prefix and remove the old-prefixed containers. After the git flip.
+async fn project_commit(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(org): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(b): Json<RenameBody>,
+) -> Result<String, (StatusCode, String)> {
+    crate::authz::require_platform_admin(&state, &headers)
+        .await
+        .map_err(|e| (StatusCode::FORBIDDEN, format!("{e:#}")))?;
+    let done = crate::rename::project_commit(&state, &org, &b.old, &b.new)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
+    Ok(format!("migrated project {} → {} [{}]", b.old, b.new, done.join(", ")))
 }
 
 #[derive(serde::Serialize)]
