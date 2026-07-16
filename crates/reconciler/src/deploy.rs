@@ -683,7 +683,7 @@ fn container_name(container: &ContainerSummary) -> Option<String> {
         .map(|n| n.trim_start_matches('/').to_string())
 }
 
-async fn remove_container_if_exists(docker: &Docker, name: &str) -> Result<()> {
+pub(crate) async fn remove_container_if_exists(docker: &Docker, name: &str) -> Result<()> {
     match docker
         .remove_container(
             name,
@@ -699,6 +699,20 @@ async fn remove_container_if_exists(docker: &Docker, name: &str) -> Result<()> {
             status_code: 404, ..
         }) => Ok(()),
         Err(e) => Err(e.into()),
+    }
+}
+
+/// Remove the project's Docker network, tolerating "already gone" (404). Only
+/// reached by the whole-project purge (§2 escape), after every container on it
+/// has been removed.
+pub async fn remove_network(docker: &Docker, project: &str) -> Result<()> {
+    let name = network_name(project);
+    match docker.remove_network(&name).await {
+        Ok(()) => Ok(()),
+        Err(bollard::errors::Error::DockerResponseServerError {
+            status_code: 404, ..
+        }) => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("removing network {name}")),
     }
 }
 

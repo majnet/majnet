@@ -217,6 +217,32 @@ valkey-cli -a "$AUTH" --no-auth-warning ACL SAVE"#
     }
 }
 
+/// Drop the shared per-project login role (`project_role`) — the last DB step of
+/// a whole-project purge, after every app DB/role is gone. Idempotent
+/// (`IF EXISTS`); a no-op for engines without a separate project login.
+pub async fn drop_role(docker: &Docker, engine: DbEngine, role: &str) -> Result<()> {
+    let script = drop_role_script(engine, role);
+    if script.is_empty() {
+        return Ok(());
+    }
+    exec(docker, engine_container(engine), &script)
+        .await
+        .with_context(|| format!("dropping project role {role}"))
+}
+
+/// The per-engine command to drop just a login role/user (no database). Pure, so
+/// it's unit-tested. Empty = the engine has no separate project login to drop.
+fn drop_role_script(engine: DbEngine, role: &str) -> String {
+    match engine {
+        DbEngine::Postgres => format!(r#"psql -U postgres -c "DROP ROLE IF EXISTS \"{role}\"""#),
+        DbEngine::Mariadb => format!(
+            r#"ROOT="$(cat /run/secrets/mariadb-root)"
+mariadb -uroot -p"$ROOT" -e "DROP USER IF EXISTS '{role}'@'%';""#
+        ),
+        DbEngine::Valkey | DbEngine::Mongodb => String::new(),
+    }
+}
+
 /// The per-engine rename command. `None` = nothing to do (Valkey); `Err` =
 /// unsupported (Mongo). Pure so it can be unit-tested like `restore_script`.
 fn rename_script(engine: DbEngine, old: &str, new: &str) -> Result<Option<String>> {
@@ -522,6 +548,21 @@ mod tests {
         );
         assert!(drop_script(DbEngine::Valkey, "d").contains("ACL DELUSER d"));
         assert!(drop_script(DbEngine::Mongodb, "d").contains("dropDatabase"));
+    }
+
+    #[test]
+    fn drop_role_script_per_engine() {
+        use super::drop_role_script;
+        use majnet_common::manifest::DbEngine;
+        let pg = drop_role_script(DbEngine::Postgres, "demo_production");
+        assert!(pg.contains(r#"DROP ROLE IF EXISTS \"demo_production\""#));
+        assert!(!pg.contains("DROP DATABASE")); // role only, never the DB
+        let maria = drop_role_script(DbEngine::Mariadb, "demo_production");
+        assert!(maria.contains("DROP USER IF EXISTS 'demo_production'@'%'"));
+        assert!(!maria.contains("DROP DATABASE"));
+        // Non-relational engines have no separate project login.
+        assert!(drop_role_script(DbEngine::Valkey, "x").is_empty());
+        assert!(drop_role_script(DbEngine::Mongodb, "x").is_empty());
     }
 
     #[test]
