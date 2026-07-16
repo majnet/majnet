@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Link, useParams } from '@tanstack/react-router'
+import { Link, useNavigate, useParams } from '@tanstack/react-router'
 import { ChevronRight, Plus, Loader2, CheckCircle2, Circle, AlertCircle } from 'lucide-react'
 import { send, urls, useApps, useAppInfo, useArchivedApps, useDeploys, useEvents, useImports, useNodeMetrics, useNodes, useProjects, useWhoami, IMPORT_STEPS, type ImportStatus } from './api'
 import { useApiMutation } from './mutations'
@@ -133,6 +133,44 @@ function RenameProjectControl({ org, current }: { org: string; current: string }
   )
 }
 
+// Project lifecycle (admin-only): while it has active apps, offer to archive the
+// whole project (recoverable); once archived (no active apps), offer permanent
+// delete. Mirrors the app-level archive→delete two-step.
+function ProjectLifecycleControl({ org }: { org: string }) {
+  const apps = useApps(org)
+  const archived = useArchivedApps(org)
+  const navigate = useNavigate()
+  const archive = useApiMutation({ invalidate: [['projects'], ['apps', org], ['archived', org], ['events']] })
+  const del = useApiMutation({
+    invalidate: [['projects'], ['events']],
+    onDone: () => navigate({ to: '/' }),
+  })
+  const active = apps.data?.length ?? 0
+  if (active > 0) {
+    return (
+      <ConfirmButton variant="outline" size="sm" className="text-destructive" disabled={archive.isPending}
+        title="Archive this project?"
+        description="Takes every app down and archives its source repos. Volumes, databases, the ops repo and the registry entry are kept — permanently delete afterward to reclaim storage."
+        confirmText="Archive project"
+        onConfirm={() => archive.mutate(() => send(urls.projectArchive(org)))}>
+        Archive project
+      </ConfirmButton>
+    )
+  }
+  if ((archived.data?.length ?? 0) > 0) {
+    return (
+      <ConfirmButton variant="outline" size="sm" className="text-destructive" disabled={del.isPending}
+        title="Permanently delete this project?"
+        description="Irreversible. Purges every app’s volumes and databases + the per-project network, ingress and DB role, deletes all app repos and the ops repo, and removes the project from the registry."
+        confirmText="Delete project forever"
+        onConfirm={() => del.mutate(() => send(urls.projectDelete(org)))}>
+        Delete project
+      </ConfirmButton>
+    )
+  }
+  return null
+}
+
 // Sync platform-managed template files (.github/ CI) into the project's app
 // repos — opens a template-sync PR per repo that has drifted (admin-only).
 function SyncTemplateControl({ org }: { org: string }) {
@@ -205,6 +243,7 @@ export function ProjectDetail() {
         <Button asChild size="sm"><Link to="/projects/$org/new-app" params={{ org }}><Plus className="size-4" /> New app</Link></Button>
         {isAdmin && <SyncTemplateControl org={org} />}
         {isAdmin && <RenameProjectControl org={org} current={name} />}
+        {isAdmin && <ProjectLifecycleControl org={org} />}
       </PageHead>
 
       <h2 className="mb-2.5 text-sm font-semibold">Apps</h2>

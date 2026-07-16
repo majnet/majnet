@@ -157,6 +157,8 @@ export const urls = {
     `${BOT}/apps/${encodeURIComponent(org)}/${encodeURIComponent(app)}/delete`,
   archivedApps: (org: string) => `${BOT}/archived/${encodeURIComponent(org)}`,
   templateSync: (org: string) => `${BOT}/template-sync/${encodeURIComponent(org)}`,
+  projectArchive: (org: string) => `${BOT}/projects/${encodeURIComponent(org)}/archive`,
+  projectDelete: (org: string) => `${BOT}/projects/${encodeURIComponent(org)}/delete`,
 }
 
 // ── query hooks ──────────────────────────────────────────────────────────────

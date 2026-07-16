@@ -33,6 +33,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/rename/project-prepare/{org}", post(project_prepare))
         .route("/api/rename/project-commit/{org}", post(project_commit))
         .route("/api/purge/{org}", post(purge))
+        .route("/api/purge-project/{org}", post(purge_project))
         .route("/api/ephemeral/extend/{project}/{app}", post(extend))
         .route(
             "/api/migrate/{project}/{app}",
@@ -221,6 +222,27 @@ async fn purge(
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
     Ok(format!("purged {} [{}]", b.app, purged.join(", ")))
+}
+
+/// `POST /api/purge-project/{org}` — permanently reap an ENTIRE archived project:
+/// every app's runtime + data, then the per-project network, ingress, and DB
+/// role. Platform-admin (infra) gated. The bot has already emptied `project.yaml`
+/// and archived every app before calling this.
+async fn purge_project(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(org): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Result<String, (StatusCode, String)> {
+    crate::authz::require_platform_admin(&state, &headers)
+        .await
+        .map_err(|e| (StatusCode::FORBIDDEN, format!("{e:#}")))?;
+    let purged = crate::purge::purge_project(&state, &org)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
+    Ok(format!(
+        "purged project {org} — apps [{}] + network/ingress/role",
+        purged.join(", ")
+    ))
 }
 
 #[derive(serde::Serialize)]

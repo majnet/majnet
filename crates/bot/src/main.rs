@@ -113,6 +113,14 @@ async fn main() -> Result<()> {
             post(dashboard_api::project_rename_post),
         )
         .route(
+            "/api/projects/{org}/archive",
+            post(dashboard_api::project_archive_post),
+        )
+        .route(
+            "/api/projects/{org}/delete",
+            post(dashboard_api::project_delete_post),
+        )
+        .route(
             "/api/apps/{org}/{app}/archive",
             post(dashboard_api::app_archive_post),
         )

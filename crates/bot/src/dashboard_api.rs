@@ -1795,6 +1795,187 @@ pub async fn app_delete_post(
     ))
 }
 
+/// `POST /api/projects/{org}/archive` — take a whole project down but keep it
+/// recoverable (admin). Archives every app (moves `apps/*` → `archived/*` and
+/// empties `project.yaml`) in one commit, so render un-deploys them all and
+/// org-sync archives their repos. Volumes, databases, the ops repo and the
+/// registry entry are all kept — undo by unarchiving the apps.
+pub async fn project_archive_post(
+    State(state): State<Arc<AppState>>,
+    Path(org): Path<String>,
+    headers: HeaderMap,
+) -> Result<String, ApiError> {
+    let actor = crate::authz::require(&state, &headers, &org, Role::Admin)
+        .await
+        .map_err(|e| (StatusCode::FORBIDDEN, format!("{e:#}")))?;
+    if has_open_render_pr(&state, &org)
+        .await
+        .map_err(bad_gateway)?
+    {
+        return Err(bad_request(
+            "this project has an unmerged render PR — merge or close it in Deployments first",
+        ));
+    }
+    let (_, tar) = crate::proxy::fetch_snapshot(&state, &org, "ops", "main")
+        .await
+        .map_err(bad_gateway)?;
+    let files = majnet_common::tarball::untar(&tar).map_err(bad_gateway)?;
+
+    let mut changes: BTreeMap<String, Option<String>> = BTreeMap::new();
+    let mut apps: std::collections::BTreeSet<String> = Default::default();
+    let mut classes: Vec<EnvClass> = Vec::new();
+    for (path, bytes) in &files {
+        let Some(rel) = path.strip_prefix("apps/") else {
+            continue;
+        };
+        let content = String::from_utf8(bytes.clone()).map_err(|e| bad_gateway(e.into()))?;
+        changes.insert(format!("archived/{rel}"), Some(content));
+        changes.insert(path.clone(), None);
+        if let Some((app, file)) = rel.split_once('/') {
+            apps.insert(app.to_string());
+            for c in EnvClass::ALL {
+                if file == format!("{}.yaml", c.as_str()) && !classes.contains(&c) {
+                    classes.push(c);
+                }
+            }
+        }
+    }
+    if apps.is_empty() {
+        return Err(bad_request("project has no active apps to archive"));
+    }
+    let mut project = read_project(&state, &org).await.map_err(bad_gateway)?;
+    project.apps.clear();
+    changes.insert(
+        "project.yaml".to_string(),
+        Some(serde_yaml::to_string(&project).map_err(|e| bad_gateway(e.into()))?),
+    );
+
+    commit_ops_tree(
+        &state,
+        &org,
+        &changes,
+        &format!("archive project (all apps) via dashboard by {actor}"),
+    )
+    .await
+    .map_err(bad_gateway)?;
+    merge_render_prs(&state, &org, &classes)
+        .await
+        .map_err(bad_gateway)?;
+    state
+        .store
+        .log_event(
+            "project-archived",
+            Some(&org),
+            &format!("{} app(s) by {actor}", apps.len()),
+        )
+        .map_err(bad_gateway)?;
+    Ok(format!(
+        "archived {} app(s) — undeployed and source repos archived; data, ops repo and registry kept. Recoverable by unarchiving, or permanently delete from the project page.",
+        apps.len()
+    ))
+}
+
+/// `POST /api/projects/{org}/delete` — permanently delete an ARCHIVED project
+/// (platform admin). Purges every app's data + the per-project network/ingress/
+/// role (reconciler), deletes all app repos + the ops repo, and removes the
+/// project from the registry. Irreversible.
+pub async fn project_delete_post(
+    State(state): State<Arc<AppState>>,
+    Path(org): Path<String>,
+    headers: HeaderMap,
+) -> Result<String, ApiError> {
+    let actor = crate::authz::require_platform_admin(&state, &headers)
+        .await
+        .map_err(|e| (StatusCode::FORBIDDEN, format!("{e:#}")))?;
+    let (_, tar) = crate::proxy::fetch_snapshot(&state, &org, "ops", "main")
+        .await
+        .map_err(bad_gateway)?;
+    let files = majnet_common::tarball::untar(&tar).map_err(bad_gateway)?;
+    if files.keys().any(|p| p.starts_with("apps/")) {
+        return Err(bad_request(
+            "archive the project first — it still has active apps",
+        ));
+    }
+    let archived_apps: Vec<String> = files
+        .keys()
+        .filter_map(|p| p.strip_prefix("archived/")?.strip_suffix("/base.yaml"))
+        .map(str::to_string)
+        .collect();
+
+    // 1. Reconciler: purge all app data + the per-project network/ingress/role.
+    //    Reads ops `main`, so it must run before the ops repo is deleted.
+    reconciler_purge_project(&state, &org)
+        .await
+        .map_err(bad_gateway)?;
+
+    // 2. Delete every app repo + the ops repo (graceful — org policy may block).
+    let mut deleted = 0usize;
+    for app in &archived_apps {
+        match delete_repo(&state, &org, app).await {
+            Ok(true) => deleted += 1,
+            Ok(false) => {}
+            Err(e) => tracing::warn!(org, app, error = format!("{e:#}"), "app repo delete failed"),
+        }
+    }
+    let ops_note = match delete_repo(&state, &org, "ops").await {
+        Ok(true) => "ops repo deleted",
+        Ok(false) => "no ops repo",
+        Err(e) => {
+            tracing::warn!(org, error = format!("{e:#}"), "ops repo delete failed");
+            "ops repo left (deletion blocked)"
+        }
+    };
+
+    // 3. Remove the project from the registry (platform repo).
+    let mut registry = read_projects(&state).await.map_err(bad_gateway)?;
+    let before = registry.projects.len();
+    registry.projects.retain(|p| p.org != org);
+    if registry.projects.len() != before {
+        let yaml = format!(
+            "# Managed by the platform — project registry (§2).\n{}",
+            serde_yaml::to_string(&registry).map_err(|e| bad_gateway(e.into()))?
+        );
+        commit_platform_file(
+            &state,
+            "projects.yaml",
+            &yaml,
+            &format!("projects: delete {org} via dashboard by {actor}"),
+        )
+        .await
+        .map_err(bad_gateway)?;
+    }
+    state
+        .store
+        .log_event("project-deleted", Some(&org), &format!("by {actor}"))
+        .map_err(bad_gateway)?;
+    Ok(format!(
+        "permanently deleted project {org}: purged {} app(s) + network/ingress/role; {deleted} app repo(s) deleted; {ops_note}; removed from registry",
+        archived_apps.len()
+    ))
+}
+
+/// Ask the reconciler to purge a whole archived project's data + resources.
+async fn reconciler_purge_project(state: &AppState, org: &str) -> Result<()> {
+    anyhow::ensure!(
+        !state.config.reconciler_url.is_empty(),
+        "reconciler URL not configured — cannot purge project data"
+    );
+    let url = format!(
+        "{}/api/purge-project/{org}",
+        state.config.reconciler_url.trim_end_matches('/')
+    );
+    let resp = state
+        .http
+        .post(&url)
+        .send()
+        .await
+        .context("calling reconciler purge-project")?;
+    let ok = resp.status().is_success();
+    let body = resp.text().await.unwrap_or_default();
+    anyhow::ensure!(ok, "reconciler purge-project failed: {body}");
+    Ok(())
+}
+
 /// Ask the reconciler to purge an archived app's runtime + data.
 async fn reconciler_purge(state: &AppState, org: &str, app: &str) -> Result<()> {
     anyhow::ensure!(

@@ -6,7 +6,7 @@
 //! intact. Idempotent — safe to re-run if a later step (repo delete) fails.
 
 use anyhow::{Context, Result};
-use majnet_common::manifest::AppManifest;
+use majnet_common::manifest::{AppManifest, DbEngine};
 use majnet_common::platform::NodesFile;
 use majnet_common::EnvClass;
 
@@ -88,6 +88,114 @@ pub async fn purge_app(state: &AppState, org: &str, app: &str) -> Result<Vec<Str
         &project,
         "",
         &format!("purge {app}"),
+        &purged.join(","),
+    )?;
+    Ok(purged)
+}
+
+/// Purge an ENTIRE archived project: every app's runtime + data, then the
+/// per-project resources git can't express — the Docker network, the ingress
+/// containers + tailscale state volume, and the shared `project_role` on each
+/// relational engine. The bot has already emptied `project.yaml` and moved every
+/// app to `archived/<app>/`. Returns the apps purged. The per-project teardown is
+/// best-effort (parked nodes, absent resources): failures are logged, not fatal —
+/// a whole-project delete must make progress even if a node is unreachable.
+pub async fn purge_project(state: &AppState, org: &str) -> Result<Vec<String>> {
+    let project = crate::rename::resolve_project(state, org).await?;
+
+    let ops = crate::snapshot::fetch(&state.http, &state.config, org, "ops", "main")
+        .await?
+        .context("ops main snapshot unavailable")?;
+    let apps: Vec<String> = ops
+        .files
+        .keys()
+        .filter_map(|p| p.strip_prefix("archived/")?.strip_suffix("/base.yaml"))
+        .map(str::to_string)
+        .collect();
+
+    // 1. Purge each archived app (containers, volumes, app DBs + app roles).
+    let mut purged = Vec::new();
+    for app in &apps {
+        match purge_app(state, org, app).await {
+            Ok(_) => purged.push(app.clone()),
+            Err(e) => tracing::error!(
+                org,
+                app,
+                error = format!("{e:#}"),
+                "purge_app failed during project delete (continuing)"
+            ),
+        }
+    }
+
+    let platform = crate::snapshot::fetch(
+        &state.http,
+        &state.config,
+        &state.config.root_org,
+        "platform",
+        "main",
+    )
+    .await?
+    .context("platform snapshot unavailable")?;
+    let nodes = NodesFile::parse(platform.files.get("nodes.yaml").context("no nodes.yaml")?)?;
+
+    // 2. Per-node teardown: ingress containers + tailscale state volume, then the
+    //    project network (after its containers are gone). Best-effort.
+    for node in &nodes.nodes {
+        let Ok(docker) = state.nodes(&nodes).client_for(node).await else {
+            continue;
+        };
+        for name in [
+            format!("proj-{project}-ingress"),
+            format!("proj-{project}-tailscale"),
+        ] {
+            if let Err(e) = deploy::remove_container_if_exists(&docker, &name).await {
+                tracing::warn!(
+                    node = node.name,
+                    name,
+                    error = format!("{e:#}"),
+                    "ingress remove"
+                );
+            }
+        }
+        if let Err(e) = deploy::remove_volume(&docker, &format!("proj-{project}-ts-state")).await {
+            tracing::warn!(
+                node = node.name,
+                error = format!("{e:#}"),
+                "ts-state volume remove"
+            );
+        }
+        if let Err(e) = deploy::remove_network(&docker, &project).await {
+            tracing::warn!(node = node.name, error = format!("{e:#}"), "network remove");
+        }
+    }
+
+    // 3. Drop the shared project login role on each class's relational engine.
+    //    Best-effort — the role/engine may not exist (no DB-backed apps).
+    for class in EnvClass::ALL {
+        let Some(node) = nodes.by_role(class.node_role()) else {
+            continue;
+        };
+        let Ok(docker) = state.nodes(&nodes).client_for(node).await else {
+            continue;
+        };
+        let role = crate::db::project_role(&project, class);
+        for engine in [DbEngine::Postgres, DbEngine::Mariadb] {
+            if let Err(e) = crate::db::drop_role(&docker, engine, &role).await {
+                tracing::warn!(
+                    class = class.as_str(),
+                    role,
+                    error = format!("{e:#}"),
+                    "drop project role"
+                );
+            }
+        }
+    }
+
+    state.store.record(
+        "imperative-purge",
+        &project,
+        "",
+        "purge-project",
         &purged.join(","),
     )?;
     Ok(purged)
