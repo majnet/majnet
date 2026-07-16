@@ -197,6 +197,21 @@ async fn sync_app(
     Ok(true)
 }
 
+/// Content of a file on the app repo's `main`, or None if absent/unreadable.
+async fn read_file(repos: &octocrab::repos::RepoHandler<'_>, path: &str) -> Option<String> {
+    let content = repos
+        .get_content()
+        .path(path)
+        .r#ref("main")
+        .send()
+        .await
+        .ok()?;
+    let item = content.items.into_iter().next()?;
+    let b64 = item.content?.replace(['\n', ' '], "");
+    let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+    String::from_utf8(bytes).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,19 +246,4 @@ mod tests {
         let platform = BTreeMap::new();
         assert!(managed_files(&platform, "web-app", "o", "a").is_empty());
     }
-}
-
-/// Content of a file on the app repo's `main`, or None if absent/unreadable.
-async fn read_file(repos: &octocrab::repos::RepoHandler<'_>, path: &str) -> Option<String> {
-    let content = repos
-        .get_content()
-        .path(path)
-        .r#ref("main")
-        .send()
-        .await
-        .ok()?;
-    let item = content.items.into_iter().next()?;
-    let b64 = item.content?.replace(['\n', ' '], "");
-    let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
-    String::from_utf8(bytes).ok()
 }
