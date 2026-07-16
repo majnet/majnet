@@ -1,12 +1,14 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from '@tanstack/react-router'
-import { ChevronRight, Plus, Loader2, CheckCircle2, Circle, AlertCircle } from 'lucide-react'
+import { ChevronRight, Plus, Loader2, CheckCircle2, Circle, AlertCircle, MoreVertical, Boxes } from 'lucide-react'
 import { send, urls, useApps, useAppInfo, useArchivedApps, useDeploys, useEvents, useImports, useNodeMetrics, useNodes, useProjects, useWhoami, IMPORT_STEPS, type ImportStatus } from './api'
 import { useApiMutation } from './mutations'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { ConfirmButton, DeployStatus, Empty, ExtLink, latestEventFor, QueryState, short, Sparkline, StatusBadge } from './ui'
 
 /** Step-by-step progress of an in-flight (or failed) app import. */
@@ -53,35 +55,59 @@ export function PageHead({ title, sub, children }: { title: string; sub?: string
 export function Projects() {
   const q = useProjects()
   const { data: me } = useWhoami()
+  const metrics = useNodeMetrics()
+  // Live running-container count per project (name is `<project>-<app>-<class>-…`).
+  const runningFor = (proj: string) =>
+    (metrics.data ?? []).flatMap((n) => n.apps).filter((c) => c.name.startsWith(`${proj}-`)).length
+
   return (
     <>
       <PageHead title="Projects">
         {me?.admin && <Button asChild><Link to="/new-project"><Plus className="size-4" /> New project</Link></Button>}
       </PageHead>
       <QueryState isLoading={q.isLoading} error={q.error}>
-        <div className="grid gap-3.5 [grid-template-columns:repeat(auto-fill,minmax(280px,1fr))]">
+        <div className="grid gap-3.5 [grid-template-columns:repeat(auto-fill,minmax(300px,1fr))]">
           {q.data?.length === 0 && <Empty>No projects registered yet.</Empty>}
-          {q.data?.map((p) => p.onboarded ? (
-            <Link key={p.org} to="/projects/$org" params={{ org: p.org }}
-              className="rounded-xl border bg-card p-4 shadow-sm transition-colors hover:border-primary">
-              <div className="font-semibold">{p.name}</div>
-              <div className="font-mono text-xs text-muted-foreground">{p.org}</div>
-              <div className="mt-3 flex items-center gap-3 text-xs text-muted-foreground">
-                <span><b className="text-foreground">{p.apps}</b> app{p.apps === 1 ? '' : 's'}</span>
-                <StatusBadge tone="success" dot>onboarded</StatusBadge>
+          {q.data?.map((p) => {
+            const running = runningFor(p.name)
+            return p.onboarded ? (
+              <Link key={p.org} to="/projects/$org" params={{ org: p.org }}
+                className="group rounded-xl border bg-card p-4 transition-all hover:border-primary/50 hover:shadow-md">
+                <div className="flex items-center gap-3">
+                  <div className="grid size-9 shrink-0 place-items-center rounded-[10px] bg-primary/15 text-sm font-bold text-primary">
+                    {p.name.slice(0, 1).toUpperCase()}
+                  </div>
+                  <div className="min-w-0">
+                    <div className="truncate font-semibold tracking-tight">{p.name}</div>
+                    <div className="truncate font-mono text-xs text-muted-foreground">{p.org}</div>
+                  </div>
+                  <StatusBadge tone="success" dot title="listed in registry + App installed">live</StatusBadge>
+                </div>
+                <div className="mt-3.5 flex items-center gap-2.5 border-t pt-3 text-xs text-muted-foreground">
+                  <span><b className="text-foreground">{p.apps}</b> app{p.apps === 1 ? '' : 's'}</span>
+                  {running > 0 && <><span>·</span><span><b className="text-foreground">{running}</b> running</span></>}
+                  <ChevronRight className="ml-auto size-4 text-muted-foreground/40 transition-transform group-hover:translate-x-0.5" />
+                </div>
+              </Link>
+            ) : (
+              <div key={p.org} className="rounded-xl border border-dashed bg-card p-4">
+                <div className="flex items-center gap-3">
+                  <div className="grid size-9 shrink-0 place-items-center rounded-[10px] bg-muted text-sm font-bold text-muted-foreground">
+                    {p.name.slice(0, 1).toUpperCase()}
+                  </div>
+                  <div className="min-w-0">
+                    <div className="truncate font-semibold tracking-tight">{p.name}</div>
+                    <div className="truncate font-mono text-xs text-muted-foreground">{p.org}</div>
+                  </div>
+                </div>
+                <div className="mt-3.5 border-t pt-3"><StatusBadge tone="muted">registered · App not installed</StatusBadge></div>
               </div>
-            </Link>
-          ) : (
-            <div key={p.org} className="rounded-xl border border-dashed bg-card p-4 opacity-60">
-              <div className="font-semibold">{p.name}</div>
-              <div className="font-mono text-xs text-muted-foreground">{p.org}</div>
-              <div className="mt-3"><StatusBadge tone="muted">registered · App not installed</StatusBadge></div>
-            </div>
-          ))}
+            )
+          })}
         </div>
         <p className="mt-6 rounded-lg border border-dashed bg-muted/40 p-3.5 text-xs text-muted-foreground">
-          Projects map 1:1 to GitHub orgs. A project is live only when it is listed in <code>projects.yaml</code> <b>and</b> the App
-          is installed on the org. "New project" registers the org; org creation stays on GitHub.
+          Projects map 1:1 to GitHub orgs. A project is live only when it is listed in <code className="font-mono">projects.yaml</code> <b>and</b> the App
+          is installed on the org. “New project” registers the org; org creation stays on GitHub.
         </p>
       </QueryState>
     </>
@@ -115,74 +141,80 @@ function ArchivedApps({ org }: { org: string }) {
   )
 }
 
-function RenameProjectControl({ org, current }: { org: string; current: string }) {
-  const [name, setName] = useState('')
-  const m = useApiMutation({ invalidate: [['projects'], ['apps', org], ['events']] })
-  const valid = /^[a-z0-9-]+$/.test(name) && name !== current
+// A controlled confirm dialog (for the destructive/one-shot project actions).
+function ConfirmDialog({ open, onOpenChange, title, description, confirmText, destructive, disabled, onConfirm }: {
+  open: boolean; onOpenChange: (o: boolean) => void; title: string; description?: string
+  confirmText: string; destructive?: boolean; disabled?: boolean; onConfirm: () => void
+}) {
   return (
-    <div className="flex items-center gap-2">
-      <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="new-project-name" className="h-8 w-44" aria-label="new project name" />
-      <ConfirmButton variant="outline" size="sm" disabled={!valid || m.isPending}
-        title={`Rename project ${current} → ${name}?`}
-        description="The project name prefixes every app’s containers, volumes and databases — each app’s data is migrated to the new prefix with a brief per-app cutover."
-        confirmText="Rename project"
-        onConfirm={() => m.mutate(() => send(urls.projectRename(org), { json: { new: name } }))}>
-        Rename
-      </ConfirmButton>
-    </div>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader><DialogTitle>{title}</DialogTitle></DialogHeader>
+        {description && <p className="text-sm text-muted-foreground">{description}</p>}
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button variant={destructive ? 'destructive' : 'default'} disabled={disabled} onClick={onConfirm}>{confirmText}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 
-// Project lifecycle (admin-only): while it has active apps, offer to archive the
-// whole project (recoverable); once archived (no active apps), offer permanent
-// delete. Mirrors the app-level archive→delete two-step.
-function ProjectLifecycleControl({ org }: { org: string }) {
-  const apps = useApps(org)
-  const archived = useArchivedApps(org)
+// Admin actions for a project, collapsed into a ⋯ overflow: rename (dialog),
+// sync repo templates, and the archive→delete lifecycle (archive while apps are
+// active; permanent delete once archived).
+function ProjectAdminMenu({ org, name, activeApps }: { org: string; name: string; activeApps: number }) {
   const navigate = useNavigate()
-  const archive = useApiMutation({ invalidate: [['projects'], ['apps', org], ['archived', org], ['events']] })
-  const del = useApiMutation({
-    invalidate: [['projects'], ['events']],
-    onDone: () => navigate({ to: '/' }),
-  })
-  const active = apps.data?.length ?? 0
-  if (active > 0) {
-    return (
-      <ConfirmButton variant="outline" size="sm" className="text-destructive" disabled={archive.isPending}
-        title="Archive this project?"
-        description="Takes every app down and archives its source repos. Volumes, databases, the ops repo and the registry entry are kept — permanently delete afterward to reclaim storage."
-        confirmText="Archive project"
-        onConfirm={() => archive.mutate(() => send(urls.projectArchive(org)))}>
-        Archive project
-      </ConfirmButton>
-    )
-  }
-  if ((archived.data?.length ?? 0) > 0) {
-    return (
-      <ConfirmButton variant="outline" size="sm" className="text-destructive" disabled={del.isPending}
-        title="Permanently delete this project?"
-        description="Irreversible. Purges every app’s volumes and databases + the per-project network, ingress and DB role, deletes all app repos and the ops repo, and removes the project from the registry."
-        confirmText="Delete project forever"
-        onConfirm={() => del.mutate(() => send(urls.projectDelete(org)))}>
-        Delete project
-      </ConfirmButton>
-    )
-  }
-  return null
-}
-
-// Sync platform-managed template files (.github/ CI) into the project's app
-// repos — opens a template-sync PR per repo that has drifted (admin-only).
-function SyncTemplateControl({ org }: { org: string }) {
-  const m = useApiMutation({ invalidate: [['events']] })
+  const archived = useArchivedApps(org)
+  const [dialog, setDialog] = useState<null | 'rename' | 'sync' | 'archive' | 'delete'>(null)
+  const [newName, setNewName] = useState('')
+  const close = () => setDialog(null)
+  const rename = useApiMutation({ invalidate: [['projects'], ['apps', org], ['events']], onDone: () => { close(); navigate({ to: '/projects/$org', params: { org } }) } })
+  const sync = useApiMutation({ invalidate: [['events']], onDone: close })
+  const archive = useApiMutation({ invalidate: [['projects'], ['apps', org], ['archived', org], ['events']], onDone: close })
+  const del = useApiMutation({ invalidate: [['projects'], ['events']], onDone: () => { close(); navigate({ to: '/' }) } })
+  const canDelete = activeApps === 0 && (archived.data?.length ?? 0) > 0
+  const validName = /^[a-z0-9-]+$/.test(newName) && newName !== name
   return (
-    <ConfirmButton variant="outline" size="sm" disabled={m.isPending}
-      title="Sync repo templates?"
-      description="Opens a template-sync PR on each app repo whose platform-managed CI files (.github/) have drifted from the current template. Your source, Dockerfile and other files are never touched."
-      confirmText="Sync templates"
-      onConfirm={() => m.mutate(() => send(urls.templateSync(org)))}>
-      Sync templates
-    </ConfirmButton>
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="outline" size="icon" className="size-9" aria-label="Project actions"><MoreVertical className="size-4" /></Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem onSelect={() => { setNewName(''); setDialog('rename') }}>Rename project…</DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => setDialog('sync')}>Sync repo templates</DropdownMenuItem>
+          {(activeApps > 0 || canDelete) && <DropdownMenuSeparator />}
+          {activeApps > 0 && <DropdownMenuItem variant="destructive" onSelect={() => setDialog('archive')}>Archive project</DropdownMenuItem>}
+          {canDelete && <DropdownMenuItem variant="destructive" onSelect={() => setDialog('delete')}>Delete project…</DropdownMenuItem>}
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      <Dialog open={dialog === 'rename'} onOpenChange={(o) => !o && close()}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Rename project {name}</DialogTitle></DialogHeader>
+          <p className="text-sm text-muted-foreground">The project name prefixes every app’s containers, volumes and databases — each app’s data is migrated to the new prefix with a brief per-app cutover.</p>
+          <Input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="new-project-name" aria-label="new project name" className="font-mono" />
+          <DialogFooter>
+            <Button variant="outline" onClick={close}>Cancel</Button>
+            <Button disabled={!validName || rename.isPending} onClick={() => rename.mutate(() => send(urls.projectRename(org), { json: { new: newName } }))}>Rename project</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <ConfirmDialog open={dialog === 'sync'} onOpenChange={(o) => !o && close()}
+        title="Sync repo templates?" confirmText="Sync templates" disabled={sync.isPending}
+        description="Opens a template-sync PR on each app repo whose platform-managed CI files (.github/) have drifted from the current template. Your source, Dockerfile and other files are never touched."
+        onConfirm={() => sync.mutate(() => send(urls.templateSync(org)))} />
+      <ConfirmDialog open={dialog === 'archive'} onOpenChange={(o) => !o && close()} destructive
+        title="Archive this project?" confirmText="Archive project" disabled={archive.isPending}
+        description="Takes every app down and archives its source repos. Volumes, databases, the ops repo and the registry entry are kept — permanently delete afterward to reclaim storage."
+        onConfirm={() => archive.mutate(() => send(urls.projectArchive(org)))} />
+      <ConfirmDialog open={dialog === 'delete'} onOpenChange={(o) => !o && close()} destructive
+        title="Permanently delete this project?" confirmText="Delete project forever" disabled={del.isPending}
+        description="Irreversible. Purges every app’s volumes and databases + the per-project network, ingress and DB role, deletes all app repos and the ops repo, and removes the project from the registry."
+        onConfirm={() => del.mutate(() => send(urls.projectDelete(org)))} />
+    </>
   )
 }
 
@@ -234,6 +266,10 @@ export function ProjectDetail() {
     return c?.image.split('@sha256:')[1]?.slice(0, 7) ?? null
   }
 
+  const runningCount = (metrics.data ?? []).flatMap((n) => n.apps).filter((c) => c.name.startsWith(`${name}-`)).length
+  const anyFailed = (apps.data ?? []).some((a) => latestEventFor(events.data, name, a.name)?.result.startsWith('FAILED'))
+  const hasApps = (apps.data?.length ?? 0) > 0
+
   return (
     <>
       <Crumbs><Link to="/">Projects</Link> / {name}</Crumbs>
@@ -241,18 +277,28 @@ export function ProjectDetail() {
         <Button asChild variant="outline" size="sm"><Link to="/projects/$org/deploys" params={{ org }}>Deployments{pending ? ` · ${pending}` : ''}</Link></Button>
         <Button asChild variant="outline" size="sm"><Link to="/projects/$org/members" params={{ org }}>Members</Link></Button>
         <Button asChild size="sm"><Link to="/projects/$org/new-app" params={{ org }}><Plus className="size-4" /> New app</Link></Button>
-        {isAdmin && <SyncTemplateControl org={org} />}
-        {isAdmin && <RenameProjectControl org={org} current={name} />}
-        {isAdmin && <ProjectLifecycleControl org={org} />}
+        {isAdmin && <ProjectAdminMenu org={org} name={name} activeApps={apps.data?.length ?? 0} />}
       </PageHead>
 
-      <h2 className="mb-2.5 text-sm font-semibold">Apps</h2>
+      {hasApps && (
+        <div className="mb-6 grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(150px,1fr))]">
+          <ProjStat n={String(apps.data?.length ?? 0)} l="Apps" />
+          <ProjStat n={String(runningCount)} l="Running containers" />
+          <ProjStat n={String(pending)} l="Open deployments" />
+          <div className="rounded-xl border bg-card p-4">
+            <StatusBadge tone={anyFailed ? 'danger' : 'success'} dot>{anyFailed ? 'attention' : 'healthy'}</StatusBadge>
+            <div className="mt-2 text-[11px] uppercase tracking-wide text-muted-foreground">Status</div>
+          </div>
+        </div>
+      )}
+
+      <h2 className="mb-3 text-sm font-semibold">Apps</h2>
       <QueryState isLoading={apps.isLoading} error={apps.error}>
-        <div className="flex flex-col gap-2">
+        <div className="flex flex-col gap-2.5">
           {apps.data?.length === 0 && importing.length === 0 && <Empty>No apps yet — create one.</Empty>}
           {importing.map((imp) => (
             <Link key={imp.app} to="/projects/$org/apps/$app" params={{ org, app: imp.app }}
-              className="flex items-center gap-3 rounded-lg border border-dashed bg-card/50 px-4 py-3 transition-colors hover:border-primary">
+              className="flex items-center gap-3.5 rounded-xl border border-dashed bg-card/50 px-4 py-4 transition-colors hover:border-primary/50">
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2 font-semibold">
                   {imp.app}
@@ -271,22 +317,25 @@ export function ProjectDetail() {
             </Link>
           ))}
           {apps.data?.map((a) => {
-            const dm = [short(a.image), a.database].filter(Boolean).join('  ·  ')
+            const meta = [short(a.image), a.database].filter(Boolean).join('  ·  ')
             return (
               <div key={a.name}
-                className="flex items-center gap-3 rounded-lg border bg-card px-4 py-3 transition-colors hover:border-primary">
-                <Link to="/projects/$org/apps/$app" params={{ org, app: a.name }} className="flex min-w-0 flex-1 flex-col">
+                className="relative flex items-center gap-3.5 rounded-xl border bg-card px-4 py-4 transition-colors hover:border-primary/50">
+                {/* stretched link makes the whole row clickable; inner links opt back in */}
+                <Link to="/projects/$org/apps/$app" params={{ org, app: a.name }} aria-label={`Open ${a.name}`} className="absolute inset-0 rounded-xl" />
+                <div className="grid size-9 shrink-0 place-items-center rounded-[10px] bg-muted text-muted-foreground"><Boxes className="size-4" /></div>
+                <div className="pointer-events-none relative flex min-w-0 flex-1 flex-col gap-1">
                   <div className="flex flex-wrap items-center gap-2 font-semibold">
                     {a.name}
                     <AppEnvBadges org={org} app={a.name} classes={a.classes} digestFor={(c) => runningDigest(a.name, c)} />
                   </div>
-                  <div className="mt-0.5 truncate font-mono text-xs text-muted-foreground">{dm || '—'}</div>
-                </Link>
-                {a.host && <ExtLink to={a.host} className="font-mono text-xs max-sm:hidden">{a.host}</ExtLink>}
+                  <div className="truncate font-mono text-xs text-muted-foreground">
+                    {meta || '—'}
+                    {a.host && <> · <ExtLink to={a.host} className="pointer-events-auto relative">{a.host}</ExtLink></>}
+                  </div>
+                </div>
                 <DeployStatus ev={latestEventFor(events.data, name, a.name)} />
-                <Link to="/projects/$org/apps/$app" params={{ org, app: a.name }} aria-label={`Open ${a.name}`}>
-                  <ChevronRight className="size-4 text-muted-foreground/50" />
-                </Link>
+                <ChevronRight className="relative size-4 text-muted-foreground/50" />
               </div>
             )
           })}
@@ -295,6 +344,15 @@ export function ProjectDetail() {
 
       <ArchivedApps org={org} />
     </>
+  )
+}
+
+function ProjStat({ n, l }: { n: string; l: string }) {
+  return (
+    <div className="rounded-xl border bg-card p-4">
+      <div className="text-2xl font-semibold tracking-tight tabular-nums">{n}</div>
+      <div className="mt-1 text-[11px] uppercase tracking-wide text-muted-foreground">{l}</div>
+    </div>
   )
 }
 

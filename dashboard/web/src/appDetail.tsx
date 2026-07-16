@@ -263,10 +263,9 @@ export function AppDetail() {
 
 function SectionHead({ title, hint }: { title: string; hint?: string }) {
   return (
-    <div className="mb-3 mt-8 flex items-center gap-2.5">
+    <div className="mb-3 mt-8 flex items-baseline gap-2.5">
       <h2 className="text-sm font-semibold">{title}</h2>
       {hint && <span className="text-xs text-muted-foreground">{hint}</span>}
-      <span className="h-px flex-1 bg-border" />
     </div>
   )
 }
