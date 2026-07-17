@@ -70,6 +70,9 @@ async fn main() -> Result<()> {
     let webhook_app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/webhook", post(webhooks::handle))
+        // Caddy forward_auth target: resolve the caller's tailnet IP → identity
+        // for the dash.majksa.net edge (ADR 0016). Reached on localhost by Caddy.
+        .route("/tsauth", get(tailscale::tsauth))
         .with_state(state.clone());
 
     // WG-internal listener: the reconciler's snapshot + authkey API. Trust

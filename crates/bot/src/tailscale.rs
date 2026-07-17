@@ -10,11 +10,15 @@
 
 use anyhow::{Context, Result};
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::Response;
 use majnet_common::platform::PeopleFile;
 use majnet_common::project::ProjectConfig;
 use serde_json::json;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::AppState;
 
@@ -142,6 +146,92 @@ async fn mint_authkey(state: &AppState, project: &str) -> Result<String> {
         .to_string();
     state.store.log_event("ts-authkey", None, project)?;
     Ok(key)
+}
+
+// ── identity injection for the Caddy edge (dash.majksa.net) ───────────────────
+// `tailscale serve` (the http://majksa path) injects Tailscale-User-Login; the
+// public Caddy edge does not. Caddy's built-in `forward_auth` calls `/tsauth`,
+// which resolves the client's tailnet IP → its Tailscale user and returns it as
+// that header (Caddy copies it upstream). The bot owns the Tailscale credential,
+// so this stays inside credential isolation (§6).
+
+struct WhoisCache {
+    at: Instant,
+    ip_to_login: HashMap<String, String>,
+}
+static WHOIS: OnceLock<AsyncMutex<Option<WhoisCache>>> = OnceLock::new();
+const WHOIS_TTL: Duration = Duration::from_secs(60);
+
+/// `GET /tsauth` — Caddy `forward_auth` target. Always 200 (identity
+/// enrichment, not a gate): a resolved client gets a `Tailscale-User-Login`
+/// header, an unresolved one gets none (backends then treat it as infra, as
+/// before). Caddy strips any client-supplied header before calling this, so the
+/// value here is authoritative.
+pub async fn tsauth(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let login = match client_ip(&headers) {
+        Some(ip) => whois_ip(&state, &ip).await,
+        None => None,
+    };
+    let mut resp = Response::new(axum::body::Body::empty());
+    if let Some(login) = login {
+        if let Ok(v) = axum::http::HeaderValue::from_str(&login) {
+            resp.headers_mut().insert("Tailscale-User-Login", v);
+        }
+    }
+    resp
+}
+
+/// The immediate client IP from `X-Forwarded-For` (Caddy sets it to the caller).
+fn client_ip(headers: &HeaderMap) -> Option<String> {
+    let xff = headers.get("x-forwarded-for")?.to_str().ok()?;
+    xff.split(',')
+        .next()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Resolve a tailnet IP → its Tailscale user login, via the devices API with a
+/// short cache (the map changes rarely; this is hit on every dashboard request).
+async fn whois_ip(state: &AppState, ip: &str) -> Option<String> {
+    let cell = WHOIS.get_or_init(|| AsyncMutex::new(None));
+    let mut guard = cell.lock().await;
+    let fresh = guard.as_ref().is_some_and(|c| c.at.elapsed() < WHOIS_TTL);
+    if !fresh {
+        match fetch_ip_map(state).await {
+            Ok(ip_to_login) => {
+                *guard = Some(WhoisCache {
+                    at: Instant::now(),
+                    ip_to_login,
+                })
+            }
+            Err(e) => tracing::warn!(error = %format!("{e:#}"), "tailscale whois refresh failed"),
+        }
+    }
+    guard.as_ref().and_then(|c| c.ip_to_login.get(ip).cloned())
+}
+
+async fn fetch_ip_map(state: &AppState) -> Result<HashMap<String, String>> {
+    let (api_key, tailnet) = ts_credentials(state).context("Tailscale API not configured")?;
+    let url = format!("https://api.tailscale.com/api/v2/tailnet/{tailnet}/devices");
+    let resp = state.http.get(&url).bearer_auth(api_key).send().await?;
+    let status = resp.status();
+    let payload: serde_json::Value = resp.json().await?;
+    anyhow::ensure!(
+        status.is_success(),
+        "Tailscale devices list failed ({status}): {payload}"
+    );
+    let mut map = HashMap::new();
+    for d in payload["devices"].as_array().into_iter().flatten() {
+        let Some(user) = d["user"].as_str() else {
+            continue;
+        };
+        for addr in d["addresses"].as_array().into_iter().flatten() {
+            if let Some(a) = addr.as_str() {
+                map.insert(a.to_string(), user.to_string());
+            }
+        }
+    }
+    Ok(map)
 }
 
 fn ts_credentials(state: &AppState) -> Option<(&str, &str)> {
