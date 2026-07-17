@@ -1,6 +1,7 @@
 import { createRootRoute, createRoute, createRouter } from '@tanstack/react-router'
 import { Shell } from './shell'
 import { Activity, Nodes, ProjectDetail, Projects } from './views'
+import { Overview } from './overview'
 import { NewApp, NewProject } from './forms'
 import { AppDetail } from './appDetail'
 import { Members } from './members'
@@ -12,7 +13,8 @@ import { Terminal } from './terminal'
 const rootRoute = createRootRoute({ component: Shell })
 
 // Literal paths (not via a helper) so TanStack Router infers the typed route map.
-const indexRoute = createRoute({ getParentRoute: () => rootRoute, path: '/', component: Projects })
+const indexRoute = createRoute({ getParentRoute: () => rootRoute, path: '/', component: Overview })
+const projectsRoute = createRoute({ getParentRoute: () => rootRoute, path: '/projects', component: Projects })
 const newProjectRoute = createRoute({ getParentRoute: () => rootRoute, path: '/new-project', component: NewProject })
 const activityRoute = createRoute({ getParentRoute: () => rootRoute, path: '/activity', component: Activity })
 const settingsRoute = createRoute({ getParentRoute: () => rootRoute, path: '/settings', component: Settings })
@@ -38,7 +40,7 @@ const deploysRoute = createRoute({ getParentRoute: () => rootRoute, path: '/proj
 const appRoute = createRoute({ getParentRoute: () => rootRoute, path: '/projects/$org/apps/$app', component: AppDetail })
 
 const routeTree = rootRoute.addChildren([
-  indexRoute, newProjectRoute, activityRoute, settingsRoute, nodesRoute, controlPlaneRoute, terminalRoute,
+  indexRoute, projectsRoute, newProjectRoute, activityRoute, settingsRoute, nodesRoute, controlPlaneRoute, terminalRoute,
   projectRoute, newAppRoute, membersRoute, deploysRoute, appRoute,
 ])
 

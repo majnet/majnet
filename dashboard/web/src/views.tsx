@@ -271,7 +271,7 @@ export function ProjectDetail() {
 
   return (
     <>
-      <Crumbs><Link to="/">Projects</Link> / {name}</Crumbs>
+      <Crumbs><Link to="/projects">Projects</Link> / {name}</Crumbs>
       <PageHead title={name} sub={org}>
         <Button asChild variant="outline" size="sm"><a href={`https://github.com/${org}`} target="_blank" rel="noreferrer">GitHub ↗</a></Button>
         <Button asChild variant="outline" size="sm"><a href={`https://github.com/${org}/ops`} target="_blank" rel="noreferrer">ops repo ↗</a></Button>
@@ -468,7 +468,7 @@ export function Nodes() {
 // ── Activity ─────────────────────────────────────────────────────────────────
 // ── Activity feed ─────────────────────────────────────────────────────────────
 type EvKind = 'deploy' | 'remove' | 'config'
-type EvTone = 'ok' | 'bad' | 'mut' | 'info'
+export type EvTone = 'ok' | 'bad' | 'mut' | 'info'
 const KIND_LABELS: { k: 'all' | EvKind; label: string }[] = [
   { k: 'all', label: 'All' }, { k: 'deploy', label: 'Deploys' },
   { k: 'remove', label: 'Removals' }, { k: 'config', label: 'Config & repos' },
@@ -490,7 +490,7 @@ const firstToken = (s: string) => s.split(/\s+/)[0] ?? ''
 
 // Map a stored (action, result) event to a feed item. Always renders something
 // sensible; unknown kinds fall back to the raw action/result.
-function classify(e: Event): { kind: EvKind; tone: EvTone; Icon: React.ComponentType<{ className?: string }>; line: React.ReactNode; detail: string } {
+export function classify(e: Event): { kind: EvKind; tone: EvTone; Icon: React.ComponentType<{ className?: string }>; line: React.ReactNode; detail: string } {
   const parts = e.action.trim().split(/\s+/)
   const verb = parts[0] ?? ''
   const target = parts.slice(1).join(' ')
@@ -528,7 +528,7 @@ function classify(e: Event): { kind: EvKind; tone: EvTone; Icon: React.Component
   return { kind: 'config', tone: 'mut', Icon: Circle, line: <>{e.action}{e.result ? <> — {e.result}</> : null}</>, detail }
 }
 
-function relTime(at: string): string {
+export function relTime(at: string): string {
   const t = parseAt(at)
   if (Number.isNaN(t)) return at
   const s = Math.max(0, (Date.now() - t) / 1000)
@@ -548,7 +548,7 @@ function dayLabel(at: string): string {
   if (same(d, y)) return 'Yesterday'
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', ...(d.getFullYear() !== now.getFullYear() ? { year: 'numeric' } : {}) })
 }
-const DOT_TONE: Record<EvTone, string> = {
+export const DOT_TONE: Record<EvTone, string> = {
   ok: 'border-success/60 text-success', bad: 'border-destructive/60 text-destructive',
   info: 'border-primary/55 text-primary', mut: 'border-border text-muted-foreground',
 }

@@ -31,7 +31,7 @@ export function NewProject() {
   const m = useApiMutation({ invalidate: [['projects']], onDone: () => nav({ to: '/' }) })
   return (
     <>
-      <Crumbs><Link to="/">Projects</Link> / New</Crumbs>
+      <Crumbs><Link to="/projects">Projects</Link> / New</Crumbs>
       <PageHead title="New project" />
       <Card><CardContent className="flex flex-col gap-4 pt-6">
         <div className="flex gap-2.5 rounded-lg border bg-muted/40 p-3 text-sm text-muted-foreground">
@@ -81,7 +81,7 @@ export function NewApp() {
 
   return (
     <>
-      <Crumbs><Link to="/">Projects</Link> / <Link to="/projects/$org" params={{ org }}>{org}</Link> / New app</Crumbs>
+      <Crumbs><Link to="/projects">Projects</Link> / <Link to="/projects/$org" params={{ org }}>{org}</Link> / New app</Crumbs>
       <PageHead title="New app" />
       <Card><CardContent className="flex flex-col gap-4 pt-6">
         <div className="grid gap-3 sm:grid-cols-2">

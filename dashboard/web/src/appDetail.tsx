@@ -110,7 +110,7 @@ export function AppDetail() {
   return (
     <>
       <Crumbs>
-        <Link to="/">Projects</Link> / <Link to="/projects/$org" params={{ org }}>{org}</Link> / {app}
+        <Link to="/projects">Projects</Link> / <Link to="/projects/$org" params={{ org }}>{org}</Link> / {app}
       </Crumbs>
 
       {/* ── app header ─────────────────────────────────────────────────────── */}

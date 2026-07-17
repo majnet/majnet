@@ -20,7 +20,7 @@ export function Members() {
 
   return (
     <>
-      <Crumbs><Link to="/">Projects</Link> / <Link to="/projects/$org" params={{ org }}>{org}</Link> / Members</Crumbs>
+      <Crumbs><Link to="/projects">Projects</Link> / <Link to="/projects/$org" params={{ org }}>{org}</Link> / Members</Crumbs>
       <PageHead title="Members" />
       <Card><CardContent className="flex flex-col gap-4 pt-6">
         <QueryState isLoading={q.isLoading} error={q.error}>

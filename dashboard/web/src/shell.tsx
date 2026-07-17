@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, Outlet } from '@tanstack/react-router'
-import { Activity, ArrowUp, Boxes, Cpu, Loader2, Server, Settings, TerminalSquare, X } from 'lucide-react'
+import { Activity, ArrowUp, Boxes, Cpu, Home, Loader2, Server, Settings, TerminalSquare, X } from 'lucide-react'
 import { useControlPlane, useWhoami } from './api'
 import { TopBar } from './topbar'
 
@@ -8,7 +8,8 @@ import { TopBar } from './topbar'
 const BUNDLE_COMMIT = import.meta.env.VITE_BUILD_COMMIT ?? ''
 
 const NAV = [
-  { to: '/', label: 'Projects', icon: Boxes, exact: true, admin: false },
+  { to: '/', label: 'Overview', icon: Home, exact: true, admin: false },
+  { to: '/projects', label: 'Projects', icon: Boxes, exact: false, admin: false },
   { to: '/activity', label: 'Activity', icon: Activity, exact: false, admin: false },
   { to: '/nodes', label: 'Nodes', icon: Server, exact: false, admin: false },
   { to: '/control-plane', label: 'Control plane', icon: Cpu, exact: false, admin: true },
