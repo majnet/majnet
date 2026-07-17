@@ -547,7 +547,9 @@ export function Activity() {
   const [proj, setProj] = useState('all')
   const events = q.data ?? []
   const projectList = [...new Set(events.map((e) => e.project).filter(Boolean))].sort()
-  const filtered = events.filter((e) => (proj === 'all' || e.project === proj) && (kind === 'all' || classify(e).kind === kind))
+  // Prefer the stored `kind` (set at write time); fall back to the classifier.
+  const kindOf = (e: Event): EvKind => (e.kind as EvKind) || classify(e).kind
+  const filtered = events.filter((e) => (proj === 'all' || e.project === proj) && (kind === 'all' || kindOf(e) === kind))
 
   const groups: { day: string; items: Event[] }[] = []
   for (const e of filtered) {

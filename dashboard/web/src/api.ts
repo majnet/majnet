@@ -29,6 +29,8 @@ export interface NodeMetrics {
 }
 export interface Event {
   at: string; commit: string; project: string; node: string; action: string; result: string
+  /** Coarse activity type set at write time: 'deploy' | 'remove' | 'config'. */
+  kind?: string
 }
 export interface DeployFile {
   filename: string; status: string; additions: number; deletions: number; patch: string | null

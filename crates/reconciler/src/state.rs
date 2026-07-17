@@ -25,6 +25,19 @@ pub struct Event {
     pub node: String,
     pub action: String,
     pub result: String,
+    /// Coarse activity type for the dashboard feed: `deploy` | `remove` |
+    /// `config`. Set at write time so filtering never re-parses free text.
+    pub kind: String,
+}
+
+/// The coarse activity type for an event, from its `action` verb. Kept in sync
+/// with the `V5__event_kind.sql` backfill rule.
+pub fn event_kind(action: &str) -> &'static str {
+    match action.split_whitespace().next().unwrap_or("") {
+        "converge" | "deploy" | "restart" | "promote" => "deploy",
+        "gc" | "purge" | "purge-project" | "remove" => "remove",
+        _ => "config",
+    }
 }
 
 /// One env's build metadata as reported by the app's `/info` endpoint, recorded
@@ -124,8 +137,8 @@ impl Store {
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO events (commit_sha, project, node, action, result) VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![commit, project, node, action, result],
+            "INSERT INTO events (commit_sha, project, node, action, result, kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![commit, project, node, action, result, event_kind(action)],
         )?;
         Ok(())
     }
@@ -319,7 +332,7 @@ impl Store {
     pub fn recent(&self, limit: u32) -> Result<Vec<Event>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT at, commit_sha, project, node, action, result FROM events ORDER BY seq DESC LIMIT ?1",
+            "SELECT at, commit_sha, project, node, action, result, kind FROM events ORDER BY seq DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map([limit], |row| {
             Ok(Event {
@@ -329,6 +342,9 @@ impl Store {
                 node: row.get(3)?,
                 action: row.get(4)?,
                 result: row.get(5)?,
+                kind: row
+                    .get::<_, Option<String>>(6)?
+                    .unwrap_or_else(|| "config".into()),
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -373,6 +389,29 @@ mod tests {
         s.raw("UPDATE ephemeral_stacks SET extended_until = datetime('now', '-1 hour')")
             .unwrap();
         assert!(s.ephemeral_ttl_expired("proj", "app-pr1").unwrap());
+    }
+
+    #[test]
+    fn event_kind_maps_actions() {
+        assert_eq!(event_kind("converge poletime"), "deploy");
+        assert_eq!(event_kind("restart api"), "deploy");
+        assert_eq!(event_kind("gc projects-app-production-abc"), "remove");
+        assert_eq!(event_kind("purge poletime"), "remove");
+        assert_eq!(event_kind("purge-project"), "remove");
+        assert_eq!(event_kind("rename api → web"), "config");
+        assert_eq!(event_kind(""), "config");
+    }
+
+    #[test]
+    fn recorded_event_carries_its_kind() {
+        let s = store();
+        s.record("c0ffee", "proj", "prod", "converge api", "deployed v1")
+            .unwrap();
+        s.record("c0ffee", "proj", "prod", "gc proj-api-x", "removed")
+            .unwrap();
+        let evs = s.recent(10).unwrap();
+        assert_eq!(evs[0].kind, "remove"); // newest first
+        assert_eq!(evs[1].kind, "deploy");
     }
 
     #[test]
