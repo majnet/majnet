@@ -35,6 +35,8 @@ export interface ControlPlaneStatus {
   /** running build matches the pinned ref; null when the running build is unknown */
   converged: boolean | null
   check_error: string | null
+  /** newest commit's images aren't published yet (CI still building) */
+  latest_building: boolean
 }
 export interface ContainerMetric {
   name: string; image: string; state: string
