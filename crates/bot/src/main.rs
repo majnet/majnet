@@ -159,6 +159,10 @@ async fn main() -> Result<()> {
             post(tailscale::tailscale_verify),
         )
         .route(
+            "/api/platform/dashboard-layout",
+            get(dashboard_api::dashboard_layout_get).put(dashboard_api::dashboard_layout_set),
+        )
+        .route(
             "/api/imports/{org}/{app}/retry",
             post(dashboard_api::imports_retry),
         )

@@ -37,7 +37,7 @@ export function Deploys() {
 
   return (
     <>
-      <Crumbs><Link to="/">Projects</Link> / <Link to="/projects/$org" params={{ org }}>{org}</Link> / Deployments</Crumbs>
+      <Crumbs><Link to="/projects">Projects</Link> / <Link to="/projects/$org" params={{ org }}>{org}</Link> / Deployments</Crumbs>
       <PageHead title="Deployments" sub={`pending render PRs on ${org}/ops`} />
       <QueryState isLoading={q.isLoading} error={q.error}>
         {q.data?.length === 0 && (

@@ -859,6 +859,57 @@ pub async fn registry_set(
     Ok("GHCR pull token saved — private app images can pull now".to_string())
 }
 
+// ── per-user dashboard layout (the customizable overview) ─────────────────────
+
+/// The caller's identity, used to key their saved overview layout. Humans key by
+/// GitHub login; the infra/WG break-glass keys as `infra`.
+async fn layout_key(state: &AppState, headers: &HeaderMap) -> String {
+    use majnet_common::authz::Actor;
+    let who = match crate::authz::actor(state, headers).await {
+        Ok(Actor::Human { github, .. }) => github,
+        Ok(Actor::Infra) => "infra".to_string(),
+        Err(_) => headers
+            .get("tailscale-user-login")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("anon")
+            .to_string(),
+    };
+    format!("dash_layout:{who}")
+}
+
+#[derive(Deserialize)]
+pub struct LayoutBody {
+    /// Opaque client layout blob (react-grid-layout layouts + hidden widgets).
+    pub layout: serde_json::Value,
+}
+
+/// `GET /api/platform/dashboard-layout` — the caller's saved overview layout, or
+/// `null` if they haven't customized it yet. Per-user; no admin gate.
+pub async fn dashboard_layout_get(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let key = layout_key(&state, &headers).await;
+    let saved = state.store.get_config(&key).map_err(bad_gateway)?;
+    let val = saved
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or(serde_json::Value::Null);
+    Ok(Json(val))
+}
+
+/// `PUT /api/platform/dashboard-layout` — save the caller's overview layout.
+pub async fn dashboard_layout_set(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<LayoutBody>,
+) -> Result<String, ApiError> {
+    let key = layout_key(&state, &headers).await;
+    let json = serde_json::to_string(&body.layout).map_err(|e| bad_request(e.to_string()))?;
+    state.store.set_config(&key, &json).map_err(bad_gateway)?;
+    Ok("layout saved".to_string())
+}
+
 // ── nodes ────────────────────────────────────────────────────────────────────
 
 /// `GET /api/nodes` — the platform's node registry (`nodes.yaml`).

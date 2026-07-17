@@ -170,6 +170,7 @@ export const urls = {
     `${BOT}/releases/${encodeURIComponent(org)}/${encodeURIComponent(app)}/backfill`,
   version: `${BOT}/platform/version`,
   registry: `${BOT}/platform/registry`,
+  dashboardLayout: `${BOT}/platform/dashboard-layout`,
   tailscale: `${BOT}/platform/tailscale`,
   tailscaleVerify: `${BOT}/platform/tailscale/verify`,
   setupEnroll: '/api/setup/enroll.json',
@@ -268,6 +269,13 @@ export interface TailscaleStatus { configured: boolean; mode: 'oauth' | 'token' 
 export interface TailscaleVerify { tailnet: string; devices: number; you: string | null }
 export const useTailscale = () =>
   useQuery({ queryKey: ['tailscale'], queryFn: () => getJSON<TailscaleStatus>(urls.tailscale) })
+
+// Per-user overview layout (react-grid-layout blob + hidden widgets). null = not customized.
+export interface DashboardLayout { layouts?: Record<string, unknown[]>; hidden?: string[] }
+export const useDashboardLayout = () =>
+  useQuery({ queryKey: ['dashboard-layout'], queryFn: () => getJSON<DashboardLayout | null>(urls.dashboardLayout) })
+export const saveDashboardLayout = (layout: DashboardLayout) =>
+  send(urls.dashboardLayout, { method: 'PUT', json: { layout } })
 export const useReleases = (org: string, app: string) =>
   useQuery({ queryKey: ['releases', org, app], queryFn: () => getJSON<StoredRelease[]>(urls.releases(org, app)) })
 export const useArchivedApps = (org: string) =>
