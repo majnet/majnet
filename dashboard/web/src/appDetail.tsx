@@ -20,7 +20,7 @@ import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
 import {
-  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Sheet, SheetBody, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 
@@ -130,10 +130,6 @@ export function AppDetail() {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              <DropdownMenuItem onSelect={() => deploy.mutate(() => send(urls.releaseCut(org, app, 'patch')))}>Cut release · patch</DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => deploy.mutate(() => send(urls.releaseCut(org, app, 'minor')))}>Cut release · minor</DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => deploy.mutate(() => send(urls.releaseCut(org, app, 'major')))}>Cut release · major</DropdownMenuItem>
-              <DropdownMenuSeparator />
               <DropdownMenuItem onSelect={() => setRenameOpen(true)}>Rename app…</DropdownMenuItem>
               <DropdownMenuItem
                 variant="destructive"
@@ -376,7 +372,17 @@ function Releases({ org, app, prodImage }: { org: string; app: string; prodImage
   return (
     <>
       <SectionHead title="Releases" hint="tagged image publishes" />
-      <div className="mb-2 flex justify-end">
+      <div className="mb-2 flex justify-end gap-2">
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button size="sm" disabled={m.isPending} title="Cut a new release — the bot tags the next semver and CI builds it">Cut release ▾</Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem onSelect={() => m.mutate(() => send(urls.releaseCut(org, app, 'patch')))}>Patch <span className="ml-auto pl-4 font-mono text-xs text-muted-foreground">x.y.Z+1</span></DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => m.mutate(() => send(urls.releaseCut(org, app, 'minor')))}>Minor <span className="ml-auto pl-4 font-mono text-xs text-muted-foreground">x.Y+1.0</span></DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => m.mutate(() => send(urls.releaseCut(org, app, 'major')))}>Major <span className="ml-auto pl-4 font-mono text-xs text-muted-foreground">X+1.0.0</span></DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
         <Button variant="outline" size="sm" disabled={m.isPending}
           title="Recover any vX.Y.Z publishes the registry_package webhook missed"
           onClick={() => m.mutate(() => send(urls.releaseBackfill(org, app)))}>Backfill from registry</Button>
