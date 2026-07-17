@@ -1,6 +1,7 @@
+import { useState } from 'react'
 import { Link, Outlet } from '@tanstack/react-router'
-import { Activity, Boxes, Cpu, Server, Settings, TerminalSquare } from 'lucide-react'
-import { useWhoami } from './api'
+import { Activity, ArrowUp, Boxes, Cpu, Loader2, Server, Settings, TerminalSquare, X } from 'lucide-react'
+import { useControlPlane, useWhoami } from './api'
 import { TopBar } from './topbar'
 
 const NAV = [
@@ -13,6 +14,37 @@ const NAV = [
 ] as const
 
 const base = 'flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm font-medium transition-colors'
+
+// Global nudge (admins only) — a slim strip when the control plane is updating
+// or a new build is available. Mounted only for admins (the endpoint is gated).
+function ControlPlaneBanner() {
+  const { data: cp } = useControlPlane()
+  const [dismissed, setDismissed] = useState<string | null>(null)
+  if (!cp) return null
+  if (cp.converged === false) {
+    return (
+      <div className="flex items-center gap-2 border-b bg-accent px-6 py-2 text-[13px] text-accent-foreground md:px-8">
+        <Loader2 className="size-4 animate-spin" />
+        <span>Control plane is updating…</span>
+        <Link to="/control-plane" className="ml-auto font-medium underline-offset-2 hover:underline">View progress →</Link>
+      </div>
+    )
+  }
+  if (cp.latest && !cp.up_to_date && cp.latest.ref !== dismissed) {
+    return (
+      <div className="flex items-center gap-2 border-b border-warning/30 bg-warning/10 px-6 py-2 text-[13px] md:px-8">
+        <ArrowUp className="size-4 shrink-0 text-warning" />
+        <span>A control-plane update is available <span className="font-mono text-muted-foreground">({cp.latest.ref.slice(0, 7)})</span>.</span>
+        <Link to="/control-plane" className="font-medium text-primary underline-offset-2 hover:underline">Review &amp; update →</Link>
+        <button onClick={() => setDismissed(cp.latest!.ref)} aria-label="Dismiss"
+          className="ml-auto rounded p-1 text-muted-foreground transition-colors hover:bg-warning/15 hover:text-foreground">
+          <X className="size-3.5" />
+        </button>
+      </div>
+    )
+  }
+  return null
+}
 
 export function Shell() {
   const { data: me } = useWhoami()
@@ -47,6 +79,7 @@ export function Shell() {
       </aside>
       <div className="flex min-w-0 flex-col">
         <TopBar />
+        {me?.admin && <ControlPlaneBanner />}
         <main className="w-full max-w-[1400px] p-6 md:px-8 md:py-7">
           <Outlet />
         </main>
