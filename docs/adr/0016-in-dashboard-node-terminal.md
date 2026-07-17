@@ -1,6 +1,6 @@
 # 0016 — In-dashboard node terminal
 
-**Status:** proposed · **Date:** 2026-07-17 · relates to [0002](0002-blue-green-via-healthcheck-gated-routing.md), [0004](0004-setup-service-auto-provisioning.md)
+**Status:** accepted · **Date:** 2026-07-17 · relates to [0002](0002-blue-green-via-healthcheck-gated-routing.md), [0004](0004-setup-service-auto-provisioning.md)
 
 ## Context
 
