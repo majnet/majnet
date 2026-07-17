@@ -8,7 +8,7 @@ import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
-import { ConfirmButton, DeployStatus, Empty, ExtLink, latestEventFor, QueryState, short, Sparkline, StatusBadge } from './ui'
+import { ConfirmButton, DeployStatus, Empty, ExtLink, latestEventFor, MetricChart, QueryState, short, StatusBadge } from './ui'
 
 /** Step-by-step progress of an in-flight (or failed) app import. */
 export function ImportSteps({ status }: { status: ImportStatus }) {
@@ -422,14 +422,10 @@ export function Nodes() {
                       <Stat label="OS" value={mm.os} />
                     </div>
                     <div className="mt-3 grid grid-cols-2 gap-3">
-                      <div className="rounded-md border p-2">
-                        <div className="mb-1 flex items-center justify-between text-xs"><span className="text-muted-foreground">CPU</span><span className="font-mono">{mm.host_cpu_pct.toFixed(0)}%</span></div>
-                        <Sparkline values={hist[n.name]?.cpu ?? []} />
-                      </div>
-                      <div className="rounded-md border p-2">
-                        <div className="mb-1 flex items-center justify-between text-xs"><span className="text-muted-foreground">Memory</span><span className="font-mono">{mm.mem_total ? Math.round((mm.mem_used / mm.mem_total) * 100) : 0}%</span></div>
-                        <Sparkline values={hist[n.name]?.mem ?? []} />
-                      </div>
+                      <MetricChart label="CPU" values={hist[n.name]?.cpu ?? []}
+                        format={(p) => `${(p / 100 * mm.cpus).toFixed(1)} of ${mm.cpus} cores`} />
+                      <MetricChart label="Memory" values={hist[n.name]?.mem ?? []}
+                        format={(p) => `${gb((p / 100) * mm.mem_total)} of ${gb(mm.mem_total)}`} />
                     </div>
                     {mm.apps.length > 0 && (
                       <div className="mt-3 overflow-x-auto">
@@ -441,7 +437,14 @@ export function Nodes() {
                                 <td className="py-1 pr-3">{a.name}</td>
                                 <td className="py-1 pr-3">{a.state}</td>
                                 <td className="py-1 pr-3">{a.cpu_pct.toFixed(1)}%</td>
-                                <td className="py-1">{mb(a.mem_used)}{a.mem_limit ? ` / ${gb(a.mem_limit)}` : ''}</td>
+                                <td className="py-1">
+                                  {mb(a.mem_used)}{a.mem_limit ? ` / ${gb(a.mem_limit)}` : ''}
+                                  {a.mem_limit > 0 && (
+                                    <div className="mt-0.5 h-1 w-24 overflow-hidden rounded-full bg-muted">
+                                      <div className="h-full rounded-full bg-primary" style={{ width: `${Math.min(100, Math.round((a.mem_used / a.mem_limit) * 100))}%` }} />
+                                    </div>
+                                  )}
+                                </td>
                               </tr>
                             ))}
                           </tbody>
