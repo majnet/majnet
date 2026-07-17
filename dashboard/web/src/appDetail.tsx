@@ -20,7 +20,7 @@ import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
 import {
-  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Sheet, SheetBody, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 
@@ -394,6 +394,8 @@ function Releases({ org, app, prodImage }: { org: string; app: string; prodImage
             <Button size="sm" disabled={m.isPending} title="Cut a new release — the bot tags the next semver and CI builds it">Cut release ▾</Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
+            <DropdownMenuItem onSelect={() => m.mutate(() => send(urls.releaseCut(org, app, 'auto')))}>Auto <span className="ml-auto pl-4 text-xs text-muted-foreground">from commits</span></DropdownMenuItem>
+            <DropdownMenuSeparator />
             <DropdownMenuItem onSelect={() => m.mutate(() => send(urls.releaseCut(org, app, 'patch')))}>Patch <span className="ml-auto pl-4 font-mono text-xs text-muted-foreground">{nv.patch}</span></DropdownMenuItem>
             <DropdownMenuItem onSelect={() => m.mutate(() => send(urls.releaseCut(org, app, 'minor')))}>Minor <span className="ml-auto pl-4 font-mono text-xs text-muted-foreground">{nv.minor}</span></DropdownMenuItem>
             <DropdownMenuItem onSelect={() => m.mutate(() => send(urls.releaseCut(org, app, 'major')))}>Major <span className="ml-auto pl-4 font-mono text-xs text-muted-foreground">{nv.major}</span></DropdownMenuItem>

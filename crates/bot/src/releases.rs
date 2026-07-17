@@ -23,8 +23,8 @@ type ApiError = (StatusCode, String);
 // One consistent scheme for every app: the bot computes the next semver from the
 // last recorded release and creates the `vX.Y.Z` tag (App-signed, through git),
 // which triggers app-release.yaml → build → `record` → then `promote`. The bump
-// is chosen explicitly here; a future `auto` mode can derive it from
-// conventional commits (option 2) without changing this shape.
+// is chosen explicitly (patch|minor|major) or derived from conventional-commit
+// messages since the last release (`auto`, option 2) — see `classify_bump`.
 
 type Ver = (u64, u64, u64);
 
@@ -50,6 +50,58 @@ fn next_version(last: Option<Ver>, bump: &str) -> Result<String> {
     Ok(format!("{x}.{y}.{z}"))
 }
 
+/// Derive a semver bump from conventional-commit messages (option 2). Takes the
+/// strongest signal across all commits: a breaking change (`type!:` header or a
+/// `BREAKING CHANGE` footer) → major; any `feat` → minor; otherwise patch.
+fn classify_bump(messages: &[String]) -> &'static str {
+    let mut bump = "patch";
+    for m in messages {
+        let header = m.lines().next().unwrap_or("");
+        let (typ_scope, _) = header.split_once(':').unwrap_or((header, ""));
+        let breaking = m.contains("BREAKING CHANGE") || typ_scope.trim_end().ends_with('!');
+        if breaking {
+            return "major";
+        }
+        let typ = typ_scope.split('(').next().unwrap_or("").trim();
+        if typ == "feat" {
+            bump = "minor";
+        }
+    }
+    bump
+}
+
+#[derive(serde::Deserialize)]
+struct Compare {
+    commits: Vec<CompareCommit>,
+}
+#[derive(serde::Deserialize)]
+struct CompareCommit {
+    commit: CommitDetail,
+}
+#[derive(serde::Deserialize)]
+struct CommitDetail {
+    message: String,
+}
+
+/// Commit messages on `main` that aren't reachable from `base_tag`, via the
+/// GitHub compare API — the input to `classify_bump`.
+async fn commits_since(
+    state: &AppState,
+    org: &str,
+    app: &str,
+    base_tag: &str,
+) -> Result<Vec<String>> {
+    let client = state.github.org_client(org).await?;
+    let cmp: Compare = client
+        .get(
+            format!("/repos/{org}/{app}/compare/{base_tag}...main"),
+            None::<&()>,
+        )
+        .await
+        .with_context(|| format!("comparing {base_tag}...main"))?;
+    Ok(cmp.commits.into_iter().map(|c| c.commit.message).collect())
+}
+
 #[derive(serde::Deserialize)]
 pub struct CutQuery {
     #[serde(default = "default_bump")]
@@ -59,10 +111,12 @@ fn default_bump() -> String {
     "patch".into()
 }
 
-/// `POST /api/releases/{org}/{app}/cut?bump=patch|minor|major` — cut a release:
-/// compute the next semver from the last recorded release and create the
-/// `vX.Y.Z` tag on the app repo's `main` HEAD. CI (app-release.yaml) builds it,
-/// the package webhook records it, then it can be promoted. Project-admin gated.
+/// `POST /api/releases/{org}/{app}/cut?bump=patch|minor|major|auto` — cut a
+/// release: compute the next semver from the last recorded release and create
+/// the `vX.Y.Z` tag on the app repo's `main` HEAD. `auto` derives the bump from
+/// the conventional-commit messages since the last release. CI (app-release.yaml)
+/// builds it, the package webhook records it, then it can be promoted.
+/// Project-admin gated.
 pub async fn cut(
     State(state): State<Arc<AppState>>,
     Path((org, app)): Path<(String, String)>,
@@ -84,7 +138,31 @@ async fn do_cut(state: &AppState, org: &str, app: &str, bump: &str, actor: &str)
         .iter()
         .filter_map(|r| parse_semver(&r.version))
         .max();
-    let next = format!("v{}", next_version(last, bump)?);
+
+    // Resolve `auto` to a concrete bump from conventional commits since the last
+    // release; explicit bumps pass through unchanged.
+    let (effective, note) = if bump == "auto" {
+        match last {
+            Some((x, y, z)) => {
+                let base = format!("v{x}.{y}.{z}");
+                let msgs = commits_since(state, org, app, &base).await?;
+                anyhow::ensure!(
+                    !msgs.is_empty(),
+                    "no new commits since {base} — nothing to release"
+                );
+                let b = classify_bump(&msgs);
+                (
+                    b.to_string(),
+                    format!(" (auto → {b} from {} commits)", msgs.len()),
+                )
+            }
+            None => ("patch".to_string(), " (auto → first release)".to_string()),
+        }
+    } else {
+        (bump.to_string(), String::new())
+    };
+
+    let next = format!("v{}", next_version(last, &effective)?);
     let client = state.github.org_client(org).await?;
     let repo = format!("/repos/{org}/{app}");
     let head = crate::git::get_branch_head(&client, &repo, "main")
@@ -104,7 +182,7 @@ async fn do_cut(state: &AppState, org: &str, app: &str, bump: &str, actor: &str)
     )?;
     tracing::info!(org, app, %next, actor, "cut release");
     Ok(format!(
-        "Cut {next} — CI is building it; it'll appear in Releases, then Promote to production."
+        "Cut {next}{note} — CI is building it; it'll appear in Releases, then Promote to production."
     ))
 }
 
@@ -355,7 +433,37 @@ pub async fn promote(
 
 #[cfg(test)]
 mod tests {
-    use super::{next_version, parse_semver, production_overlay};
+    use super::{classify_bump, next_version, parse_semver, production_overlay};
+
+    fn msgs(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn auto_bump_from_conventional_commits() {
+        // patch by default (fixes/chores only)
+        assert_eq!(
+            classify_bump(&msgs(&["fix: a", "chore: deps", "docs: x"])),
+            "patch"
+        );
+        // any feat wins over patch
+        assert_eq!(classify_bump(&msgs(&["fix: a", "feat(api): b"])), "minor");
+        // breaking wins over everything
+        assert_eq!(
+            classify_bump(&msgs(&["feat: a", "refactor!: drop v1"])),
+            "major"
+        );
+        assert_eq!(
+            classify_bump(&msgs(&["fix: a\n\nBREAKING CHANGE: db reset"])),
+            "major"
+        );
+        // `feat!:` header is breaking, not just a feature
+        assert_eq!(classify_bump(&msgs(&["feat!: rewrite"])), "major");
+        // empty → patch
+        assert_eq!(classify_bump(&[]), "patch");
+        // non-conventional messages → patch
+        assert_eq!(classify_bump(&msgs(&["wip", "merge branch"])), "patch");
+    }
 
     #[test]
     fn semver_parse_and_bump() {
