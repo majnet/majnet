@@ -29,6 +29,14 @@ const ORIGIN_CERTS_DIR: &str = "/etc/majnet/origin-certs";
 const HELPER_IMAGE: &str = "busybox:stable";
 const LABEL_CONFIG: &str = "majnet.config";
 
+// Resource caps for the reconciler-managed platform containers (same
+// HostConfig knobs as per-app limits, ADR — resources). Folded into each
+// container's config-hash so changing a cap forces a recreate. edge-main
+// (Traefik) is light; DB engines get real headroom for cache + connections.
+const MB: i64 = 1024 * 1024;
+const EDGE_MEM: i64 = 256 * MB;
+const EDGE_NANO_CPUS: i64 = 500_000_000; // 0.5 CPU
+
 /// Converge platform services onto their role's nodes. Non-fatal: a failure
 /// logs and lets project convergence proceed. Skipped in local/smoke mode —
 /// binding host 80/443 there is neither wanted nor safe.
@@ -160,6 +168,8 @@ async fn converge_edge_main(
                     network_mode: Some(EDGE_NETWORK.into()),
                     binds: Some(binds),
                     port_bindings: Some(HashMap::from([port("80"), port("443")])),
+                    memory: Some(EDGE_MEM),
+                    nano_cpus: Some(EDGE_NANO_CPUS),
                     restart_policy: Some(RestartPolicy {
                         name: Some(RestartPolicyNameEnum::UNLESS_STOPPED),
                         ..Default::default()
@@ -200,6 +210,9 @@ struct EngineSpec {
     /// Readiness probe run inside the container (exit 0 = accepting
     /// authenticated connections).
     ready: String,
+    /// Memory cap (bytes) and CPU cap (nano-CPUs) for the engine container.
+    mem: i64,
+    nano_cpus: i64,
 }
 
 fn engine_spec(engine: DbEngine) -> EngineSpec {
@@ -224,6 +237,8 @@ fn engine_spec(engine: DbEngine) -> EngineSpec {
             binds: vec!["postgres-data:/var/lib/postgresql/data".into(), root_bind],
             secret,
             ready: "pg_isready -U postgres -q".into(),
+            mem: 1024 * MB,
+            nano_cpus: 1_000_000_000, // 1.0 CPU
         },
         DbEngine::Mariadb => EngineSpec {
             image: "mariadb:11",
@@ -232,6 +247,8 @@ fn engine_spec(engine: DbEngine) -> EngineSpec {
             binds: vec!["mariadb-data:/var/lib/mysql".into(), root_bind],
             secret,
             ready: format!(r#"mariadb -uroot -p"$(cat {root_file})" -e "SELECT 1" >/dev/null 2>&1"#),
+            mem: 1024 * MB,
+            nano_cpus: 1_000_000_000,
         },
         DbEngine::Valkey => EngineSpec {
             image: "valkey/valkey:8",
@@ -250,6 +267,8 @@ fn engine_spec(engine: DbEngine) -> EngineSpec {
             ready: format!(
                 r#"valkey-cli -a "$(cat {root_file})" --no-auth-warning ping >/dev/null 2>&1"#
             ),
+            mem: 512 * MB,
+            nano_cpus: 500_000_000,
         },
         DbEngine::Mongodb => EngineSpec {
             image: "mongo:8",
@@ -263,6 +282,8 @@ fn engine_spec(engine: DbEngine) -> EngineSpec {
             ready: format!(
                 r#"mongosh --quiet -u root -p "$(cat {root_file})" --authenticationDatabase admin --eval 'db.runCommand({{ ping: 1 }})' >/dev/null 2>&1"#
             ),
+            mem: 1024 * MB,
+            nano_cpus: 1_000_000_000,
         },
     }
 }
@@ -308,6 +329,8 @@ pub async fn ensure_engine(config: &Config, docker: &Docker, engine: DbEngine) -
                 labels: Some(HashMap::from([(LABEL_CONFIG.to_string(), hash)])),
                 host_config: Some(HostConfig {
                     binds: Some(spec.binds.clone()),
+                    memory: Some(spec.mem),
+                    nano_cpus: Some(spec.nano_cpus),
                     restart_policy: Some(RestartPolicy {
                         name: Some(RestartPolicyNameEnum::UNLESS_STOPPED),
                         ..Default::default()
@@ -346,6 +369,8 @@ fn engine_hash(spec: &EngineSpec, root_pw: &str) -> String {
         h.update(b.as_bytes());
         h.update([0]);
     }
+    h.update(spec.mem.to_le_bytes());
+    h.update(spec.nano_cpus.to_le_bytes());
     h.update(root_pw.as_bytes());
     hex::encode(h.finalize())[..16].to_string()
 }
@@ -399,6 +424,8 @@ async fn exec_ok(docker: &Docker, container: &str, script: &str) -> bool {
 fn config_hash(config: &BTreeMap<String, Vec<u8>>, certs: &BTreeMap<String, Vec<u8>>) -> String {
     let mut h = Sha256::new();
     h.update(EDGE_IMAGE.as_bytes());
+    h.update(EDGE_MEM.to_le_bytes());
+    h.update(EDGE_NANO_CPUS.to_le_bytes());
     for map in [config, certs] {
         for (path, content) in map {
             h.update(path.as_bytes());
