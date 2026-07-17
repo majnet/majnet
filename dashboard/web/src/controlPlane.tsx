@@ -163,6 +163,7 @@ export function ControlPlane() {
     : rolling ? <StatusBadge tone="accent"><Loader2 className="size-3.5 animate-spin" /> Rolling out</StatusBadge>
     : cp.up_to_date ? <StatusBadge tone="success" dot>Up to date</StatusBadge>
     : cp.latest ? <StatusBadge tone="warn">Update available</StatusBadge>
+    : cp.latest_building ? <StatusBadge tone="muted"><Loader2 className="size-3.5 animate-spin" /> Publishing…</StatusBadge>
     : <StatusBadge tone="muted">Couldn’t check</StatusBadge>
 
   return (
@@ -232,7 +233,20 @@ export function ControlPlane() {
             )}
 
             {/* Couldn't check */}
-            {!rolling && !cp.latest && cp.check_error && (
+            {/* Latest build still publishing (CI hasn't pushed sha-<HEAD> yet) */}
+            {!rolling && !cp.latest && cp.latest_building && (
+              <Section>
+                <div className="flex items-center gap-3 text-[13px]">
+                  <Loader2 className="size-4 shrink-0 animate-spin text-muted-foreground" />
+                  <span>The latest build is still publishing — CI is pushing the images. Check back in a moment.</span>
+                  <Button variant="ghost" size="sm" className="ml-auto" onClick={() => q.refetch()} disabled={q.isFetching}>
+                    <RefreshCw className={`size-4 ${q.isFetching ? 'animate-spin' : ''}`} /> Check now
+                  </Button>
+                </div>
+              </Section>
+            )}
+
+            {!rolling && !cp.latest && !cp.latest_building && cp.check_error && (
               <Section>
                 <div className="flex items-start gap-2.5 text-[13px]">
                   <TriangleAlert className="mt-0.5 size-4 shrink-0 text-warning" />

@@ -120,6 +120,9 @@ pub struct Status {
     pub converged: Option<bool>,
     /// Why `latest` couldn't be resolved, if it couldn't.
     pub check_error: Option<String>,
+    /// The newest commit's images aren't published yet (CI still building) —
+    /// not an error; the UI shows a "still publishing" hint.
+    pub latest_building: bool,
 }
 
 /// `GET /api/control-plane` (platform-admin) — the running pin, the latest
@@ -152,6 +155,7 @@ async fn do_status(state: &AppState) -> Result<Status> {
     let mut commits = Vec::new();
     let mut compare_url = None;
     let mut check_error = None;
+    let mut latest_building = false;
     match resolve_latest(state, &src_org, &src_repo).await {
         Ok(l) => {
             let base = current.git_ref.trim();
@@ -167,8 +171,16 @@ async fn do_status(state: &AppState) -> Result<Status> {
             latest = Some(l);
         }
         Err(e) => {
-            tracing::warn!("control-plane latest check failed: {e:#}");
-            check_error = Some(format!("{e:#}"));
+            // A missing `sha-<HEAD>` tag just means CI hasn't published that
+            // build yet — a transient "still building" state, not an error.
+            let msg = format!("{e:#}");
+            if msg.contains("404") || msg.to_lowercase().contains("manifest unknown") {
+                tracing::info!("control-plane latest not published yet (building)");
+                latest_building = true;
+            } else {
+                tracing::warn!("control-plane latest check failed: {msg}");
+                check_error = Some(msg);
+            }
         }
     }
 
@@ -203,6 +215,7 @@ async fn do_status(state: &AppState) -> Result<Status> {
         running,
         converged,
         check_error,
+        latest_building,
     })
 }
 
