@@ -76,8 +76,9 @@ Code ✅ / remaining ⏳:
 - [x] Runbooks: node-recovery, bad-deploy, db-break-glass, secret-rotation, restore-test, github-outage
 - [x] Valkey + MongoDB provisioning (ACL user / dbOwner user; engines + nightly dumps included)
 - [x] Full dashboard: manifest editing (validated, committed by the bot), member management (admin-only), ephemeral TTL extension, role-based authorization from `people.yaml` + `project.yaml` (`common/src/authz.rs`; `tailscale serve` is the identity trust anchor)
-- [x] Self-update: control-plane version pinned in the platform repo's `version.yaml` (seeded to the exact installed commit), converged hourly by `majnet-update` on the main node via the bot's `GET /api/platform/version`; break-glass = `majnet-update <ref>` (**ADR 0005**)
+- [x] Self-update: control-plane version pinned in the platform repo's `version.yaml` (seeded to the exact installed commit), converged by `majnet-update` on the main node via the bot's `GET /api/platform/version`; break-glass = `majnet-update <ref>` (**ADR 0005**, digest-pinned images **ADR 0008**)
 - [x] Standard app endpoints: `/healthz` is the default `health.path`; reconciler scrapes `/info` (build metadata) at deploy time and surfaces it per app/env in the dashboard (§16)
+- [x] Dashboard-driven control-plane updates: `/control-plane` page (platform-admin) shows running vs latest and publishes/rolls back the pin via `GET`+`PUT /api/control-plane`; control plane reports its own build at `/info` (CI-baked) → real `converged` signal + live rollout progress bar; `majnet-update` stamp-guarded and polled every ~30s (**ADR 0015**)
 - [ ] First weekly restore test actually performed
 
 ## Phase 6 — One-line auto-provisioning (Coolify-style install) 🚧
