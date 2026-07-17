@@ -52,8 +52,25 @@ platform-admin-only and fully audited, with two modes.**
   frontend adds xterm.js and a WebSocket (the dashboard's first).
 - **Auth** — `require_platform_admin`, but the terminal route **does not honor
   the header-less `Infra` bypass**: it requires a resolved *named* human admin,
-  so every session is attributable. The `tailscale serve` funnel + WG bind
-  remains the only human path.
+  so every session is attributable. Identity is the `Tailscale-User-Login`
+  header. The `tailscale serve` path (`http://majksa`) injects it directly; the
+  public Caddy edge (`dash.majksa.net`) does not, so it uses Caddy's built-in
+  **`forward_auth`** against the bot's **`/tsauth`** endpoint, which resolves the
+  caller's tailnet IP → user via the Tailscale API (the bot owns that
+  credential) and returns the header for Caddy to inject. Caddy strips any
+  client-supplied identity header first, so the value is authoritative.
+
+  ```caddy
+  dash.majksa.net {
+      tls /etc/caddy/certs/dash.crt /etc/caddy/certs/dash.key
+      request_header -Tailscale-User-Login          # strip client-supplied identity
+      forward_auth 127.0.0.1:8080 {                  # bot public listener (localhost)
+          uri /tsauth
+          copy_headers Tailscale-User-Login
+      }
+      reverse_proxy 127.0.0.1:8090
+  }
+  ```
 - **Audit** — a **full I/O transcript** (input + output) is recorded per session
   (reconciler store), plus an `events` row on open and close (mirroring the
   `restart` "imperative" event, `state_api.rs`), surfaced in the Activity feed.
