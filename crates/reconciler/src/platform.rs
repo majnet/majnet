@@ -37,6 +37,17 @@ const MB: i64 = 1024 * 1024;
 const EDGE_MEM: i64 = 256 * MB;
 const EDGE_NANO_CPUS: i64 = 500_000_000; // 0.5 CPU
 
+// Managed Adminer (ADR 0014): a reconciler-owned DB browser on the prod node,
+// on a private network shared with postgres — never on the public `edge`
+// network (DB access stays off the public edge). Replaces the hand-deployed,
+// now-orphaned `majnet-adminer`. Routing to it (tailnet ingress) is ADR 0014
+// phase 2 — out of scope here; this brings it under management + caps it.
+const ADMINER_IMAGE: &str = "adminer:5";
+const ADMINER_NAME: &str = "majnet-adminer";
+const ADMIN_NETWORK: &str = "majnet-admin";
+const ADMINER_MEM: i64 = 256 * MB;
+const ADMINER_NANO_CPUS: i64 = 500_000_000; // 0.5 CPU
+
 /// Converge platform services onto their role's nodes. Non-fatal: a failure
 /// logs and lets project convergence proceed. Skipped in local/smoke mode —
 /// binding host 80/443 there is neither wanted nor safe.
@@ -67,6 +78,87 @@ pub async fn converge_platform(state: &AppState, nodes: &NodesFile, platform: &S
             &format!("FAILED: {e:#}"),
         );
     }
+    if let Err(e) = converge_adminer(&docker).await {
+        tracing::error!(error = format!("{e:#}"), "adminer convergence failed");
+        let _ = state.store.record(
+            &platform.commit,
+            "platform",
+            "prod",
+            "adminer",
+            &format!("FAILED: {e:#}"),
+        );
+    }
+}
+
+/// Managed Adminer (ADR 0014): a DB browser on a private network shared with
+/// postgres, capped, config-hash-managed like edge-main. Idempotent; recreated
+/// only when its spec changes. Best-effort — never blocks project convergence.
+async fn converge_adminer(docker: &Docker) -> Result<()> {
+    ensure_network(docker, ADMIN_NETWORK).await?;
+    // Put postgres (the engine humans browse) on the admin network so Adminer
+    // can reach it by name. Best-effort: postgres may not exist yet, or may
+    // already be attached — both are fine.
+    let _ = docker
+        .connect_network(
+            ADMIN_NETWORK,
+            bollard::models::NetworkConnectRequest {
+                container: crate::db::engine_container(DbEngine::Postgres).to_string(),
+                ..Default::default()
+            },
+        )
+        .await;
+
+    let env = vec!["ADMINER_DEFAULT_SERVER=majnet-postgres".to_string()];
+    let hash = adminer_hash(&env);
+    if running_with_hash(docker, ADMINER_NAME, &hash).await? {
+        return Ok(());
+    }
+    ensure_image(docker, ADMINER_IMAGE).await?;
+    remove_container(docker, ADMINER_NAME).await;
+    let created = docker
+        .create_container(
+            Some(qp::CreateContainerOptions {
+                name: Some(ADMINER_NAME.into()),
+                ..Default::default()
+            }),
+            ContainerCreateBody {
+                image: Some(ADMINER_IMAGE.into()),
+                env: Some(env),
+                labels: Some(HashMap::from([(LABEL_CONFIG.to_string(), hash)])),
+                host_config: Some(HostConfig {
+                    network_mode: Some(ADMIN_NETWORK.into()),
+                    memory: Some(ADMINER_MEM),
+                    nano_cpus: Some(ADMINER_NANO_CPUS),
+                    restart_policy: Some(RestartPolicy {
+                        name: Some(RestartPolicyNameEnum::UNLESS_STOPPED),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .context("creating adminer")?;
+    docker
+        .start_container(&created.id, None::<qp::StartContainerOptions>)
+        .await
+        .context("starting adminer")?;
+    tracing::info!("adminer deployed");
+    Ok(())
+}
+
+fn adminer_hash(env: &[String]) -> String {
+    let mut h = Sha256::new();
+    h.update(ADMINER_IMAGE.as_bytes());
+    h.update(ADMIN_NETWORK.as_bytes());
+    for e in env {
+        h.update(e.as_bytes());
+        h.update([0]);
+    }
+    h.update(ADMINER_MEM.to_le_bytes());
+    h.update(ADMINER_NANO_CPUS.to_le_bytes());
+    hex::encode(h.finalize())[..16].to_string()
 }
 
 async fn converge_edge_main(

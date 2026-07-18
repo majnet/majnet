@@ -83,6 +83,14 @@ per-project routed Adminer exists.
    project's tailnet ingress, auto-login plugin fed the project-role password,
    routed at `adminer.{project}.{base_domain}` (ADR 0013 wildcard). Needs the
    private node + `MAJNET_TAILNET`.
+   - 🚧 **Partial (2026-07-18):** the reconciler now *manages* a single
+     prod-level Adminer (`crates/reconciler/src/platform.rs::converge_adminer`) —
+     `adminer:5` on a private `majnet-admin` network shared with postgres (so it
+     resolves `majnet-postgres`), resource-capped (256M/0.5cpu), config-hash
+     managed like edge-main. This replaces a hand-deployed, orphaned container
+     (it had drifted onto a stale project network and could no longer reach
+     postgres). Still **not routed** (kept off the public `edge` network) and
+     **not auto-login yet** — tailnet ingress + the auto-login plugin remain.
 3. ✅ **Dashboard button.** "Open in Adminer ↗" on DB-backed apps (app detail),
    deep-linking `https://adminer.prod.majksa.net/?pgsql=majnet-postgres&db={project}_{app}_{class}`.
    Prod-only for now (the only env with an Adminer); Adminer host hardcoded to
