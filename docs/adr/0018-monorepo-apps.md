@@ -1,6 +1,6 @@
 # 0018 — Monorepo apps (one repo, many apps)
 
-**Status:** accepted (phase 1) · **Date:** 2026-07-19 · relates to [0009](0009-releases-are-tagged-image-publishes.md), [0012](0012-private-image-pull-auth.md)
+**Status:** accepted (phase 2) · **Date:** 2026-07-19 · relates to [0009](0009-releases-are-tagged-image-publishes.md), [0012](0012-private-image-pull-auth.md)
 
 ## Context
 
@@ -40,15 +40,35 @@ value are one monorepo; an app with no `repo` keeps its own repo named after it
 pushes the per-app images (`vX.Y.Z` / `sha-…` / `pr-N` tags on
 `ghcr.io/<org>/<repo>/<app>`). MajNet consumes them via the webhook.
 
+**Phase 2** makes the remaining bot-side repo operations repo-aware (they no
+longer assume `app == repo`):
+
+- **Cut-release is repo-wide.** A monorepo tag is one shared `vX.Y.Z` version
+  line: `cut` resolves the app's `repo`, tags `/repos/<org>/<repo>` at `main`
+  HEAD, and computes both the "last version" and (for `bump=auto`) the
+  commit range over the whole repo — the max release across every app sharing
+  it. One tag releases every app in the monorepo. (`releases.rs::app_repo`,
+  `do_cut`, `commits_since`, `resolve_commit`.)
+- **PR-preview comments** post to the app's actual repo (the monorepo) and carry
+  a **per-app marker** (`<!-- majnet-preview:<app> -->`), so several apps'
+  previews on one shared PR each get their own comment instead of clobbering a
+  single one. (`ephemeral.rs::comment_preview_url`.)
+- **Provenance** now resolves against the repo, so monorepo releases record the
+  tag's commit SHA like solo apps.
+- **Dashboard.** New-app creation exposes an optional "Monorepo repo" field
+  (`NewApp.repo`), so a monorepo app can be declared from the UI, not only via
+  `project.yaml` / API.
+
 ## Consequences
 
-- Monorepo apps deploy end to end today: declare with `repo`, push nested
-  images, MajNet renders + deploys them, and the shared repo is left untouched.
-- **Phase 2 (not yet):** the per-app repo operations still assume `app == repo`
-  and are unsupported for monorepo apps — **cut-release** (tags `/repos/<org>/<app>`),
-  **rename**, and the **PR-preview comment** (posts to the app's own repo). A
-  repo-wide tag/PR in a monorepo maps to several apps; that fan-out + a scaffolded
-  matrix CI are the phase-2 work. `resolve_commit` provenance is best-effort and
-  simply returns empty for monorepo releases.
+- Monorepo apps deploy, release, and preview end to end: declare with `repo`
+  (UI or `project.yaml`), push nested images, cut repo-wide releases, and get
+  per-app PR previews. The shared repo is left untouched (never scaffolded or
+  archived).
+- **Rename is rejected for monorepo apps.** Renaming a monorepo member can't
+  rename its shared repo (that repo hosts siblings), so `rename` returns a clear
+  error pointing the user at `project.yaml`. Full monorepo rename (repo
+  untouched, nested GHCR package `<repo>/<old>`→`<repo>/<new>` copied, nested pin
+  rewritten) is **phase 3**, alongside a scaffolded matrix CI for BYO monorepos.
 - App names remain unique within a project (already true) — required for the
   package-leaf → app mapping.

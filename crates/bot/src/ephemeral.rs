@@ -17,8 +17,6 @@ use std::collections::BTreeMap;
 
 use crate::AppState;
 
-const COMMENT_MARKER: &str = "<!-- majnet-preview -->";
-
 /// A `pr-<N>` image landed in GHCR: render + deploy the preview.
 pub async fn on_pr_build(
     state: &AppState,
@@ -209,32 +207,37 @@ async fn comment_preview_url(
     url: &str,
 ) -> Result<()> {
     let client = state.github.org_client(org).await?;
+    // The PR lives on the app's repo — the monorepo, if shared. A monorepo PR
+    // can produce several apps' previews, so the marker is per-app to keep each
+    // its own comment instead of clobbering a shared one.
+    let repo = crate::releases::app_repo(state, org, app).await;
+    let marker = format!("<!-- majnet-preview:{app} -->");
     let body = format!(
-        "{COMMENT_MARKER}\n🚀 Preview deployed: {url}\n\n_Updates on every push; removed 48 h after this PR closes (7 d hard limit)._"
+        "{marker}\n🚀 Preview deployed ({app}): {url}\n\n_Updates on every push; removed 48 h after this PR closes (7 d hard limit)._"
     );
 
     let comments: Vec<serde_json::Value> = client
         .get(
-            format!("/repos/{org}/{app}/issues/{pr}/comments?per_page=100"),
+            format!("/repos/{org}/{repo}/issues/{pr}/comments?per_page=100"),
             None::<&()>,
         )
         .await
         .unwrap_or_default();
     if let Some(existing) = comments
         .iter()
-        .find(|c| c["body"].as_str().unwrap_or("").starts_with(COMMENT_MARKER))
+        .find(|c| c["body"].as_str().unwrap_or("").starts_with(&marker))
     {
         let id = existing["id"].as_u64().context("comment has no id")?;
         let _: serde_json::Value = client
             .patch(
-                format!("/repos/{org}/{app}/issues/comments/{id}"),
+                format!("/repos/{org}/{repo}/issues/comments/{id}"),
                 Some(&serde_json::json!({ "body": body })),
             )
             .await?;
     } else {
         let _: serde_json::Value = client
             .post(
-                format!("/repos/{org}/{app}/issues/{pr}/comments"),
+                format!("/repos/{org}/{repo}/issues/{pr}/comments"),
                 Some(&serde_json::json!({ "body": body })),
             )
             .await?;

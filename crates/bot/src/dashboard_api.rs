@@ -1231,6 +1231,23 @@ pub async fn app_rename_post(
     // Declared in project.yaml ⇒ it has a source repo to rename.
     let mut project = read_project(&state, &org).await.map_err(bad_gateway)?;
     let declared = project.apps.iter().any(|a| a.name == app);
+
+    // A monorepo app shares its repo (and nested GHCR package) with siblings, so
+    // a rename can't rename the repo the way a standalone app does — it would
+    // pull the other apps' source along with it. Reject cleanly; renaming a
+    // monorepo member (repo untouched, nested package copied, nested pin
+    // rewritten) is phase-3 work. Nothing has mutated yet at this point.
+    if let Some(repo) = project
+        .apps
+        .iter()
+        .find(|a| a.name == app && a.is_monorepo())
+        .map(|a| a.repo().to_string())
+    {
+        return Err(bad_request(format!(
+            "{app} is a monorepo app sharing the '{repo}' repository with other apps — renaming monorepo apps isn't supported yet. Rename it in project.yaml (and its image path) manually.",
+        )));
+    }
+
     let client = state.github.org_client(&org).await.map_err(bad_gateway)?;
 
     // 0. Copy the app's own image(s) into the NEW GHCR package before anything
