@@ -70,6 +70,7 @@ export function NewApp() {
   const [domains, setDomains] = useState('')
   const [database, setDatabase] = useState('none')
   const [template, setTemplate] = useState<string>('web-app')
+  const [repo, setRepo] = useState('')
   const [classes, setClasses] = useState<string[]>(['production'])
   const [importing, setImporting] = useState(false)
   const [importRepo, setImportRepo] = useState('')
@@ -129,6 +130,11 @@ export function NewApp() {
             </Select>
           </Field>
         </div>
+        {createRepo && !importing && (
+          <Field label="Monorepo repo — optional" hint="Host this app in a shared GitHub repo (a monorepo) instead of its own. The platform won't scaffold or archive it — bring your own CI — and its image is ghcr.io/<org>/<repo>/<app>.">
+            <Input value={repo} onChange={(e) => setRepo(e.target.value)} placeholder="platform" />
+          </Field>
+        )}
         {createRepo && (
         <div className="rounded-lg border p-3">
           <label className="flex cursor-pointer items-center gap-2 text-sm font-medium">
@@ -163,6 +169,7 @@ export function NewApp() {
                 name: name.trim(), image: image.trim(), host: host.trim(), port: Number(port),
                 domains: domains.split('\n').map((s) => s.trim()).filter(Boolean),
                 classes, database: database === 'none' ? null : database, template, create_repo: createRepo,
+                ...(createRepo && !importing && repo.trim() ? { repo: repo.trim() } : {}),
                 ...(createRepo && importing ? { import: { repo: importRepo.trim(), token: importToken.trim() || null, env: importEnv.trim() || null } } : {}),
               },
             }))

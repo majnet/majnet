@@ -83,18 +83,32 @@ struct CommitDetail {
     message: String,
 }
 
+/// The GitHub repo hosting `app` (its own name unless it's a monorepo member).
+/// Best-effort via `project.yaml`; falls back to the app name.
+pub(crate) async fn app_repo(state: &AppState, org: &str, app: &str) -> String {
+    match crate::dashboard_api::read_project(state, org).await {
+        Ok(p) => p
+            .apps
+            .iter()
+            .find(|a| a.name == app)
+            .map(|a| a.repo().to_string())
+            .unwrap_or_else(|| app.to_string()),
+        Err(_) => app.to_string(),
+    }
+}
+
 /// Commit messages on `main` that aren't reachable from `base_tag`, via the
 /// GitHub compare API — the input to `classify_bump`.
 async fn commits_since(
     state: &AppState,
     org: &str,
-    app: &str,
+    repo: &str,
     base_tag: &str,
 ) -> Result<Vec<String>> {
     let client = state.github.org_client(org).await?;
     let cmp: Compare = client
         .get(
-            format!("/repos/{org}/{app}/compare/{base_tag}...main"),
+            format!("/repos/{org}/{repo}/compare/{base_tag}...main"),
             None::<&()>,
         )
         .await
@@ -132,10 +146,29 @@ pub async fn cut(
 }
 
 async fn do_cut(state: &AppState, org: &str, app: &str, bump: &str, actor: &str) -> Result<String> {
-    let last = state
-        .store
-        .releases(org, app)?
+    // The tag lives on the app's repo. For a monorepo the tag is repo-wide (one
+    // version line shared by every app in it), so both the "last version" and
+    // the commit range are computed over the repo, not the single app.
+    let repo = app_repo(state, org, app).await;
+    let monorepo = repo != app;
+    let repo_apps: Vec<String> = if monorepo {
+        crate::dashboard_api::read_project(state, org)
+            .await
+            .map(|p| {
+                p.apps
+                    .iter()
+                    .filter(|a| a.repo() == repo)
+                    .map(|a| a.name.clone())
+                    .collect()
+            })
+            .unwrap_or_else(|_| vec![app.to_string()])
+    } else {
+        vec![app.to_string()]
+    };
+    let last = repo_apps
         .iter()
+        .filter_map(|a| state.store.releases(org, a).ok())
+        .flatten()
         .filter_map(|r| parse_semver(&r.version))
         .max();
 
@@ -145,7 +178,7 @@ async fn do_cut(state: &AppState, org: &str, app: &str, bump: &str, actor: &str)
         match last {
             Some((x, y, z)) => {
                 let base = format!("v{x}.{y}.{z}");
-                let msgs = commits_since(state, org, app, &base).await?;
+                let msgs = commits_since(state, org, &repo, &base).await?;
                 anyhow::ensure!(
                     !msgs.is_empty(),
                     "no new commits since {base} — nothing to release"
@@ -164,13 +197,13 @@ async fn do_cut(state: &AppState, org: &str, app: &str, bump: &str, actor: &str)
 
     let next = format!("v{}", next_version(last, &effective)?);
     let client = state.github.org_client(org).await?;
-    let repo = format!("/repos/{org}/{app}");
-    let head = crate::git::get_branch_head(&client, &repo, "main")
+    let repo_path = format!("/repos/{org}/{repo}");
+    let head = crate::git::get_branch_head(&client, &repo_path, "main")
         .await?
-        .context("app repo has no main branch")?;
+        .with_context(|| format!("repo {org}/{repo} has no main branch"))?;
     let _: serde_json::Value = client
         .post(
-            format!("{repo}/git/refs"),
+            format!("{repo_path}/git/refs"),
             Some(&serde_json::json!({ "ref": format!("refs/tags/{next}"), "sha": head })),
         )
         .await
@@ -180,9 +213,14 @@ async fn do_cut(state: &AppState, org: &str, app: &str, bump: &str, actor: &str)
         Some(org),
         &format!("{app} {next} by {actor}"),
     )?;
-    tracing::info!(org, app, %next, actor, "cut release");
+    tracing::info!(org, app, %repo, %next, actor, "cut release");
+    let scope = if monorepo {
+        format!(" on {repo} (releases every app in the monorepo)")
+    } else {
+        String::new()
+    };
     Ok(format!(
-        "Cut {next}{note} — CI is building it; it'll appear in Releases, then Promote to production."
+        "Cut {next}{note}{scope} — CI is building it; it'll appear in Releases, then Promote to production."
     ))
 }
 
@@ -215,8 +253,10 @@ pub async fn record(
 /// lightweight and annotated tags. Best-effort — provenance, not correctness.
 async fn resolve_commit(state: &AppState, org: &str, app: &str, tag: &str) -> Result<String> {
     let client = state.github.org_client(org).await?;
+    // For a monorepo app the tag lives on the shared repo, not `/repos/{org}/{app}`.
+    let repo = app_repo(state, org, app).await;
     let commit: serde_json::Value = client
-        .get(format!("/repos/{org}/{app}/commits/{tag}"), None::<&()>)
+        .get(format!("/repos/{org}/{repo}/commits/{tag}"), None::<&()>)
         .await?;
     commit["sha"]
         .as_str()
