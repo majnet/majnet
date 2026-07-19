@@ -11,8 +11,8 @@
 
 use anyhow::{bail, Context, Result};
 use bollard::models::{
-    ContainerCreateBody, ContainerSummary, HealthConfig, HostConfig, RestartPolicy,
-    RestartPolicyNameEnum,
+    ContainerCreateBody, ContainerSummary, EndpointSettings, HealthConfig, HostConfig,
+    NetworkingConfig, RestartPolicy, RestartPolicyNameEnum,
 };
 use bollard::query_parameters as qp;
 use bollard::Docker;
@@ -44,7 +44,8 @@ pub const LABEL_CONFIG: &str = "majnet.config-hash";
 /// label) so running apps re-converge onto the fresh spec via a normal
 /// blue-green rollout instead of silently keeping a stale one.
 /// History: "2" — added the Traefik LB healthcheck labels.
-const SPEC_VERSION: &str = "2";
+///          "3" — added the stable intra-project network alias (ADR 0019).
+const SPEC_VERSION: &str = "3";
 
 pub fn network_name(project: &str) -> String {
     format!("proj-{project}")
@@ -456,13 +457,30 @@ fn container_spec(
         })
         .unwrap_or((None, None));
 
+    // Stable intra-project DNS alias (ADR 0019): sibling apps on the same
+    // project network resolve this app by its manifest name (e.g. an app's own
+    // reverse proxy → `sideline-server`), independent of the volatile
+    // `<project>-<app>-<class>-<hash>` container name that blue-green churns.
+    // The alias key must match `network_mode` for Docker to accept both.
+    let net = network_name(ctx.project);
+    let networking_config = NetworkingConfig {
+        endpoints_config: Some(HashMap::from([(
+            net.clone(),
+            EndpointSettings {
+                aliases: Some(vec![manifest.name.clone()]),
+                ..Default::default()
+            },
+        )])),
+    };
+
     ContainerCreateBody {
         image: Some(manifest.image.clone()),
         env: Some(env_list(manifest, extra_env)),
         labels: Some(labels),
         healthcheck: health,
+        networking_config: Some(networking_config),
         host_config: Some(HostConfig {
-            network_mode: Some(network_name(ctx.project)),
+            network_mode: Some(net),
             binds: mount_binds(ctx, manifest, with_secrets, secrets_dir),
             memory,
             nano_cpus,
