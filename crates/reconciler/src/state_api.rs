@@ -344,15 +344,31 @@ async fn alerts_test(
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))
 }
 
-/// `GET /api/metrics` — node + container metrics for every node, gathered live
-/// over the per-node Docker API. Read-only, VPN-gated (like `/api/events`).
+/// `GET /api/metrics` — node + container running state for every node. Served
+/// from the latest persisted snapshot (refreshed by the ~15s sampler), so the
+/// dashboard loads instantly instead of waiting on a live per-node Docker sweep.
+/// Falls back to a one-off live gather only before the first sample exists
+/// (fresh boot). Read-only, VPN-gated (like `/api/events`).
 async fn metrics_get(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<crate::metrics::NodeMetrics>>, (StatusCode, String)> {
-    crate::metrics::gather(&state)
-        .await
-        .map(Json)
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    use axum::response::IntoResponse;
+    match state
+        .store
+        .get_metrics_snapshot()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?
+    {
+        // Return the stored JSON verbatim — no deserialize/reserialize round-trip.
+        Some((_ts, json)) => Ok((
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            json,
+        )
+            .into_response()),
+        None => crate::metrics::gather(&state)
+            .await
+            .map(|n| Json(n).into_response())
+            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}"))),
+    }
 }
 
 #[derive(serde::Deserialize)]
