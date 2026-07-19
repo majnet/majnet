@@ -1228,37 +1228,44 @@ pub async fn app_rename_post(
     let manifest = merged_manifest(&app, &manifests).map_err(|e| bad_request(format!("{e:#}")))?;
     let stateful = !manifest.volumes.is_empty() || manifest.database.is_some();
 
-    // Declared in project.yaml ⇒ it has a source repo to rename.
+    // Declared in project.yaml ⇒ it has a source repo. A monorepo member keeps
+    // its shared repo (renaming that would drag the siblings along); only a solo
+    // app owns its repo and gets it renamed. Either way the GHCR package and the
+    // image pin follow the app name — nested (`<repo>/<app>`) for a monorepo,
+    // flat (`<app>`) for a solo app.
     let mut project = read_project(&state, &org).await.map_err(bad_gateway)?;
-    let declared = project.apps.iter().any(|a| a.name == app);
-
-    // A monorepo app shares its repo (and nested GHCR package) with siblings, so
-    // a rename can't rename the repo the way a standalone app does — it would
-    // pull the other apps' source along with it. Reject cleanly; renaming a
-    // monorepo member (repo untouched, nested package copied, nested pin
-    // rewritten) is phase-3 work. Nothing has mutated yet at this point.
-    if let Some(repo) = project
-        .apps
-        .iter()
-        .find(|a| a.name == app && a.is_monorepo())
-        .map(|a| a.repo().to_string())
-    {
-        return Err(bad_request(format!(
-            "{app} is a monorepo app sharing the '{repo}' repository with other apps — renaming monorepo apps isn't supported yet. Rename it in project.yaml (and its image path) manually.",
-        )));
-    }
+    let decl = project.apps.iter().find(|a| a.name == app);
+    let declared = decl.is_some();
+    let is_monorepo = decl.map(AppDecl::is_monorepo).unwrap_or(false);
+    // The image bases before/after the rename (full `ghcr.io/<org>/…` prefixes).
+    let old_base = decl
+        .map(|a| a.image_base(&org))
+        .unwrap_or_else(|| format!("ghcr.io/{org}/{app}"));
+    let new_decl = AppDecl {
+        name: new.clone(),
+        template: decl.map(|a| a.template.clone()).unwrap_or_default(),
+        repo: decl.and_then(|a| a.repo.clone()),
+    };
+    let new_base = new_decl.image_base(&org);
+    // The GHCR package names (after the org) the copy moves between.
+    let pkg = |base: &str| {
+        base.strip_prefix(&format!("ghcr.io/{org}/"))
+            .unwrap_or(base)
+            .to_string()
+    };
+    let (from_pkg, to_pkg) = (pkg(&old_base), pkg(&new_base));
 
     let client = state.github.org_client(&org).await.map_err(bad_gateway)?;
 
     // 0. Copy the app's own image(s) into the NEW GHCR package before anything
-    //    flips. Renaming the repo doesn't move existing packages, so without this
-    //    the rewritten pin `ghcr.io/<org>/<new>@<digest>` would 404. Done first so
-    //    a missing `write:packages` token aborts the rename cleanly (nothing
-    //    changed yet) rather than mid-flight.
+    //    flips. A repo rename doesn't move packages, and a monorepo repo isn't
+    //    renamed at all, so without this the rewritten pin `<new_base>@<digest>`
+    //    would 404. Done first so a missing `write:packages` token aborts the
+    //    rename cleanly (nothing changed yet) rather than mid-flight.
     let mut image_digests: std::collections::BTreeSet<String> = Default::default();
     for content in manifests.values() {
         if let (_, Some(digest)) =
-            rewrite_manifest_image(content, &org, &app, &new).map_err(bad_gateway)?
+            rewrite_manifest_image(content, &old_base, &new_base).map_err(bad_gateway)?
         {
             image_digests.insert(digest);
         }
@@ -1268,20 +1275,30 @@ pub async fn app_rename_post(
             .await
             .map_err(bad_gateway)?;
         for digest in &image_digests {
-            crate::registry::copy_image(&state.http, &org, &app, &new, digest, &user, &pass)
-                .await
-                .map_err(|e| {
-                    bad_gateway(anyhow::anyhow!(
-                        "copying image {digest} into the {new} package \
+            crate::registry::copy_image(
+                &state.http,
+                &org,
+                &from_pkg,
+                &to_pkg,
+                digest,
+                &user,
+                &pass,
+            )
+            .await
+            .map_err(|e| {
+                bad_gateway(anyhow::anyhow!(
+                    "copying image {digest} into the {to_pkg} package \
                          (needs a write:packages GHCR token): {e:#}"
-                    ))
-                })?;
+                ))
+            })?;
         }
     }
 
     // 1. Rename the source repo FIRST — before the ops commit flips
-    //    project.yaml — so org-sync never sees the old repo undeclared.
-    if declared {
+    //    project.yaml — so org-sync never sees the old repo undeclared. A
+    //    monorepo member shares its repo with siblings, so its repo is left
+    //    untouched (only its name + package + pin move).
+    if declared && !is_monorepo {
         crate::org_sync::rename_repo(&client, &org, &app, &new)
             .await
             .map_err(bad_gateway)?;
@@ -1294,9 +1311,9 @@ pub async fn app_rename_post(
         let content = String::from_utf8(bytes.clone()).map_err(|e| bad_gateway(e.into()))?;
         let content = if MANIFEST_FILES.contains(&rel.as_str()) {
             let named = set_manifest_name(&content, &new).map_err(bad_gateway)?;
-            // Keep the image name in sync with the repo (copied to the new
+            // Keep the image pin in sync with the new name (copied to the new
             // package in step 0); leaves custom/external images untouched.
-            rewrite_manifest_image(&named, &org, &app, &new)
+            rewrite_manifest_image(&named, &old_base, &new_base)
                 .map_err(bad_gateway)?
                 .0
         } else {
@@ -1356,7 +1373,9 @@ pub async fn app_rename_post(
         .map_err(bad_gateway)?;
     Ok(format!(
         "renamed {app} → {new}{}; render propagated{}{}",
-        if declared {
+        if is_monorepo {
+            " (monorepo repo kept; nested image copied — update the app name in the repo's build CI)"
+        } else if declared {
             " (source repo renamed)"
         } else {
             ""
@@ -1578,21 +1597,25 @@ fn set_manifest_name(yaml: &str, new: &str) -> Result<String> {
 /// the digest that must be copied into the new package. Images that don't follow
 /// the convention (custom/external, or a different name) are left untouched —
 /// returns `(unchanged, None)`. Sparse overlays without `image` are no-ops.
+/// Rewrite a digest-pinned top-level `image:` from `old_base@<digest>` to
+/// `new_base@<digest>`, returning the (possibly unchanged) YAML and the digest
+/// that matched (`None` = left untouched). The bases are the full
+/// `ghcr.io/<org>/…` prefixes — flat (`ghcr.io/<org>/<app>`) for a solo app,
+/// nested (`ghcr.io/<org>/<repo>/<app>`) for a monorepo member — so a custom or
+/// external image (a different prefix) is never rewritten.
 fn rewrite_manifest_image(
     yaml: &str,
-    org: &str,
-    old: &str,
-    new: &str,
+    old_base: &str,
+    new_base: &str,
 ) -> Result<(String, Option<String>)> {
     let mut v: serde_yaml::Value = serde_yaml::from_str(yaml)?;
-    let expected = format!("ghcr.io/{org}/{old}");
     let mut copied = None;
     if let serde_yaml::Value::Mapping(map) = &mut v {
         let key = serde_yaml::Value::from("image");
         if let Some(serde_yaml::Value::String(image)) = map.get(&key) {
-            if let Some((repo, digest)) = image.split_once('@') {
-                if repo == expected {
-                    let rewritten = format!("ghcr.io/{org}/{new}@{digest}");
+            if let Some((base, digest)) = image.split_once('@') {
+                if base == old_base {
+                    let rewritten = format!("{new_base}@{digest}");
                     copied = Some(digest.to_string());
                     map.insert(key, serde_yaml::Value::from(rewritten));
                 }
@@ -2126,26 +2149,48 @@ mod tests {
     #[test]
     fn rewrite_manifest_image_follows_the_repo() {
         let d = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        // Matches ghcr.io/<org>/<old> → rewritten, digest returned for copy.
-        let (out, copied) =
-            rewrite_manifest_image(&format!("image: ghcr.io/o/old@{d}\n"), "o", "old", "new")
-                .unwrap();
+        // Solo: ghcr.io/<org>/<old> → ghcr.io/<org>/<new>, digest returned for copy.
+        let (out, copied) = rewrite_manifest_image(
+            &format!("image: ghcr.io/o/old@{d}\n"),
+            "ghcr.io/o/old",
+            "ghcr.io/o/new",
+        )
+        .unwrap();
         assert_eq!(copied.as_deref(), Some(d));
         assert!(out.contains(&format!("ghcr.io/o/new@{d}")));
 
-        // A custom/external image name is left untouched.
+        // Monorepo: nested ghcr.io/<org>/<repo>/<old> → …/<repo>/<new>.
+        let (out, copied) = rewrite_manifest_image(
+            &format!("image: ghcr.io/o/platform/old@{d}\n"),
+            "ghcr.io/o/platform/old",
+            "ghcr.io/o/platform/new",
+        )
+        .unwrap();
+        assert_eq!(copied.as_deref(), Some(d));
+        assert!(out.contains(&format!("ghcr.io/o/platform/new@{d}")));
+
+        // A custom/external image (a different base) is left untouched.
         let (out, copied) = rewrite_manifest_image(
             &format!("image: ghcr.io/o/custom-name@{d}\n"),
-            "o",
-            "old",
-            "new",
+            "ghcr.io/o/old",
+            "ghcr.io/o/new",
         )
         .unwrap();
         assert!(copied.is_none());
         assert!(out.contains(&format!("ghcr.io/o/custom-name@{d}")));
 
+        // A solo base must NOT match a nested image that happens to share the leaf.
+        let (_, copied) = rewrite_manifest_image(
+            &format!("image: ghcr.io/o/platform/old@{d}\n"),
+            "ghcr.io/o/old",
+            "ghcr.io/o/new",
+        )
+        .unwrap();
+        assert!(copied.is_none());
+
         // A sparse overlay without an image is a no-op.
-        let (_, copied) = rewrite_manifest_image("env:\n  X: \"1\"\n", "o", "old", "new").unwrap();
+        let (_, copied) =
+            rewrite_manifest_image("env:\n  X: \"1\"\n", "ghcr.io/o/old", "ghcr.io/o/new").unwrap();
         assert!(copied.is_none());
     }
 

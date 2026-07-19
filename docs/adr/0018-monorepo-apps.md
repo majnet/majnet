@@ -65,11 +65,17 @@ longer assume `app == repo`):
   (UI or `project.yaml`), push nested images, cut repo-wide releases, and get
   per-app PR previews. The shared repo is left untouched (never scaffolded or
   archived).
-- **Rename is rejected for monorepo apps.** Renaming a monorepo member can't
-  rename its shared repo (that repo hosts siblings), so `rename` returns a clear
-  error pointing the user at `project.yaml`. Full monorepo rename (repo
-  untouched, nested GHCR package `<repo>/<old>`→`<repo>/<new>` copied, nested pin
-  rewritten) is **phase 3**.
+- **Rename supports monorepo members** (phase 3). Renaming a monorepo member
+  leaves the shared repo alone (it hosts siblings) and moves only what follows
+  the app name: the ops `apps/<app>/` dir, the `project.yaml` entry's name (the
+  `repo` stays), the nested GHCR package (`<repo>/<old>`→`<repo>/<new>`, copied
+  by digest so the pin stays valid), and the nested image pin
+  (`ghcr.io/<org>/<repo>/<old>`→`…/<new>`). A solo app still also renames its
+  own repo. `rewrite_manifest_image` now matches on the full image base, so it
+  handles both the flat and nested forms. **Caveat:** the monorepo's own build
+  CI is the owner's, so after a rename they must update the app's name in their
+  build workflow (matrix entry) — the platform copies the current image but
+  can't rewrite BYO CI; the response says so.
 - **Reusable build CI for BYO monorepos.** The build tier is a reusable
   workflow, `.github/workflows/app-build.yaml`: a monorepo owner calls it once
   per app (matrix), and it builds + pushes that app's nested image with the same
