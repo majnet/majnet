@@ -92,11 +92,16 @@ pub async fn on_package_published(
     Ok(())
 }
 
-/// A `vX.Y.Z` release tag: `v` followed by a digit (excludes `latest`, `valkey`,
-/// `sha-…`). The full semver shape is validated downstream by the git tag.
+/// A release tag: an optional `v` then a digit — matches both `vX.Y.Z` and the
+/// bare `X.Y.Z` some CIs emit (e.g. changesets tags the image with the raw
+/// package version). Excludes build-tier tags (`latest`, `sha-…`, `pr-…`) and
+/// non-version names (`valkey`, `main`), which don't start with a digit. The
+/// full semver shape is validated downstream by the git tag.
 pub(crate) fn is_version_tag(tag: &str) -> bool {
     tag.strip_prefix('v')
-        .and_then(|rest| rest.chars().next())
+        .unwrap_or(tag)
+        .chars()
+        .next()
         .is_some_and(|c| c.is_ascii_digit())
 }
 
@@ -211,9 +216,13 @@ mod tests {
         assert!(is_version_tag("v1.4.2"));
         assert!(is_version_tag("v2"));
         assert!(is_version_tag("v0.1.0-rc1"));
+        // Bare (no `v`) versions — changesets tags images with the raw version.
+        assert!(is_version_tag("0.38.7"));
+        assert!(is_version_tag("1.0.0"));
         assert!(!is_version_tag("latest"));
         assert!(!is_version_tag("valkey"));
         assert!(!is_version_tag("sha-abc123"));
+        assert!(!is_version_tag("pr-42"));
         assert!(!is_version_tag("v"));
         assert!(!is_version_tag("main"));
     }
