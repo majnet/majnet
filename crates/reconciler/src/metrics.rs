@@ -11,10 +11,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::AppState;
 
-/// How often the sampler records a raw metrics point.
-const SAMPLE_INTERVAL: Duration = Duration::from_secs(60);
-/// Run the compaction pass every Nth sample (bands are day-scale — 15 min is
-/// plenty and keeps each pass cheap).
+/// How often the sampler gathers + refreshes the latest snapshot. Short, so the
+/// dashboard's running-state (served from the snapshot) is never very stale.
+const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(15);
+/// Record a raw *history* point every Nth snapshot tick (≈60s — the raw-tier
+/// resolution the RRD compaction bands assume).
+const SAMPLE_EVERY: u64 = 4;
+/// Run the compaction pass every Nth history sample (bands are day-scale — 15
+/// min is plenty and keeps each pass cheap).
 const COMPACT_EVERY: u64 = 15;
 
 fn unix_now() -> i64 {
@@ -28,14 +32,32 @@ fn unix_now() -> i64 {
 /// one raw row per reachable node; periodically compact old rows into coarser
 /// tiers. Independent of alerting — history is kept whether or not alerts are on.
 pub async fn sample_loop(state: Arc<AppState>) {
+    // Prime the snapshot immediately so `/api/metrics` is fast from the very
+    // first request rather than waiting a full interval (or a live sweep).
+    if let Err(e) = refresh_snapshot(&state).await {
+        tracing::warn!(error = %format!("{e:#}"), "initial metrics snapshot failed");
+    }
     let mut ticks: u64 = 0;
+    let mut history_ticks: u64 = 0;
     loop {
-        tokio::time::sleep(SAMPLE_INTERVAL).await;
-        if let Err(e) = sample_once(&state).await {
-            tracing::warn!(error = %format!("{e:#}"), "metrics sampler tick failed");
-        }
+        tokio::time::sleep(SNAPSHOT_INTERVAL).await;
+        // One live gather per tick, reused for both the snapshot (every tick) and
+        // the history sample (every SAMPLE_EVERY ticks) — no duplicate sweeps.
+        let nodes = match gather(&state).await {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), "metrics gather failed");
+                continue;
+            }
+        };
+        write_snapshot(&state, &nodes);
         ticks += 1;
-        if ticks.is_multiple_of(COMPACT_EVERY) {
+        if !ticks.is_multiple_of(SAMPLE_EVERY) {
+            continue;
+        }
+        write_history(&state, &nodes);
+        history_ticks += 1;
+        if history_ticks.is_multiple_of(COMPACT_EVERY) {
             let now = unix_now();
             if let Err(e) = state.store.compact_metrics(now) {
                 tracing::warn!(error = %format!("{e:#}"), "metrics compaction failed");
@@ -47,32 +69,58 @@ pub async fn sample_loop(state: Arc<AppState>) {
     }
 }
 
-async fn sample_once(state: &AppState) -> Result<()> {
+/// Gather the fleet once and persist it as the latest snapshot (used to prime
+/// the cache at startup so `/api/metrics` is fast from the first request).
+async fn refresh_snapshot(state: &AppState) -> Result<()> {
+    let nodes = gather(state).await?;
+    write_snapshot(state, &nodes);
+    Ok(())
+}
+
+/// Persist the whole fleet snapshot (running state, incl. per-container image +
+/// state) as one JSON blob for `GET /api/metrics` to serve instantly.
+fn write_snapshot(state: &AppState, nodes: &[NodeMetrics]) {
+    match serde_json::to_string(nodes) {
+        Ok(json) => {
+            if let Err(e) = state.store.put_metrics_snapshot(unix_now(), &json) {
+                tracing::warn!(error = %format!("{e:#}"), "metrics snapshot write failed");
+            }
+        }
+        Err(e) => tracing::warn!(error = %format!("{e:#}"), "metrics snapshot serialize failed"),
+    }
+}
+
+/// Record one raw history point per reachable node (node-level + per-container).
+fn write_history(state: &AppState, nodes: &[NodeMetrics]) {
     let ts = unix_now();
-    for n in gather(state).await? {
+    for n in nodes {
         if !n.reachable {
             continue; // don't record zero-rows for an unreachable node
         }
-        state.store.insert_metric_sample(
+        if let Err(e) = state.store.insert_metric_sample(
             ts,
             &n.name,
             n.host_cpu_pct,
             n.mem_used,
             n.mem_total,
             n.containers_running,
-        )?;
+        ) {
+            tracing::warn!(error = %format!("{e:#}"), node = n.name, "metric sample write failed");
+            continue;
+        }
         for c in &n.apps {
-            state.store.insert_container_sample(
+            if let Err(e) = state.store.insert_container_sample(
                 ts,
                 &n.name,
                 &c.name,
                 c.cpu_pct,
                 c.mem_used as i64,
                 c.mem_limit as i64,
-            )?;
+            ) {
+                tracing::warn!(error = %format!("{e:#}"), container = c.name, "container sample write failed");
+            }
         }
     }
-    Ok(())
 }
 
 #[derive(Serialize)]

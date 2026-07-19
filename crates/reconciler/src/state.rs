@@ -432,6 +432,33 @@ impl Store {
         Ok(())
     }
 
+    /// Upsert the single latest fleet snapshot (serialized `Vec<NodeMetrics>`),
+    /// so `GET /api/metrics` can serve the running state without a live Docker
+    /// sweep. Only the current value is kept — no history here.
+    pub fn put_metrics_snapshot(&self, ts: i64, json: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO metrics_snapshot (id, ts, json) VALUES (0, ?1, ?2)",
+            rusqlite::params![ts, json],
+        )?;
+        Ok(())
+    }
+
+    /// The latest fleet snapshot as `(ts, json)`, or `None` before the first
+    /// sample (fresh boot) — the endpoint falls back to a live gather then.
+    pub fn get_metrics_snapshot(&self) -> Result<Option<(i64, String)>> {
+        use rusqlite::OptionalExtension;
+        let conn = self.conn.lock().unwrap();
+        let row = conn
+            .query_row(
+                "SELECT ts, json FROM metrics_snapshot WHERE id = 0",
+                [],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        Ok(row)
+    }
+
     /// Age samples into coarser, time-aligned buckets (RRD tiers). Each band is
     /// re-aggregated into `bucket`-aligned rows (avg), idempotently. Runs oldest
     /// band first so a row that has crossed two boundaries still lands correctly.
