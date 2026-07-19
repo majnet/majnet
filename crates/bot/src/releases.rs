@@ -565,13 +565,32 @@ async fn resolve_commit(state: &AppState, org: &str, app: &str, tag: &str) -> Re
     let client = state.github.org_client(org).await?;
     // For a monorepo app the tag lives on the shared repo, not `/repos/{org}/{app}`.
     let repo = app_repo(state, org, app).await;
-    let commit: serde_json::Value = client
-        .get(format!("/repos/{org}/{repo}/commits/{tag}"), None::<&()>)
-        .await?;
-    commit["sha"]
-        .as_str()
-        .map(String::from)
-        .context("commit lookup returned no sha")
+    // Try the tag verbatim first (`vX.Y.Z` / a solo app's tag), then — for a
+    // monorepo member — the changesets per-package form `@<repo>/<leaf>@<ver>`
+    // (its git tags are scoped even though the image tag is the bare version).
+    // `/commits/{ref}` resolves any ref; the scoped ref needs URL-encoding.
+    let mut refs = vec![tag.to_string()];
+    if repo != app {
+        let leaf = app.strip_prefix(&format!("{repo}-")).unwrap_or(app);
+        let ver = tag.strip_prefix('v').unwrap_or(tag);
+        refs.push(format!("@{repo}/{leaf}@{ver}"));
+    }
+    let mut last_err = None;
+    for r in &refs {
+        let enc = r.replace('@', "%40").replace('/', "%2F");
+        let res: Result<serde_json::Value, _> = client
+            .get(format!("/repos/{org}/{repo}/commits/{enc}"), None::<&()>)
+            .await;
+        match res {
+            Ok(commit) => {
+                if let Some(sha) = commit["sha"].as_str() {
+                    return Ok(sha.to_string());
+                }
+            }
+            Err(e) => last_err = Some(anyhow::Error::from(e)),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("commit lookup returned no sha")))
 }
 
 /// Re-point `apps/{app}/stable.yaml` at the newest recorded release (ADR 0009
