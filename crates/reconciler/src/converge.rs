@@ -15,7 +15,7 @@
 
 use anyhow::{Context, Result};
 use bollard::query_parameters as qp;
-use majnet_common::manifest::AppManifest;
+use majnet_common::manifest::{AppManifest, DbEngine};
 use majnet_common::platform::{NodesFile, ProjectsFile};
 use majnet_common::EnvClass;
 use std::collections::BTreeMap;
@@ -59,11 +59,23 @@ pub async fn converge_all(state: &AppState) -> Result<()> {
     // Non-fatal, and independent of any project.
     crate::platform::converge_platform(state, &nodes, &platform).await;
 
+    // DB name → the owning project's human role + derived password, collected
+    // while converging each app (production/Postgres only). Feeds the per-project
+    // Adminer auto-login (ADR 0014), converged after the loop once complete.
+    let mut adminer_creds: BTreeMap<String, (String, String)> = BTreeMap::new();
+
     for project in &projects.projects {
         for class in CLASSES {
-            if let Err(e) =
-                converge_project_class(state, &nodes, &platform, &project.name, &project.org, class)
-                    .await
+            if let Err(e) = converge_project_class(
+                state,
+                &nodes,
+                &platform,
+                &project.name,
+                &project.org,
+                class,
+                &mut adminer_creds,
+            )
+            .await
             {
                 tracing::error!(
                     project = project.name,
@@ -73,6 +85,19 @@ pub async fn converge_all(state: &AppState) -> Result<()> {
                 );
             }
         }
+    }
+
+    // Per-project Adminer (ADR 0014) — after the loop, with the full credential
+    // map. Non-fatal, like the other platform services.
+    if let Err(e) = crate::platform::converge_adminer(state, &nodes, &adminer_creds).await {
+        tracing::error!(error = format!("{e:#}"), "adminer convergence failed");
+        let _ = state.store.record(
+            &platform.commit,
+            "platform",
+            "prod",
+            "adminer",
+            &format!("FAILED: {e:#}"),
+        );
     }
     Ok(())
 }
@@ -84,6 +109,7 @@ async fn converge_project_class(
     project: &str,
     org: &str,
     class: EnvClass,
+    adminer_creds: &mut BTreeMap<String, (String, String)>,
 ) -> Result<()> {
     let Some(snapshot) =
         crate::snapshot::fetch(&state.http, &state.config, org, "ops", &class.env_branch()).await?
@@ -164,7 +190,7 @@ async fn converge_project_class(
             continue; // deliberately not in the keep-list
         }
 
-        let result = converge_one(state, &ctx, &snapshot, app, content).await;
+        let result = converge_one(state, &ctx, &snapshot, app, content, adminer_creds).await;
         match result {
             Ok(summary) => {
                 tracing::info!(project, class = class.as_str(), app, %summary, "converged");
@@ -244,6 +270,7 @@ async fn converge_one(
     snapshot: &crate::snapshot::Snapshot,
     app: &str,
     manifest_bytes: &[u8],
+    adminer_creds: &mut BTreeMap<String, (String, String)>,
 ) -> Result<String> {
     // Re-validate defensively (§12.2) — manifests arrive final from the bot,
     // but the reconciler trusts nothing it didn't check.
@@ -272,6 +299,20 @@ async fn converge_one(
     // provision the logical DB — both before the app (and its migrations) run.
     let extra_env = match &manifest.database {
         Some(db) => {
+            // Per-project Adminer auto-login map (ADR 0014): the prod Adminer
+            // browses `majnet-postgres`, so collect only production Postgres DBs
+            // → the project's human role + derived password (scoped to the
+            // project's own databases).
+            if ctx.class == EnvClass::Production && db.engine == DbEngine::Postgres {
+                if let Ok((role, password)) =
+                    crate::db::project_credentials(&state.config, db.engine, ctx.project, ctx.class)
+                {
+                    adminer_creds.insert(
+                        crate::db::db_name(ctx.project, app, ctx.class),
+                        (role, password),
+                    );
+                }
+            }
             if !ctx.dry_run {
                 crate::platform::ensure_engine(&state.config, ctx.docker, db.engine)
                     .await

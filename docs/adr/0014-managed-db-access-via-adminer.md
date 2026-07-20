@@ -89,8 +89,25 @@ per-project routed Adminer exists.
      resolves `majnet-postgres`), resource-capped (256M/0.5cpu), config-hash
      managed like edge-main. This replaces a hand-deployed, orphaned container
      (it had drifted onto a stale project network and could no longer reach
-     postgres). Still **not routed** (kept off the public `edge` network) and
-     **not auto-login yet** — tailnet ingress + the auto-login plugin remain.
+     postgres).
+   - ✅ **Tailnet route restored (2026-07-21):** the browser port is published on
+     the prod node's WireGuard IP (`<wg-ip>:8081`, never a public interface) so
+     the main-node Caddy route works again — it had regressed when the reconciler
+     took over (the hand-deployed container had published the port; the managed
+     one hadn't).
+   - ✅ **Per-project auto-login (2026-07-21):** rather than per-project Adminer
+     containers/routes (still blocked on the private node), the single prod
+     Adminer auto-logs in **scoped per project** on the existing route. The
+     reconciler collects, while converging each app, a map of production Postgres
+     `db-name → {project human role, derived password}` (`converge_all` →
+     `converge_adminer`) and stages it (`credentials.json`) plus a custom
+     `index.php` into the container. On the initial deep-link GET the entrypoint
+     looks up the requested DB and seeds `$_POST["auth"]` as `{project}_production`
+     — Adminer authenticates and redirects to its own `username`-bearing URLs,
+     where the hook no longer fires (no loop; real form POSTs untouched). Least
+     privilege: a session can only reach the deep-linked DB's project. The
+     per-project **routes** (`adminer.{project}.…`) remain the clean end state,
+     pending the private node.
 3. ✅ **Dashboard button.** "Open in Adminer ↗" on DB-backed apps (app detail),
    deep-linking `https://adminer.prod.majksa.net/?pgsql=majnet-postgres&db={project}_{app}_{class}`.
    Prod-only for now (the only env with an Adminer); Adminer host hardcoded to

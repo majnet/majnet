@@ -361,6 +361,21 @@ fn derive_project_password(
     )
 }
 
+/// The per-project human role + its derived password (ADR 0014) — the identity
+/// the per-project Adminer auto-logs in as. Exposed so the platform layer can
+/// build Adminer's DB→credentials map without duplicating the derivation.
+pub fn project_credentials(
+    config: &Config,
+    engine: DbEngine,
+    project: &str,
+    class: EnvClass,
+) -> Result<(String, String)> {
+    Ok((
+        project_role(project, class),
+        derive_project_password(config, engine, project, class)?,
+    ))
+}
+
 /// The engine's superuser password — the same stateless HMAC derivation as
 /// per-app users, domain-separated by the `root:` prefix. `platform::ensure_engine`
 /// seeds the engine's root-secret file with this so a rebuilt node (fresh
