@@ -75,6 +75,11 @@ export function AppDetail() {
   const appEvents = (events.data ?? []).filter((e) => e.action.trim().split(/\s+/).pop() === app)
   const imageOf = (f?: ManifestFile) => (f?.data as { image?: string } | null)?.image
   const prodImage = imageOf(manifest.data?.['production.yaml']) ?? imageOf(manifest.data?.['base.yaml'])
+  // A service (ADR 0021) has no repo, no CI, and one environment — so the repo
+  // link, Promote, Rename and the Releases section don't apply (and would error
+  // or orphan its services: entry). Keep the env zone (live status/logs/secrets),
+  // Configuration, Roll back, and Archive.
+  const isService = !!a?.service
 
   const classes: string[] = ENV_ORDER.filter((c) => a?.classes.includes(c))
   const [env, setEnv] = useState<string>('production')
@@ -118,15 +123,20 @@ export function AppDetail() {
       {/* ── app header ─────────────────────────────────────────────────────── */}
       <div className="flex flex-wrap items-start gap-4">
         <div className="min-w-0">
-          <h1 className="text-2xl font-semibold tracking-tight">{app}</h1>
+          <h1 className="flex flex-wrap items-center gap-2 text-2xl font-semibold tracking-tight">
+            {app}
+            {isService && <StatusBadge tone="accent">service · {a?.service}</StatusBadge>}
+          </h1>
           <div className="mt-1 truncate text-sm text-muted-foreground">
             {[short(a?.image), a?.database].filter(Boolean).join('  ·  ') || '—'}
           </div>
         </div>
         <div className="ml-auto flex items-center gap-2">
-          <Button asChild variant="outline" size="sm">
-            <a href={`https://github.com/${org}/${a?.repo ?? app}`} target="_blank" rel="noreferrer">GitHub ↗</a>
-          </Button>
+          {!isService && (
+            <Button asChild variant="outline" size="sm">
+              <a href={`https://github.com/${org}/${a?.repo ?? app}`} target="_blank" rel="noreferrer">GitHub ↗</a>
+            </Button>
+          )}
           <Button variant="outline" size="sm" onClick={() => setSheet('config')}>
             <SlidersHorizontal className="size-4" /> Configuration
           </Button>
@@ -135,11 +145,13 @@ export function AppDetail() {
             onConfirm={() => deploy.mutate(() => send(urls.rollback(org)))}>
             Roll back
           </ConfirmButton>
-          <ConfirmButton size="sm" title={`Promote ${app} to production?`}
-            description="An admin still merges the render PR in Deployments." confirmText="Promote"
-            onConfirm={() => deploy.mutate(() => send(urls.promote(org, app)))}>
-            <ArrowUpFromLine className="size-4" /> Promote
-          </ConfirmButton>
+          {!isService && (
+            <ConfirmButton size="sm" title={`Promote ${app} to production?`}
+              description="An admin still merges the render PR in Deployments." confirmText="Promote"
+              onConfirm={() => deploy.mutate(() => send(urls.promote(org, app)))}>
+              <ArrowUpFromLine className="size-4" /> Promote
+            </ConfirmButton>
+          )}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="outline" size="icon" className="size-9" aria-label="More actions">
@@ -147,11 +159,13 @@ export function AppDetail() {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              <DropdownMenuItem onSelect={() => setRenameOpen(true)}>Rename app…</DropdownMenuItem>
+              {/* Rename would move apps/<name>/ but not the services: entry — hide
+                  it for services until rename handles them. */}
+              {!isService && <DropdownMenuItem onSelect={() => setRenameOpen(true)}>Rename app…</DropdownMenuItem>}
               <DropdownMenuItem
                 variant="destructive"
                 onSelect={() => archive.mutate(() => send(urls.appArchive(org, app)))}>
-                Archive app
+                {isService ? 'Archive service' : 'Archive app'}
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -228,7 +242,8 @@ export function AppDetail() {
         </>
       )}
 
-      <Releases org={org} app={app} repo={a?.repo} prodImage={prodImage} />
+      {/* Releases (cut/draft/promote) need a repo + CI — N/A for a service. */}
+      {!isService && <Releases org={org} app={app} repo={a?.repo} prodImage={prodImage} />}
 
       {appEvents.length > 0 && (
         <>
