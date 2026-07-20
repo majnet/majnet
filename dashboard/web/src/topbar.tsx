@@ -242,12 +242,18 @@ function Releases() {
         {count === 0 && <div className="px-3 py-4 text-center text-xs text-muted-foreground">Nothing to release — every app is up to date.</div>}
         {count > 0 && (
           <div className="p-1.5">
-            {candidates.map((c) => (
-              <Link key={`${c.org}-${c.repo}`} to="/projects/$org/apps/$app" params={{ org: c.org, app: c.app }} onClick={() => setOpen(false)}
+            {candidates.map((c) => {
+              // The app being released — for a monorepo member show the bare leaf
+              // (`sideline-server` → `server`); a repo-wide/solo candidate keeps
+              // its name. Avoids the redundant "<project> <repo>" (== same word).
+              const leaf = c.app.startsWith(`${c.repo}-`) ? c.app.slice(c.repo.length + 1) : c.app
+              return (
+              <Link key={`${c.org}-${c.app}`} to="/projects/$org/apps/$app" params={{ org: c.org, app: c.app }} onClick={() => setOpen(false)}
                 className="block rounded-md px-2 py-1.5 hover:bg-accent">
                 <div className="flex items-center gap-1.5 text-[13px]">
                   <span className="font-medium">{nameOf(c.org)}</span>
-                  <span className="font-mono text-muted-foreground">{c.repo}</span>
+                  <span className="text-muted-foreground">›</span>
+                  <span className="font-mono text-foreground">{leaf}</span>
                   <span className="ml-auto font-mono text-[11px] text-muted-foreground">{relAge(c.updated_at)}</span>
                 </div>
                 <div className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground">
@@ -256,7 +262,8 @@ function Releases() {
                   <span className="ml-auto">{c.commit_count} commit{c.commit_count === 1 ? '' : 's'}</span>
                 </div>
               </Link>
-            ))}
+              )
+            })}
           </div>
         )}
       </PopoverContent>
