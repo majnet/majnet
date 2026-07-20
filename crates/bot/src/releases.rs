@@ -34,7 +34,13 @@ type ApiError = (StatusCode, String);
 type Ver = (u64, u64, u64);
 
 fn parse_semver(tag: &str) -> Option<Ver> {
-    let core = tag.strip_prefix('v')?.split(['-', '+']).next()?;
+    // Accept both `vX.Y.Z` and the bare `X.Y.Z` some CIs emit (e.g. changesets
+    // tags releases with the raw package version, no `v`).
+    let core = tag
+        .strip_prefix('v')
+        .unwrap_or(tag)
+        .split(['-', '+'])
+        .next()?;
     let mut it = core.split('.');
     let x = it.next()?.parse().ok()?;
     let y = it.next()?.parse().ok()?;
@@ -123,21 +129,34 @@ pub(crate) async fn app_package(state: &AppState, org: &str, app: &str) -> (Stri
 
 /// Commit messages on `main` that aren't reachable from `base_tag`, via the
 /// GitHub compare API — the input to `classify_bump`.
+/// Commit messages on `main` not reachable from the last release — trying each
+/// candidate base ref (the repo's release-tag scheme varies: `vX.Y.Z`, bare, or
+/// changesets `@<repo>/<leaf>@<ver>`) until a compare resolves. The scoped ref
+/// needs URL-encoding.
 async fn commits_since(
     state: &AppState,
     org: &str,
     repo: &str,
-    base_tag: &str,
+    base_tags: &[String],
 ) -> Result<Vec<String>> {
     let client = state.github.org_client(org).await?;
-    let cmp: Compare = client
-        .get(
-            format!("/repos/{org}/{repo}/compare/{base_tag}...main"),
-            None::<&()>,
-        )
-        .await
-        .with_context(|| format!("comparing {base_tag}...main"))?;
-    Ok(cmp.commits.into_iter().map(|c| c.commit.message).collect())
+    let mut last_err = None;
+    for base in base_tags {
+        let enc = base.replace('@', "%40").replace('/', "%2F");
+        let res: Result<Compare, _> = client
+            .get(
+                format!("/repos/{org}/{repo}/compare/{enc}...main"),
+                None::<&()>,
+            )
+            .await;
+        match res {
+            Ok(cmp) => return Ok(cmp.commits.into_iter().map(|c| c.commit.message).collect()),
+            Err(e) => last_err = Some(anyhow::Error::from(e)),
+        }
+    }
+    Err(last_err
+        .unwrap_or_else(|| anyhow::anyhow!("no base ref resolved"))
+        .context(format!("comparing {:?}...main", base_tags)))
 }
 
 #[derive(serde::Deserialize)]
@@ -172,7 +191,51 @@ pub async fn cut(
 /// The apps sharing `repo` and the highest release recorded across them (the
 /// repo-wide "last version"). For a solo app this is just that app; for a
 /// monorepo it spans every app in the repo, since the release is repo-wide.
-async fn repo_apps_and_last(state: &AppState, org: &str, repo: &str) -> (Vec<String>, Option<Ver>) {
+/// The highest recorded release across a repo's apps, with the app it came from
+/// and the version-prefix style to preserve (`v` if the recorded tag had one,
+/// else bare) so cut/draft output matches the repo's existing convention.
+struct LastRelease {
+    ver: Ver,
+    app: String,
+    prefix: &'static str,
+}
+
+impl LastRelease {
+    /// Candidate git-tag refs for this release, most-specific first, so the
+    /// commit diff resolves whichever release-tag scheme the repo uses: a
+    /// MajNet-cut `vX.Y.Z` / bare `X.Y.Z`, or a changesets per-package
+    /// `@<repo>/<leaf>@<X.Y.Z>` for a monorepo member.
+    fn tag_candidates(&self, repo: &str) -> Vec<String> {
+        let (x, y, z) = self.ver;
+        let core = format!("{x}.{y}.{z}");
+        let mut c = vec![
+            format!("{}{core}", self.prefix),
+            format!("v{core}"),
+            core.clone(),
+        ];
+        if self.app != repo {
+            let leaf = self
+                .app
+                .strip_prefix(&format!("{repo}-"))
+                .unwrap_or(&self.app);
+            c.push(format!("@{repo}/{leaf}@{core}"));
+        }
+        c.dedup();
+        c
+    }
+
+    /// The last version rendered in the repo's own prefix style (for display).
+    fn display(&self) -> String {
+        let (x, y, z) = self.ver;
+        format!("{}{x}.{y}.{z}", self.prefix)
+    }
+}
+
+async fn repo_apps_and_last(
+    state: &AppState,
+    org: &str,
+    repo: &str,
+) -> (Vec<String>, Option<LastRelease>) {
     let repo_apps: Vec<String> = crate::dashboard_api::read_project(state, org)
         .await
         .map(|p| {
@@ -188,12 +251,21 @@ async fn repo_apps_and_last(state: &AppState, org: &str, repo: &str) -> (Vec<Str
     } else {
         repo_apps
     };
-    let last = repo_apps
-        .iter()
-        .filter_map(|a| state.store.releases(org, a).ok())
-        .flatten()
-        .filter_map(|r| parse_semver(&r.version))
-        .max();
+    let mut last: Option<LastRelease> = None;
+    for app in &repo_apps {
+        for r in state.store.releases(org, app).into_iter().flatten() {
+            if let Some(ver) = parse_semver(&r.version) {
+                if last.as_ref().is_none_or(|l| ver > l.ver) {
+                    let prefix = if r.version.starts_with('v') { "v" } else { "" };
+                    last = Some(LastRelease {
+                        ver,
+                        app: app.clone(),
+                        prefix,
+                    });
+                }
+            }
+        }
+    }
     (repo_apps, last)
 }
 
@@ -221,17 +293,20 @@ async fn do_cut(state: &AppState, org: &str, app: &str, bump: &str, actor: &str)
     let repo = app_repo(state, org, app).await;
     let monorepo = repo != app;
     let (_repo_apps, last) = repo_apps_and_last(state, org, &repo).await;
+    // Preserve the repo's existing version-prefix style (`v` or bare); default
+    // to `v` for a brand-new app with no prior release.
+    let prefix = last.as_ref().map(|l| l.prefix).unwrap_or("v");
 
     // Resolve `auto` to a concrete bump from conventional commits since the last
     // release; explicit bumps pass through unchanged.
     let (effective, note) = if bump == "auto" {
-        match last {
-            Some((x, y, z)) => {
-                let base = format!("v{x}.{y}.{z}");
-                let msgs = commits_since(state, org, &repo, &base).await?;
+        match &last {
+            Some(l) => {
+                let msgs = commits_since(state, org, &repo, &l.tag_candidates(&repo)).await?;
                 anyhow::ensure!(
                     !msgs.is_empty(),
-                    "no new commits since {base} — nothing to release"
+                    "no new commits since {} — nothing to release",
+                    l.display()
                 );
                 let b = classify_bump(&msgs);
                 (
@@ -245,7 +320,10 @@ async fn do_cut(state: &AppState, org: &str, app: &str, bump: &str, actor: &str)
         (bump.to_string(), String::new())
     };
 
-    let next = format!("v{}", next_version(last, &effective)?);
+    let next = format!(
+        "{prefix}{}",
+        next_version(last.as_ref().map(|l| l.ver), &effective)?
+    );
     create_release_tag(state, org, &repo, &next).await?;
     state.store.log_event(
         "release-cut",
@@ -334,22 +412,28 @@ fn changelog_section(title: &str, items: &[String], out: &mut String) {
 /// operator-edited notes across a refresh.
 pub(crate) async fn prepare_draft(state: &AppState, org: &str, repo: &str) -> Result<()> {
     let (_apps, last) = repo_apps_and_last(state, org, repo).await;
-    let (version, bump, base, count, notes) = match last {
-        Some((x, y, z)) => {
-            let base = format!("v{x}.{y}.{z}");
-            let msgs = commits_since(state, org, repo, &base).await?;
+    let prefix = last.as_ref().map(|l| l.prefix).unwrap_or("v");
+    let (version, bump, base, count, notes) = match &last {
+        Some(l) => {
+            let msgs = commits_since(state, org, repo, &l.tag_candidates(repo)).await?;
             if msgs.is_empty() {
                 state.store.delete_release_draft(org, repo)?;
                 return Ok(());
             }
             let bump = classify_bump(&msgs);
-            let version = format!("v{}", next_version(Some((x, y, z)), bump)?);
+            let version = format!("{prefix}{}", next_version(Some(l.ver), bump)?);
             let notes = generate_changelog(&msgs);
-            (version, bump.to_string(), base, msgs.len() as u32, notes)
+            (
+                version,
+                bump.to_string(),
+                l.display(),
+                msgs.len() as u32,
+                notes,
+            )
         }
         // No release yet: a first-release draft (no base to diff a changelog from).
         None => (
-            "v0.0.1".to_string(),
+            format!("{prefix}0.0.1"),
             "patch".to_string(),
             String::new(),
             0,
@@ -810,6 +894,7 @@ pub async fn promote(
 mod tests {
     use super::{
         classify_bump, generate_changelog, next_version, parse_semver, production_overlay,
+        LastRelease,
     };
 
     fn msgs(v: &[&str]) -> Vec<String> {
@@ -880,14 +965,45 @@ mod tests {
         assert_eq!(parse_semver("v1.4.2"), Some((1, 4, 2)));
         assert_eq!(parse_semver("v0.0.3"), Some((0, 0, 3)));
         assert_eq!(parse_semver("v1.2.3-rc1"), Some((1, 2, 3)));
+        // Bare (no `v`) versions — changesets tags releases with the raw version.
+        assert_eq!(parse_semver("0.30.6"), Some((0, 30, 6)));
+        assert_eq!(parse_semver("1.2.3-rc1"), Some((1, 2, 3)));
         assert_eq!(parse_semver("latest"), None);
         assert_eq!(parse_semver("v1.2"), None);
+        assert_eq!(parse_semver("1.2"), None);
         assert_eq!(next_version(Some((0, 0, 3)), "patch").unwrap(), "0.0.4");
         assert_eq!(next_version(Some((0, 0, 3)), "minor").unwrap(), "0.1.0");
         assert_eq!(next_version(Some((1, 4, 2)), "major").unwrap(), "2.0.0");
         assert_eq!(next_version(None, "patch").unwrap(), "0.0.1");
         assert_eq!(next_version(None, "minor").unwrap(), "0.1.0");
         assert!(next_version(None, "huge").is_err());
+    }
+
+    #[test]
+    fn last_release_preserves_prefix_and_offers_scoped_tag() {
+        // A monorepo member with a bare recorded version → bare output prefix,
+        // and its candidate refs include the changesets scoped git tag.
+        let bare = LastRelease {
+            ver: (0, 30, 6),
+            app: "sideline-bot".into(),
+            prefix: "",
+        };
+        assert_eq!(bare.display(), "0.30.6");
+        let cands = bare.tag_candidates("sideline");
+        assert!(cands.contains(&"0.30.6".to_string()));
+        assert!(cands.contains(&"@sideline/bot@0.30.6".to_string()));
+
+        // A solo app with a `v`-prefixed version → `v` output, no scoped tag.
+        let vpref = LastRelease {
+            ver: (1, 2, 3),
+            app: "blog".into(),
+            prefix: "v",
+        };
+        assert_eq!(vpref.display(), "v1.2.3");
+        assert!(!vpref
+            .tag_candidates("blog")
+            .iter()
+            .any(|c| c.starts_with('@')));
     }
 
     const NEW: &str = "ghcr.io/o/a@sha256:new";

@@ -478,6 +478,11 @@ function Releases({ org, app, prodImage }: { org: string; app: string; prodImage
   const m = useApiMutation({ invalidate: [['deploys', org], ['releases', org, app], ['events']] })
   const releases = q.data ?? []
   const nv = nextVersions(releases.map((r) => r.version))
+  const PAGE = 15
+  const [page, setPage] = useState(0)
+  const pageCount = Math.max(1, Math.ceil(releases.length / PAGE))
+  const clamped = Math.min(page, pageCount - 1)
+  const shown = releases.slice(clamped * PAGE, clamped * PAGE + PAGE)
   if (q.isLoading || q.error) return null
   return (
     <>
@@ -504,7 +509,7 @@ function Releases({ org, app, prodImage }: { org: string; app: string; prodImage
         <p className="text-sm text-muted-foreground">No releases yet. Tag <code className="font-mono">vX.Y.Z</code> in the app repo, or Backfill from the registry.</p>
       )}
       <div className="flex flex-col gap-2">
-        {releases.map((r) => {
+        {shown.map((r) => {
           const onProd = !!prodImage && r.app_image === prodImage
           return (
             <div key={r.version} className="flex items-center gap-3 rounded-lg border px-4 py-2.5">
@@ -529,6 +534,16 @@ function Releases({ org, app, prodImage }: { org: string; app: string; prodImage
           )
         })}
       </div>
+      {pageCount > 1 && (
+        <div className="mt-3 flex items-center justify-between text-sm text-muted-foreground">
+          <span>{clamped * PAGE + 1}–{clamped * PAGE + shown.length} of {releases.length}</span>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" disabled={clamped === 0} onClick={() => setPage(clamped - 1)}>← Prev</Button>
+            <span>Page {clamped + 1} / {pageCount}</span>
+            <Button variant="outline" size="sm" disabled={clamped >= pageCount - 1} onClick={() => setPage(clamped + 1)}>Next →</Button>
+          </div>
+        </div>
+      )}
     </>
   )
 }
