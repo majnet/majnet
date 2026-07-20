@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/majnet-mark-dark.svg">
+    <img src="docs/assets/majnet-mark-light.svg" alt="MajNet" width="72" height="72">
+  </picture>
+</p>
+
 # MajNet v2
 
 A self-hosted deployment platform: **GitOps-driven**, built on **plain Docker** with static trust-zoned placement across three nodes, organized around **projects** — each project is its own GitHub organization, fully managed by the platform.

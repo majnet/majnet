@@ -270,7 +270,7 @@ pub async fn enroll_handler(
         .map_err(fail)?;
     state.save(&app.config.state_path()).map_err(fail)?;
     let body = format!(
-        r#"<div class="topbar"><div class="brand"><div class="logo"></div>
+        r#"<div class="topbar"><div class="brand">{LOGO_SVG}
 <div><h1>MajNet setup</h1><p class="sub">Node enrollment — {role}</p></div></div></div>
 <div class="panel"><div class="panel-head"><div class="eyebrow good-t">Enrolled</div>
 <h2>{role} node is up</h2>
@@ -604,7 +604,7 @@ fn shell(s: &SetupState, active: u8, main: &str) -> String {
 
     let body = format!(
         r#"<div class="wrap">
-<div class="topbar"><div class="brand"><div class="logo" aria-hidden="true"></div>
+<div class="topbar"><div class="brand">{LOGO_SVG}
 <div><h1>MajNet setup</h1><p class="sub">Bring your control plane online</p></div></div>
 <div class="context">{host_chip}{org_chip}</div></div>
 <div class="grid"><nav class="stepper" aria-label="Setup steps">{rail}</nav>
@@ -629,9 +629,17 @@ fn doc(body: &str) -> String {
     format!(
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" type="image/svg+xml" href="{FAVICON}">
 <title>MajNet setup</title><style>{STYLE}</style></head><body>{body}{SCRIPT}</body></html>"#
     )
 }
+
+// The MajNet logo mark (M/N monogram + teal accent). Ink is `currentColor` so it
+// inherits the topbar text color; sized by `.logo`.
+const LOGO_SVG: &str = r##"<svg class="logo" viewBox="0 0 64 64" fill="none" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><mask id="wizmark"><rect x="-4" y="-4" width="72" height="72" fill="white"/><circle cx="11" cy="17" r="8.5" fill="black"/><circle cx="53" cy="17" r="8.5" fill="black"/><circle cx="32" cy="41" r="7.9" fill="black"/></mask><g mask="url(#wizmark)" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"><path d="M 11 49 L 11 17 L 32 41 L 53 17 L 53 49"/><path d="M 11 17 A 29 29 0 0 1 53 17"/></g><circle cx="32" cy="41" r="5.7" fill="#0FBFB2"/><circle cx="11" cy="17" r="4.3" fill="none" stroke="currentColor" stroke-width="4"/><circle cx="53" cy="17" r="4.3" fill="none" stroke="currentColor" stroke-width="4"/></svg>"##;
+
+// Theme-adaptive favicon (dark ink on light, light ink on dark) as a data URI.
+const FAVICON: &str = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2NCIgaGVpZ2h0PSI2NCIgdmlld0JveD0iMCAwIDY0IDY0Ij4KPHN0eWxlPgogIC5pbmsgeyBzdHJva2U6ICMxMTFBMjI7IH0KICBAbWVkaWEgKHByZWZlcnMtY29sb3Itc2NoZW1lOiBkYXJrKSB7IC5pbmsgeyBzdHJva2U6ICNFNUU3RUI7IH0gfQo8L3N0eWxlPgo8ZGVmcz48bWFzayBpZD0iZnVzaW9uLXYxTCI+PHJlY3QgeD0iLTQiIHk9Ii00IiB3aWR0aD0iNzIiIGhlaWdodD0iNzIiIGZpbGw9IndoaXRlIi8+CiAgPGNpcmNsZSBjeD0iMTEiIGN5PSIxNyIgcj0iOC41IiBmaWxsPSJibGFjayIvPjxjaXJjbGUgY3g9IjUzIiBjeT0iMTciIHI9IjguNSIgZmlsbD0iYmxhY2siLz48Y2lyY2xlIGN4PSIzMiIgY3k9IjQxIiByPSI3LjkiIGZpbGw9ImJsYWNrIi8+PC9tYXNrPjwvZGVmcz4KPGcgY2xhc3M9ImluayIgbWFzaz0idXJsKCNmdXNpb24tdjFMKSIgZmlsbD0ibm9uZSIgc3Ryb2tlLXdpZHRoPSI0LjAiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+CiAgPHBhdGggZD0iTSAxMSA0OSBMIDExIDE3IEwgMzIgNDEgTCA1MyAxNyBMIDUzIDQ5Ii8+PHBhdGggZD0iTSAxMSAxNyBBIDI5IDI5IDAgMCAxIDUzIDE3Ii8+PC9nPgo8Y2lyY2xlIGN4PSIzMiIgY3k9IjQxIiByPSI1LjciIGZpbGw9IiMwRkJGQjIiLz4KPGNpcmNsZSBjbGFzcz0iaW5rIiBjeD0iMTEiIGN5PSIxNyIgcj0iNC4zIiBmaWxsPSJub25lIiBzdHJva2Utd2lkdGg9IjQuMCIvPgo8Y2lyY2xlIGNsYXNzPSJpbmsiIGN4PSI1MyIgY3k9IjE3IiByPSI0LjMiIGZpbGw9Im5vbmUiIHN0cm9rZS13aWR0aD0iNC4wIi8+Cjwvc3ZnPgo=";
 
 const SCRIPT: &str = r#"<script>
 document.querySelectorAll('.copy').forEach(function(b){
@@ -671,10 +679,7 @@ code{font-family:var(--mono);font-size:.9em}
 .mid{max-width:560px;margin:8vh auto 0;padding:0 24px}
 .topbar{display:flex;align-items:center;gap:14px;margin-bottom:26px;flex-wrap:wrap}
 .brand{display:flex;align-items:center;gap:11px}
-.logo{width:34px;height:34px;border-radius:9px;flex:none;border:1px solid var(--border-strong);position:relative;
-background:radial-gradient(circle at 30% 30%,var(--accent) 0 3.2px,transparent 3.6px),
-radial-gradient(circle at 72% 34%,var(--accent) 0 3.2px,transparent 3.6px),
-radial-gradient(circle at 50% 74%,var(--accent) 0 3.2px,transparent 3.6px),var(--accent-soft)}
+.logo{width:34px;height:34px;flex:none}
 .brand h1{font-size:17px;font-weight:680;letter-spacing:-.01em;margin:0}
 .brand .sub{font-size:12.5px;color:var(--muted);margin:0}
 .context{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap}
