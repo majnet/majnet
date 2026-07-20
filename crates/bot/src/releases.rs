@@ -478,6 +478,60 @@ pub(crate) async fn on_app_main_push(state: &AppState, org: &str, repo: &str) {
 
 /// `GET /api/releases/{org}/{app}/draft` — the pending draft for the app's repo
 /// (`null` when none). Read-only, like `list`.
+/// A fleet-wide release candidate — a repo with a pending draft — for the
+/// top-bar "Releases" surface. `app` is a representative member of the repo, so
+/// the dashboard can deep-link to that app's Releases section.
+#[derive(serde::Serialize)]
+pub struct DraftSummary {
+    pub org: String,
+    pub app: String,
+    pub repo: String,
+    pub version: String,
+    pub bump: String,
+    pub commit_count: u32,
+    pub updated_at: String,
+}
+
+/// `GET /api/releases/drafts` — every pending release candidate across all
+/// projects (one row per repo; a monorepo's draft is repo-wide). Backs the
+/// top-bar "Releases" popover, mirroring `/deploys`.
+pub async fn drafts_all(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<DraftSummary>>, ApiError> {
+    let drafts = state
+        .store
+        .all_release_drafts()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Group by org so each project.yaml is read once, then map every draft's
+    // repo to a representative app for the deep-link (solo app: repo == app).
+    let mut by_org: std::collections::BTreeMap<String, Vec<ReleaseDraft>> =
+        std::collections::BTreeMap::new();
+    for (org, d) in drafts {
+        by_org.entry(org).or_default().push(d);
+    }
+    let mut out = Vec::new();
+    for (org, ds) in by_org {
+        let project = crate::dashboard_api::read_project(&state, &org).await.ok();
+        for d in ds {
+            let app = project
+                .as_ref()
+                .and_then(|p| p.apps.iter().find(|a| a.repo() == d.repo))
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| d.repo.clone());
+            out.push(DraftSummary {
+                org: org.clone(),
+                app,
+                repo: d.repo,
+                version: d.version,
+                bump: d.bump,
+                commit_count: d.commit_count,
+                updated_at: d.updated_at,
+            });
+        }
+    }
+    Ok(Json(out))
+}
+
 pub async fn draft_get(
     State(state): State<Arc<AppState>>,
     Path((org, app)): Path<(String, String)>,

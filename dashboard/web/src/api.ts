@@ -62,6 +62,10 @@ export interface DeployFile {
 export interface DeployPr {
   number: number; title: string; class: string; base: string; created_at: string; mergeable: boolean | null; files: DeployFile[]
 }
+/** A fleet-wide release candidate — a repo with a pending draft (one per repo). */
+export interface ReleaseCandidate {
+  org: string; app: string; repo: string; version: string; bump: string; commit_count: number; updated_at: string
+}
 export interface ManifestFile { yaml: string; data: unknown }
 export interface Member { user: string; role: string }
 export interface RegistryStatus { configured: boolean }
@@ -173,6 +177,7 @@ export const urls = {
   appSecrets: (org: string, app: string) => `${BOT}/secrets/${encodeURIComponent(org)}/${encodeURIComponent(app)}`,
   appSecretValues: (org: string, cls: string, app: string) =>
     `${RECON}/secrets/${encodeURIComponent(org)}/${encodeURIComponent(cls)}/${encodeURIComponent(app)}`,
+  releaseDrafts: `${BOT}/releases/drafts`,
   releases: (org: string, app: string) => `${BOT}/releases/${encodeURIComponent(org)}/${encodeURIComponent(app)}`,
   releaseCut: (org: string, app: string, bump: string) =>
     `${BOT}/releases/${encodeURIComponent(org)}/${encodeURIComponent(app)}/cut?bump=${bump}`,
@@ -322,5 +327,7 @@ export const useReleases = (org: string, app: string) =>
   useQuery({ queryKey: ['releases', org, app], queryFn: () => getJSON<StoredRelease[]>(urls.releases(org, app)) })
 export const useReleaseDraft = (org: string, app: string) =>
   useQuery({ queryKey: ['releaseDraft', org, app], queryFn: () => getJSON<ReleaseDraft | null>(urls.releaseDraft(org, app)) })
+export const useReleaseDrafts = () =>
+  useQuery({ queryKey: ['releaseDrafts'], queryFn: () => getJSON<ReleaseCandidate[]>(urls.releaseDrafts), refetchInterval: 30_000 })
 export const useArchivedApps = (org: string) =>
   useQuery({ queryKey: ['archived', org], queryFn: () => getJSON<string[]>(urls.archivedApps(org)) })

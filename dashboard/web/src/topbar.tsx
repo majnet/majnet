@@ -1,8 +1,8 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { Link } from '@tanstack/react-router'
 import { useQueries } from '@tanstack/react-query'
-import { Bell, GitPullRequest, Loader2 } from 'lucide-react'
-import { getJSON, parseAt, urls, useEvents, useProjects, type DeployPr, type Event } from './api'
+import { Bell, GitPullRequest, Loader2, Tag } from 'lucide-react'
+import { getJSON, parseAt, urls, useEvents, useProjects, useReleaseDrafts, type DeployPr, type Event } from './api'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 
@@ -209,10 +209,66 @@ function Notifications() {
   )
 }
 
+// ── release candidates (all projects) ─────────────────────────────────────────
+// Repos with a pending draft (unreleased commits since the last release) —
+// surfaced like Deployments so "these apps have changes worth releasing" is
+// visible at a glance. Each row deep-links to that app's Releases section, where
+// the draft is reviewed + submitted.
+function Releases() {
+  const drafts = useReleaseDrafts()
+  const projects = useProjects()
+  const candidates = drafts.data ?? []
+  const nameOf = (org: string) => projects.data?.find((p) => p.org === org)?.name ?? org
+  const [open, setOpen] = useState(false)
+  const count = candidates.length
+  const bumpChip = (b: string) =>
+    b === 'major' ? 'bg-destructive/10 text-destructive'
+    : b === 'minor' ? 'bg-primary/10 text-primary'
+    : 'bg-secondary text-secondary-foreground'
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button variant="ghost" size="sm" className="gap-1.5 text-muted-foreground" title="Release candidates">
+          <Tag className="size-4" /> Releases
+          {count > 0 && <span className="rounded-full border px-1.5 font-mono text-[11px]">{count}</span>}
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-96 p-0">
+        <div className="border-b px-3 py-2.5">
+          <span className="text-sm font-semibold">Release candidates</span>
+          <p className="text-xs text-muted-foreground">Repos with unreleased changes — open one to review + release.</p>
+        </div>
+        {count === 0 && <div className="px-3 py-4 text-center text-xs text-muted-foreground">Nothing to release — every app is up to date.</div>}
+        {count > 0 && (
+          <div className="p-1.5">
+            {candidates.map((c) => (
+              <Link key={`${c.org}-${c.repo}`} to="/projects/$org/apps/$app" params={{ org: c.org, app: c.app }} onClick={() => setOpen(false)}
+                className="block rounded-md px-2 py-1.5 hover:bg-accent">
+                <div className="flex items-center gap-1.5 text-[13px]">
+                  <span className="font-medium">{nameOf(c.org)}</span>
+                  <span className="font-mono text-muted-foreground">{c.repo}</span>
+                  <span className="ml-auto font-mono text-[11px] text-muted-foreground">{relAge(c.updated_at)}</span>
+                </div>
+                <div className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground">
+                  <span>→ <span className="font-mono text-foreground">{c.version}</span></span>
+                  <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${bumpChip(c.bump)}`}>{c.bump}</span>
+                  <span className="ml-auto">{c.commit_count} commit{c.commit_count === 1 ? '' : 's'}</span>
+                </div>
+              </Link>
+            ))}
+          </div>
+        )}
+      </PopoverContent>
+    </Popover>
+  )
+}
+
 export function TopBar() {
   return (
     <header className="sticky top-0 z-20 flex h-12 items-center gap-1 border-b bg-background/80 px-4 backdrop-blur md:px-6">
       <div className="flex-1" />
+      <Releases />
       <Deployments />
       <Notifications />
     </header>

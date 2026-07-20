@@ -335,6 +335,34 @@ impl Store {
         .context("loading release draft")
     }
 
+    /// Every pending draft across all orgs (org, draft), newest first — the
+    /// fleet-wide set of release candidates for the top-bar "Releases" surface.
+    pub fn all_release_drafts(&self) -> Result<Vec<(String, ReleaseDraft)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT org, repo, version, bump, base, commit_count, notes, notes_edited, updated_at
+             FROM release_drafts ORDER BY updated_at DESC",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    ReleaseDraft {
+                        repo: row.get(1)?,
+                        version: row.get(2)?,
+                        bump: row.get(3)?,
+                        base: row.get(4)?,
+                        commit_count: row.get(5)?,
+                        notes: row.get(6)?,
+                        notes_edited: row.get::<_, i64>(7)? != 0,
+                        updated_at: row.get(8)?,
+                    },
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     /// Prepare (or refresh) a repo's draft with freshly computed fields. The
     /// generated `notes` replace the stored ones only while the operator hasn't
     /// edited them — an edited draft keeps its notes but still tracks the latest
@@ -486,6 +514,25 @@ mod tests {
 
         s.delete_release_draft("o", "api").unwrap();
         assert!(s.release_draft("o", "api").unwrap().is_none());
+    }
+
+    #[test]
+    fn all_release_drafts_spans_orgs() {
+        let s = store();
+        assert!(s.all_release_drafts().unwrap().is_empty());
+        s.upsert_release_draft("org-a", &draft("api", "v1.0.0", "n"))
+            .unwrap();
+        s.upsert_release_draft("org-b", &draft("web", "v2.1.0", "n"))
+            .unwrap();
+        let all = s.all_release_drafts().unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all
+            .iter()
+            .any(|(org, d)| org == "org-a" && d.repo == "api" && d.version == "v1.0.0"));
+        assert!(all.iter().any(|(org, d)| org == "org-b" && d.repo == "web"));
+        // Cleared drafts drop out of the fleet-wide list.
+        s.delete_release_draft("org-a", "api").unwrap();
+        assert_eq!(s.all_release_drafts().unwrap().len(), 1);
     }
 
     #[test]
