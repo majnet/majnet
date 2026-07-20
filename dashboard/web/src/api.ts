@@ -89,6 +89,13 @@ export interface ReleaseDraft {
   repo: string; version: string; bump: string; base: string
   commit_count: number; notes: string; notes_edited: boolean; updated_at: string
 }
+/** Per-app release policy (ADR 0020), stored in project.yaml. A `scope` opts the
+ *  app into per-app scoped release tags `@<scope>/<leaf>@<ver>`; `autorelease`
+ *  auto-cuts on merge for paths that match. Null (no block) ⇒ repo-wide vX.Y.Z. */
+export type Autorelease = 'off' | 'patch' | 'auto'
+export interface ReleaseConfig {
+  scope: string | null; autorelease: Autorelease; paths: string[]
+}
 /** Build metadata an app reported at its `/info` endpoint, recorded per env at
  *  deploy time. `info` is whatever JSON the app returned (or null). */
 export interface AppInfo {
@@ -193,6 +200,10 @@ export const urls = {
     `${BOT}/releases/${encodeURIComponent(org)}/${encodeURIComponent(app)}/draft/notes`,
   releaseDraftSubmit: (org: string, app: string) =>
     `${BOT}/releases/${encodeURIComponent(org)}/${encodeURIComponent(app)}/draft/submit`,
+  releaseCutRepo: (org: string, repo: string, bump: string) =>
+    `${BOT}/releases/${encodeURIComponent(org)}/${encodeURIComponent(repo)}/cut-repo?bump=${bump}`,
+  releaseConfig: (org: string, app: string) =>
+    `${BOT}/apps/${encodeURIComponent(org)}/${encodeURIComponent(app)}/release-config`,
   version: `${BOT}/platform/version`,
   registry: `${BOT}/platform/registry`,
   dashboardLayout: `${BOT}/platform/dashboard-layout`,
@@ -329,5 +340,7 @@ export const useReleaseDraft = (org: string, app: string) =>
   useQuery({ queryKey: ['releaseDraft', org, app], queryFn: () => getJSON<ReleaseDraft | null>(urls.releaseDraft(org, app)) })
 export const useReleaseDrafts = () =>
   useQuery({ queryKey: ['releaseDrafts'], queryFn: () => getJSON<ReleaseCandidate[]>(urls.releaseDrafts), refetchInterval: 30_000 })
+export const useReleaseConfig = (org: string, app: string) =>
+  useQuery({ queryKey: ['releaseConfig', org, app], queryFn: () => getJSON<ReleaseConfig | null>(urls.releaseConfig(org, app)) })
 export const useArchivedApps = (org: string) =>
   useQuery({ queryKey: ['archived', org], queryFn: () => getJSON<string[]>(urls.archivedApps(org)) })

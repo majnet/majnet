@@ -44,6 +44,48 @@ pub struct AppDecl {
     /// GitHub repo hosting this app, if not its own (`<name>`). Shared = monorepo.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
+    /// Per-app release policy (ADR 0020). Absent ⇒ today's repo-wide `vX.Y.Z`
+    /// releasing; present with a `scope` ⇒ per-app tags `@<scope>/<leaf>@<ver>`
+    /// and (optionally) autorelease on merge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release: Option<ReleaseConfig>,
+}
+
+/// Per-app release policy (ADR 0020) — GitOps config, written by the dashboard.
+///
+/// A **scope** opts the app into per-app release tags (`@<scope>/<leaf>@<ver>`,
+/// Changesets-style) instead of the repo-wide `vX.Y.Z` line; the leaf is the
+/// app's image leaf (`AppDecl::image_leaf`). Without a scope the app releases
+/// repo-wide, exactly as before. **Autorelease** cuts a release automatically on
+/// a push to `main` that touches one of `paths`; the bump is `patch` (always) or
+/// `auto` (conventional commits).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseConfig {
+    /// Tag scope for per-app releases (e.g. `sideline` → `@sideline/<leaf>@<ver>`).
+    /// `Some` ⇒ per-app mode; `None` ⇒ repo-wide `vX.Y.Z` (default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// Automatic releasing on merge to `main`. `off` (default) never auto-cuts.
+    #[serde(default)]
+    pub autorelease: Autorelease,
+    /// Path globs; a push touching any of these autoreleases this app (only
+    /// consulted when `autorelease` is `patch`/`auto`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+}
+
+/// Autorelease bump strategy for an app (ADR 0020).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Autorelease {
+    /// No automatic releasing — cuts are manual (dashboard) only.
+    #[default]
+    Off,
+    /// Every autorelease bumps the patch component.
+    Patch,
+    /// Derive the bump from conventional-commit messages since the last release.
+    Auto,
 }
 
 impl AppDecl {
@@ -79,18 +121,72 @@ impl AppDecl {
             .strip_prefix(&format!("{}-", self.repo()))
             .unwrap_or(&self.name)
     }
+
+    /// The configured per-app release scope, if any (ADR 0020).
+    pub fn release_scope(&self) -> Option<&str> {
+        self.release.as_ref().and_then(|r| r.scope.as_deref())
+    }
+
+    /// True when this app releases with per-app scoped tags (a `scope` is set)
+    /// rather than the repo-wide `vX.Y.Z` line.
+    pub fn is_per_app_release(&self) -> bool {
+        self.release_scope().is_some()
+    }
+
+    /// The git tag for releasing this app at `version` (which already carries any
+    /// `v`/bare prefix). Per-app: `@<scope>/<leaf>@<version>`; repo-wide: just
+    /// `<version>`. The leaf is `image_leaf()`, matching the nested image + CI.
+    pub fn release_tag(&self, version: &str) -> String {
+        match self.release_scope() {
+            Some(scope) => format!("@{scope}/{}@{version}", self.image_leaf()),
+            None => version.to_string(),
+        }
+    }
+
+    /// This app's autorelease strategy (ADR 0020); `Off` when unconfigured.
+    pub fn autorelease_mode(&self) -> Autorelease {
+        self.release
+            .as_ref()
+            .map(|r| r.autorelease)
+            .unwrap_or_default()
+    }
+
+    /// Path globs that trigger an autorelease for this app.
+    pub fn release_paths(&self) -> &[String] {
+        self.release
+            .as_ref()
+            .map(|r| r.paths.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// The key a release/draft is tracked under: the app itself in per-app mode
+    /// (each app releases independently), else the shared repo (one repo-wide
+    /// version line). Used to key drafts and compute the "last version".
+    pub fn release_unit(&self) -> &str {
+        if self.is_per_app_release() {
+            &self.name
+        } else {
+            self.repo()
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::AppDecl;
+    use super::{AppDecl, Autorelease, ReleaseConfig};
 
     fn decl(name: &str, repo: Option<&str>) -> AppDecl {
         AppDecl {
             name: name.into(),
             template: "web-app".into(),
             repo: repo.map(String::from),
+            release: None,
         }
+    }
+
+    fn with_release(mut a: AppDecl, r: ReleaseConfig) -> AppDecl {
+        a.release = Some(r);
+        a
     }
 
     #[test]
@@ -141,8 +237,85 @@ mod tests {
         // Omitted `repo` deserializes to None (backward compatible).
         let a: AppDecl = serde_yaml::from_str("name: blog\ntemplate: web-app\n").unwrap();
         assert_eq!(a.repo, None);
+        assert_eq!(a.release, None);
         // And a monorepo decl serializes the field back.
         let y = serde_yaml::to_string(&decl("api", Some("platform"))).unwrap();
         assert!(y.contains("repo: platform"), "{y}");
+        // A decl with no release block serializes without the key (clean diffs).
+        let y = serde_yaml::to_string(&decl("blog", None)).unwrap();
+        assert!(!y.contains("release"), "{y}");
+    }
+
+    #[test]
+    fn no_release_block_is_repo_wide_and_off() {
+        let a = decl("api", Some("platform"));
+        assert!(!a.is_per_app_release());
+        assert_eq!(a.release_scope(), None);
+        assert_eq!(a.autorelease_mode(), Autorelease::Off);
+        assert!(a.release_paths().is_empty());
+        assert_eq!(a.release_unit(), "platform"); // the repo — one shared line
+                                                  // The release tag is just the (already-prefixed) version, repo-wide.
+        assert_eq!(a.release_tag("v1.2.3"), "v1.2.3");
+        assert_eq!(a.release_tag("0.30.6"), "0.30.6");
+    }
+
+    #[test]
+    fn scope_enables_per_app_scoped_tags() {
+        // sideline-server in repo `sideline`, scope `sideline` → leaf `server`.
+        let a = with_release(
+            decl("sideline-server", Some("sideline")),
+            ReleaseConfig {
+                scope: Some("sideline".into()),
+                autorelease: Autorelease::Auto,
+                paths: vec!["applications/server/**".into()],
+            },
+        );
+        assert!(a.is_per_app_release());
+        assert_eq!(a.release_scope(), Some("sideline"));
+        assert_eq!(a.image_leaf(), "server");
+        assert_eq!(a.release_tag("v0.39.1"), "@sideline/server@v0.39.1");
+        // Prefix is preserved by the caller (bare version → bare tag).
+        assert_eq!(a.release_tag("0.39.1"), "@sideline/server@0.39.1");
+        assert_eq!(a.autorelease_mode(), Autorelease::Auto);
+        assert_eq!(a.release_paths(), ["applications/server/**"]);
+        // Per-app ⇒ the release unit is the app itself, not the repo.
+        assert_eq!(a.release_unit(), "sideline-server");
+    }
+
+    #[test]
+    fn scope_may_differ_from_repo_name() {
+        // A scope unrelated to the repo name still forms the tag from the leaf.
+        let a = with_release(
+            decl("mono-web", Some("mono")),
+            ReleaseConfig {
+                scope: Some("@acme".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(a.release_tag("v2.0.0"), "@@acme/web@v2.0.0");
+    }
+
+    #[test]
+    fn release_block_round_trips() {
+        let y = "name: sideline-bot\ntemplate: byo\nrepo: sideline\n\
+                 release:\n  scope: sideline\n  autorelease: patch\n  \
+                 paths:\n    - applications/bot/**\n";
+        let a: AppDecl = serde_yaml::from_str(y).unwrap();
+        assert_eq!(a.release_scope(), Some("sideline"));
+        assert_eq!(a.autorelease_mode(), Autorelease::Patch);
+        assert_eq!(a.release_paths(), ["applications/bot/**"]);
+        // Round-trips back with the release block present.
+        let out = serde_yaml::to_string(&a).unwrap();
+        assert!(out.contains("autorelease: patch"), "{out}");
+    }
+
+    #[test]
+    fn autorelease_defaults_to_off_when_omitted() {
+        // A release block with only a scope leaves autorelease off + paths empty.
+        let a: AppDecl =
+            serde_yaml::from_str("name: web\ntemplate: byo\nrepo: mono\nrelease:\n  scope: mono\n")
+                .unwrap();
+        assert!(a.is_per_app_release());
+        assert_eq!(a.autorelease_mode(), Autorelease::Off);
     }
 }

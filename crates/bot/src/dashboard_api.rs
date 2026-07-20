@@ -10,7 +10,7 @@ use axum::Json;
 use majnet_common::manifest::AppManifest;
 use majnet_common::merge::merge;
 use majnet_common::platform::{Node, NodesFile, ProjectRegistryEntry, ProjectsFile};
-use majnet_common::project::{AppDecl, Member, ProjectConfig, Role};
+use majnet_common::project::{AppDecl, Autorelease, Member, ProjectConfig, ReleaseConfig, Role};
 use majnet_common::EnvClass;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -193,6 +193,68 @@ pub async fn members_post(
         .log_event("member-change", Some(&org), &format!("{action} by {actor}"))
         .map_err(bad_gateway)?;
     Ok(format!("{action} committed; org sync will propagate"))
+}
+
+/// `GET /api/apps/{org}/{app}/release-config` — the app's per-app release policy
+/// (ADR 0020) from `project.yaml` (`null` when unset).
+pub async fn release_config_get(
+    State(state): State<Arc<AppState>>,
+    Path((org, app)): Path<(String, String)>,
+) -> Result<Json<Option<ReleaseConfig>>, ApiError> {
+    let project = read_project(&state, &org).await.map_err(bad_gateway)?;
+    let cfg = project
+        .apps
+        .into_iter()
+        .find(|a| a.name == app)
+        .ok_or_else(|| bad_request(format!("no app {app} in {org}")))?
+        .release;
+    Ok(Json(cfg))
+}
+
+/// `PUT /api/apps/{org}/{app}/release-config` — set the app's per-app release
+/// policy (ADR 0020) in `project.yaml` via a plain commit to ops `main` (no PR).
+/// An all-default config clears the block (keeps `project.yaml` clean). The
+/// release policy gates production releasing, so it is admin-gated.
+pub async fn release_config_put(
+    State(state): State<Arc<AppState>>,
+    Path((org, app)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(cfg): Json<ReleaseConfig>,
+) -> Result<String, ApiError> {
+    let actor = crate::authz::require(&state, &headers, &org, Role::Admin)
+        .await
+        .map_err(|e| (StatusCode::FORBIDDEN, format!("{e:#}")))?;
+    if let Some(s) = &cfg.scope {
+        if s.trim().is_empty() {
+            return Err(bad_request("release scope must be non-empty (or omitted)"));
+        }
+    }
+    let mut project = read_project(&state, &org).await.map_err(bad_gateway)?;
+    let decl = project
+        .apps
+        .iter_mut()
+        .find(|a| a.name == app)
+        .ok_or_else(|| bad_request(format!("no app {app} in {org}")))?;
+    // Normalize an empty policy (no scope, autorelease off, no paths) back to
+    // "no release block" so the config file stays minimal.
+    let is_default =
+        cfg.scope.is_none() && cfg.autorelease == Autorelease::Off && cfg.paths.is_empty();
+    decl.release = if is_default { None } else { Some(cfg) };
+
+    let yaml = serde_yaml::to_string(&project).map_err(|e| bad_gateway(e.into()))?;
+    let message = format!("release-config({app}): via dashboard by {actor}");
+    commit_file(&state, &org, "project.yaml", &yaml, &message)
+        .await
+        .map_err(bad_gateway)?;
+    state
+        .store
+        .log_event(
+            "release-config",
+            Some(&org),
+            &format!("{app} release policy by {actor}"),
+        )
+        .map_err(bad_gateway)?;
+    Ok(format!("release config for {app} committed"))
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
@@ -651,6 +713,7 @@ pub async fn apps_post(
                 name: req.name.clone(),
                 template: req.template.clone(),
                 repo: req.repo.clone(),
+                release: None,
             };
             req.image = format!("{}@sha256:{}", decl.image_base(&org), "0".repeat(64));
         } else {
@@ -742,6 +805,7 @@ pub(crate) async fn scaffold_and_declare(
                 name: req.name.clone(),
                 template: req.template.clone(),
                 repo: req.repo.clone(),
+                release: None,
             });
             let yaml = serde_yaml::to_string(&project)?;
             commit_file(
@@ -1277,6 +1341,8 @@ pub async fn app_rename_post(
         name: new.clone(),
         template: decl.map(|a| a.template.clone()).unwrap_or_default(),
         repo: decl.and_then(|a| a.repo.clone()),
+        // Preserve the release policy across a rename (per-app scope/autorelease).
+        release: decl.and_then(|a| a.release.clone()),
     };
     let new_base = new_decl.image_base(&org);
     // The GHCR package names (after the org) the copy moves between.

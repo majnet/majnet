@@ -8,18 +8,36 @@ name: app-release
 # overlay (`base.yaml`), and an operator promotes a chosen version to
 # production from the dashboard.
 #
-#   # .github/workflows/release.yaml in the app repo:
+#   # .github/workflows/release.yaml in a SOLO app repo:
 #   on: { push: { tags: ['v*'] } }
 #   jobs:
 #     release:
 #       uses: majnet/majnet/.github/workflows/app-release.yaml@main
 #       permissions: { contents: read, packages: write }
+#
+# For a PER-APP monorepo (ADR 0020) the release tag is scoped
+# (`@<scope>/<leaf>@<ver>`); a caller parses it and passes `leaf`+`version`+
+# `context` here so the image nests at ghcr.io/<owner>/<repo>/<leaf>:<ver>.
+# MajNet seeds that caller (template-sync) — see `monorepo_release_caller`.
 
 on:
   workflow_call:
     inputs:
       image:
-        description: Image name; defaults to ghcr.io/<owner>/<repo>.
+        description: Image name; defaults to ghcr.io/<owner>/<repo> (+ /<leaf>).
+        type: string
+        default: ''
+      leaf:
+        description: >-
+          Monorepo app leaf (ADR 0018/0020). When set (and `image` is not), the
+          image nests: ghcr.io/<owner>/<repo>/<leaf>. Empty ⇒ a solo app.
+        type: string
+        default: ''
+      version:
+        description: >-
+          Release version, e.g. v0.39.1. When set, it is the image tag (used by
+          the per-app monorepo caller, which parses it from a scoped git tag
+          @<scope>/<leaf>@<ver>). Empty ⇒ github.ref_name (a solo app tagged v*).
         type: string
         default: ''
       dockerfile:
@@ -44,12 +62,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: resolve image name (lowercase)
+      - name: resolve image name (lowercase; nested for a monorepo leaf)
         id: img
         run: |
           IMG="${{ inputs.image }}"
-          [ -n "$IMG" ] || IMG="ghcr.io/${{ github.repository }}"
+          if [ -z "$IMG" ]; then
+            IMG="ghcr.io/${{ github.repository }}"
+            [ -n "${{ inputs.leaf }}" ] && IMG="$IMG/${{ inputs.leaf }}"
+          fi
           echo "image=${IMG,,}" >> "$GITHUB_OUTPUT"
+
+      - name: resolve version (input, else the git tag)
+        id: ver
+        run: |
+          VER="${{ inputs.version }}"
+          [ -n "$VER" ] || VER="${{ github.ref_name }}"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
 
       - name: build metadata
         id: bm
@@ -61,11 +89,11 @@ jobs:
           context: ${{ inputs.context }}
           file: ${{ inputs.dockerfile }}
           push: true
-          tags: ${{ steps.img.outputs.image }}:${{ github.ref_name }}
+          tags: ${{ steps.img.outputs.image }}:${{ steps.ver.outputs.version }}
           # Baked into the image so the app can report them at /info (design §16).
-          # Release tier: VERSION is the vX.Y.Z tag being released.
+          # Release tier: VERSION is the version being released.
           build-args: |
-            VERSION=${{ github.ref_name }}
+            VERSION=${{ steps.ver.outputs.version }}
             GIT_COMMIT=${{ github.sha }}
             BUILD_TIME=${{ steps.bm.outputs.built_at }}
           cache-from: type=gha

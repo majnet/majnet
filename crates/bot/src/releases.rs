@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
-use majnet_common::project::Role;
+use majnet_common::project::{AppDecl, Role};
 use std::sync::Arc;
 
 use crate::state::StoredRelease;
@@ -94,18 +94,32 @@ struct CommitDetail {
     message: String,
 }
 
+/// This app's declaration in `project.yaml`, if present. The source of the
+/// per-app release policy (ADR 0020) — scope, autorelease, paths.
+pub(crate) async fn app_decl(state: &AppState, org: &str, app: &str) -> Option<AppDecl> {
+    crate::dashboard_api::read_project(state, org)
+        .await
+        .ok()
+        .and_then(|p| p.apps.into_iter().find(|a| a.name == app))
+}
+
 /// The GitHub repo hosting `app` (its own name unless it's a monorepo member).
 /// Best-effort via `project.yaml`; falls back to the app name.
 pub(crate) async fn app_repo(state: &AppState, org: &str, app: &str) -> String {
-    match crate::dashboard_api::read_project(state, org).await {
-        Ok(p) => p
-            .apps
-            .iter()
-            .find(|a| a.name == app)
-            .map(|a| a.repo().to_string())
-            .unwrap_or_else(|| app.to_string()),
-        Err(_) => app.to_string(),
-    }
+    app_decl(state, org, app)
+        .await
+        .map(|a| a.repo().to_string())
+        .unwrap_or_else(|| app.to_string())
+}
+
+/// The key a release draft is tracked under (ADR 0020): the app itself in
+/// per-app release mode, else the shared repo (one repo-wide version line).
+/// Falls back to the app name when the app isn't declared.
+pub(crate) async fn release_key(state: &AppState, org: &str, app: &str) -> String {
+    app_decl(state, org, app)
+        .await
+        .map(|a| a.release_unit().to_string())
+        .unwrap_or_else(|| app.to_string())
 }
 
 /// The app's GHCR package path (as the packages REST API names it) and its image
@@ -188,6 +202,53 @@ pub async fn cut(
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))
 }
 
+/// `POST /api/releases/{org}/cut-repo/{repo}?bump=…` — cut a release for every
+/// app in a monorepo in one action (ADR 0020, "all apps at version"). Per-app
+/// apps are each cut at their own next version + scoped tag; a repo-wide monorepo
+/// is cut once (a single shared tag). Best-effort per app — a per-app failure is
+/// reported, not fatal. Project-admin gated.
+pub async fn cut_repo(
+    State(state): State<Arc<AppState>>,
+    Path((org, repo)): Path<(String, String)>,
+    Query(q): Query<CutQuery>,
+    headers: HeaderMap,
+) -> Result<String, ApiError> {
+    let actor = crate::authz::require(&state, &headers, &org, Role::Admin)
+        .await
+        .map_err(|e| (StatusCode::FORBIDDEN, format!("{e:#}")))?;
+    let project = crate::dashboard_api::read_project(&state, &org)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
+    let repo_apps: Vec<&AppDecl> = project.apps.iter().filter(|a| a.repo() == repo).collect();
+    if repo_apps.is_empty() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("no apps declared for repo {repo} in {org}"),
+        ));
+    }
+    // One target per release unit: each per-app app, plus (once) any repo-wide
+    // app — so a repo-wide monorepo cuts a single shared tag, not one per app.
+    let mut targets: Vec<String> = Vec::new();
+    let mut repo_wide_rep: Option<String> = None;
+    for a in &repo_apps {
+        if a.is_per_app_release() {
+            targets.push(a.name.clone());
+        } else if repo_wide_rep.is_none() {
+            repo_wide_rep = Some(a.name.clone());
+        }
+    }
+    targets.extend(repo_wide_rep);
+
+    let mut lines = Vec::new();
+    for app in &targets {
+        match do_cut(&state, &org, app, &q.bump, &actor).await {
+            Ok(msg) => lines.push(format!("{app}: {msg}")),
+            Err(e) => lines.push(format!("{app}: FAILED — {e:#}")),
+        }
+    }
+    Ok(lines.join("\n"))
+}
+
 /// The apps sharing `repo` and the highest release recorded across them (the
 /// repo-wide "last version"). For a solo app this is just that app; for a
 /// monorepo it spans every app in the repo, since the release is repo-wide.
@@ -231,6 +292,28 @@ impl LastRelease {
     }
 }
 
+/// The highest recorded release across `apps` — with the app it came from and
+/// the version-prefix style to preserve (`v` if the recorded tag had one, else
+/// bare). `None` when none of them has a release yet.
+fn highest_release(state: &AppState, org: &str, apps: &[String]) -> Option<LastRelease> {
+    let mut last: Option<LastRelease> = None;
+    for app in apps {
+        for r in state.store.releases(org, app).into_iter().flatten() {
+            if let Some(ver) = parse_semver(&r.version) {
+                if last.as_ref().is_none_or(|l| ver > l.ver) {
+                    let prefix = if r.version.starts_with('v') { "v" } else { "" };
+                    last = Some(LastRelease {
+                        ver,
+                        app: app.clone(),
+                        prefix,
+                    });
+                }
+            }
+        }
+    }
+    last
+}
+
 async fn repo_apps_and_last(
     state: &AppState,
     org: &str,
@@ -251,22 +334,45 @@ async fn repo_apps_and_last(
     } else {
         repo_apps
     };
-    let mut last: Option<LastRelease> = None;
-    for app in &repo_apps {
-        for r in state.store.releases(org, app).into_iter().flatten() {
-            if let Some(ver) = parse_semver(&r.version) {
-                if last.as_ref().is_none_or(|l| ver > l.ver) {
-                    let prefix = if r.version.starts_with('v') { "v" } else { "" };
-                    last = Some(LastRelease {
-                        ver,
-                        app: app.clone(),
-                        prefix,
-                    });
-                }
+    let last = highest_release(state, org, &repo_apps);
+    (repo_apps, last)
+}
+
+/// The apps + highest release for an app's *release unit* (ADR 0020): just this
+/// app in per-app mode (each app releases independently), or every app sharing
+/// the repo in repo-wide mode (one shared version line). Drives the cut/draft
+/// "last version" and which apps a submitted changelog is recorded against.
+async fn unit_apps_and_last(
+    state: &AppState,
+    org: &str,
+    app: &str,
+) -> (Vec<String>, Option<LastRelease>) {
+    match app_decl(state, org, app).await {
+        Some(d) if d.is_per_app_release() => {
+            let apps = vec![app.to_string()];
+            let last = highest_release(state, org, &apps);
+            (apps, last)
+        }
+        Some(d) => repo_apps_and_last(state, org, d.repo()).await,
+        None => repo_apps_and_last(state, org, app).await,
+    }
+}
+
+/// Candidate base refs for the commit diff since `last`, most-specific first.
+/// Prepends the app's *configured* per-app tag (ADR 0020) — which
+/// `LastRelease::tag_candidates` can't know when the scope differs from the repo
+/// name — then the generic candidates (`vX.Y.Z`, bare, changesets-scoped).
+fn base_tag_candidates(decl: Option<&AppDecl>, repo: &str, last: &LastRelease) -> Vec<String> {
+    let mut c = last.tag_candidates(repo);
+    if let Some(d) = decl {
+        if d.is_per_app_release() {
+            let configured = d.release_tag(&last.display());
+            if !c.contains(&configured) {
+                c.insert(0, configured);
             }
         }
     }
-    (repo_apps, last)
+    c
 }
 
 /// Create a lightweight `tag` at the repo's `main` HEAD (the release trigger).
@@ -287,14 +393,19 @@ async fn create_release_tag(state: &AppState, org: &str, repo: &str, tag: &str) 
 }
 
 async fn do_cut(state: &AppState, org: &str, app: &str, bump: &str, actor: &str) -> Result<String> {
-    // The tag lives on the app's repo. For a monorepo the tag is repo-wide (one
-    // version line shared by every app in it), so both the "last version" and
-    // the commit range are computed over the repo, not the single app.
-    let repo = app_repo(state, org, app).await;
-    let monorepo = repo != app;
-    let (_repo_apps, last) = repo_apps_and_last(state, org, &repo).await;
-    // Preserve the repo's existing version-prefix style (`v` or bare); default
-    // to `v` for a brand-new app with no prior release.
+    // The tag lives on the app's repo. In per-app mode (ADR 0020) the tag is
+    // scoped to the app (`@<scope>/<leaf>@<ver>`) and both the "last version" and
+    // commit range are per-app; otherwise the tag is repo-wide (one version line
+    // shared by every app in the monorepo). `unit_apps_and_last` picks the scope.
+    let decl = app_decl(state, org, app).await;
+    let repo = decl
+        .as_ref()
+        .map(|d| d.repo().to_string())
+        .unwrap_or_else(|| app.to_string());
+    let per_app = decl.as_ref().is_some_and(|d| d.is_per_app_release());
+    let (_unit_apps, last) = unit_apps_and_last(state, org, app).await;
+    // Preserve the existing version-prefix style (`v` or bare); default to `v`
+    // for a brand-new app with no prior release.
     let prefix = last.as_ref().map(|l| l.prefix).unwrap_or("v");
 
     // Resolve `auto` to a concrete bump from conventional commits since the last
@@ -302,7 +413,8 @@ async fn do_cut(state: &AppState, org: &str, app: &str, bump: &str, actor: &str)
     let (effective, note) = if bump == "auto" {
         match &last {
             Some(l) => {
-                let msgs = commits_since(state, org, &repo, &l.tag_candidates(&repo)).await?;
+                let cands = base_tag_candidates(decl.as_ref(), &repo, l);
+                let msgs = commits_since(state, org, &repo, &cands).await?;
                 anyhow::ensure!(
                     !msgs.is_empty(),
                     "no new commits since {} — nothing to release",
@@ -324,14 +436,21 @@ async fn do_cut(state: &AppState, org: &str, app: &str, bump: &str, actor: &str)
         "{prefix}{}",
         next_version(last.as_ref().map(|l| l.ver), &effective)?
     );
-    create_release_tag(state, org, &repo, &next).await?;
+    // The git tag: per-app scoped, or the plain repo-wide version.
+    let tag = decl
+        .as_ref()
+        .map(|d| d.release_tag(&next))
+        .unwrap_or_else(|| next.clone());
+    create_release_tag(state, org, &repo, &tag).await?;
     state.store.log_event(
         "release-cut",
         Some(org),
         &format!("{app} {next} by {actor}"),
     )?;
-    tracing::info!(org, app, %repo, %next, actor, "cut release");
-    let scope = if monorepo {
+    tracing::info!(org, app, %repo, %next, %tag, actor, "cut release");
+    let scope = if per_app {
+        format!(" (tag {tag})")
+    } else if repo != app {
         format!(" on {repo} (releases every app in the monorepo)")
     } else {
         String::new()
@@ -407,17 +526,29 @@ fn changelog_section(title: &str, items: &[String], out: &mut String) {
     out.push('\n');
 }
 
-/// Prepare (or refresh) a repo's draft from conventional commits since its last
-/// release. No unreleased commits → the draft is cleared. The store keeps
-/// operator-edited notes across a refresh.
-pub(crate) async fn prepare_draft(state: &AppState, org: &str, repo: &str) -> Result<()> {
-    let (_apps, last) = repo_apps_and_last(state, org, repo).await;
+/// Prepare (or refresh) the draft for `app`'s release unit (ADR 0020) from
+/// conventional commits since its last release. The unit is the app itself
+/// (per-app mode) or the shared repo (repo-wide); the draft is keyed by that
+/// unit. No unreleased commits → the draft is cleared. Operator-edited notes
+/// survive a refresh.
+pub(crate) async fn prepare_draft(state: &AppState, org: &str, app: &str) -> Result<()> {
+    let decl = app_decl(state, org, app).await;
+    let repo = decl
+        .as_ref()
+        .map(|d| d.repo().to_string())
+        .unwrap_or_else(|| app.to_string());
+    let key = decl
+        .as_ref()
+        .map(|d| d.release_unit().to_string())
+        .unwrap_or_else(|| app.to_string());
+    let (_apps, last) = unit_apps_and_last(state, org, app).await;
     let prefix = last.as_ref().map(|l| l.prefix).unwrap_or("v");
     let (version, bump, base, count, notes) = match &last {
         Some(l) => {
-            let msgs = commits_since(state, org, repo, &l.tag_candidates(repo)).await?;
+            let cands = base_tag_candidates(decl.as_ref(), &repo, l);
+            let msgs = commits_since(state, org, &repo, &cands).await?;
             if msgs.is_empty() {
-                state.store.delete_release_draft(org, repo)?;
+                state.store.delete_release_draft(org, &key)?;
                 return Ok(());
             }
             let bump = classify_bump(&msgs);
@@ -441,7 +572,7 @@ pub(crate) async fn prepare_draft(state: &AppState, org: &str, repo: &str) -> Re
         ),
     };
     let draft = ReleaseDraft {
-        repo: repo.to_string(),
+        repo: key.clone(),
         version,
         bump,
         base,
@@ -451,28 +582,41 @@ pub(crate) async fn prepare_draft(state: &AppState, org: &str, repo: &str) -> Re
         updated_at: String::new(),
     };
     state.store.upsert_release_draft(org, &draft)?;
-    tracing::info!(org, repo, version = %draft.version, count, "release draft prepared");
+    tracing::info!(org, %key, version = %draft.version, count, "release draft prepared");
     Ok(())
 }
 
 /// Best-effort draft refresh on a push to an app repo's `main` (webhook entry).
-/// Only declared app repos get a draft; anything else is a no-op. Errors are
-/// swallowed — a draft is advisory and must never break the push flow.
+/// A repo can host several release units (each per-app app + one repo-wide unit
+/// for the rest), so refresh a draft per unit. Only declared app repos get a
+/// draft; anything else is a no-op. Errors are swallowed — a draft is advisory
+/// and must never break the push flow.
 pub(crate) async fn on_app_main_push(state: &AppState, org: &str, repo: &str) {
-    let is_app_repo = crate::dashboard_api::read_project(state, org)
-        .await
-        .map(|p| p.apps.iter().any(|a| a.repo() == repo))
-        .unwrap_or(false);
-    if !is_app_repo {
+    let Ok(project) = crate::dashboard_api::read_project(state, org).await else {
         return;
+    };
+    // One representative app per release unit: each per-app app, plus one for the
+    // repo-wide unit (they share a single draft).
+    let mut reps: Vec<String> = Vec::new();
+    let mut repo_wide_rep: Option<String> = None;
+    for a in project.apps.iter().filter(|a| a.repo() == repo) {
+        if a.is_per_app_release() {
+            reps.push(a.name.clone());
+        } else if repo_wide_rep.is_none() {
+            repo_wide_rep = Some(a.name.clone());
+        }
     }
-    if let Err(e) = prepare_draft(state, org, repo).await {
-        tracing::warn!(
-            org,
-            repo,
-            error = format!("{e:#}"),
-            "release draft refresh failed"
-        );
+    reps.extend(repo_wide_rep);
+    for rep in reps {
+        if let Err(e) = prepare_draft(state, org, &rep).await {
+            tracing::warn!(
+                org,
+                repo,
+                app = %rep,
+                error = format!("{e:#}"),
+                "release draft refresh failed"
+            );
+        }
     }
 }
 
@@ -513,15 +657,22 @@ pub async fn drafts_all(
     for (org, ds) in by_org {
         let project = crate::dashboard_api::read_project(&state, &org).await.ok();
         for d in ds {
-            let app = project
+            // The draft is keyed by release unit (app name in per-app mode, else
+            // the repo). Map it back to a representative app for the deep-link and
+            // its real git repo for display.
+            let matched = project
                 .as_ref()
-                .and_then(|p| p.apps.iter().find(|a| a.repo() == d.repo))
+                .and_then(|p| p.apps.iter().find(|a| a.release_unit() == d.repo));
+            let app = matched
                 .map(|a| a.name.clone())
+                .unwrap_or_else(|| d.repo.clone());
+            let repo = matched
+                .map(|a| a.repo().to_string())
                 .unwrap_or_else(|| d.repo.clone());
             out.push(DraftSummary {
                 org: org.clone(),
                 app,
-                repo: d.repo,
+                repo,
                 version: d.version,
                 bump: d.bump,
                 commit_count: d.commit_count,
@@ -536,10 +687,10 @@ pub async fn draft_get(
     State(state): State<Arc<AppState>>,
     Path((org, app)): Path<(String, String)>,
 ) -> Result<Json<Option<ReleaseDraft>>, ApiError> {
-    let repo = app_repo(&state, &org, &app).await;
+    let key = release_key(&state, &org, &app).await;
     state
         .store
-        .release_draft(&org, &repo)
+        .release_draft(&org, &key)
         .map(Json)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
@@ -554,13 +705,13 @@ pub async fn draft_refresh(
     crate::authz::require(&state, &headers, &org, Role::Developer)
         .await
         .map_err(|e| (StatusCode::FORBIDDEN, format!("{e:#}")))?;
-    let repo = app_repo(&state, &org, &app).await;
-    prepare_draft(&state, &org, &repo)
+    prepare_draft(&state, &org, &app)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
+    let key = release_key(&state, &org, &app).await;
     let draft = state
         .store
-        .release_draft(&org, &repo)
+        .release_draft(&org, &key)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(match draft {
         Some(d) => format!(
@@ -587,10 +738,10 @@ pub async fn draft_notes_put(
     crate::authz::require(&state, &headers, &org, Role::Developer)
         .await
         .map_err(|e| (StatusCode::FORBIDDEN, format!("{e:#}")))?;
-    let repo = app_repo(&state, &org, &app).await;
+    let key = release_key(&state, &org, &app).await;
     let saved = state
         .store
-        .set_release_draft_notes(&org, &repo, &req.notes)
+        .set_release_draft_notes(&org, &key, &req.notes)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if saved {
         Ok("notes saved".into())
@@ -609,10 +760,10 @@ pub async fn draft_discard(
     crate::authz::require(&state, &headers, &org, Role::Developer)
         .await
         .map_err(|e| (StatusCode::FORBIDDEN, format!("{e:#}")))?;
-    let repo = app_repo(&state, &org, &app).await;
+    let key = release_key(&state, &org, &app).await;
     state
         .store
-        .delete_release_draft(&org, &repo)
+        .delete_release_draft(&org, &key)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok("draft discarded".into())
 }
@@ -629,13 +780,13 @@ pub async fn draft_submit(
     let actor = crate::authz::require(&state, &headers, &org, Role::Admin)
         .await
         .map_err(|e| (StatusCode::FORBIDDEN, format!("{e:#}")))?;
-    let repo = app_repo(&state, &org, &app).await;
+    let key = release_key(&state, &org, &app).await;
     let draft = state
         .store
-        .release_draft(&org, &repo)
+        .release_draft(&org, &key)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "no draft to submit".to_string()))?;
-    submit_draft(&state, &org, &repo, &draft, &actor)
+    submit_draft(&state, &org, &app, &draft, &actor)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))
 }
@@ -643,24 +794,40 @@ pub async fn draft_submit(
 async fn submit_draft(
     state: &AppState,
     org: &str,
-    repo: &str,
+    app: &str,
     draft: &ReleaseDraft,
     actor: &str,
 ) -> Result<String> {
-    create_release_tag(state, org, repo, &draft.version).await?;
-    let (apps, _last) = repo_apps_and_last(state, org, repo).await;
+    // Tag the app's release unit: per-app gets a scoped `@<scope>/<leaf>@<ver>`
+    // tag, repo-wide the plain version. Notes attach to every app the unit covers
+    // (just this app per-app; all repo apps repo-wide).
+    let decl = app_decl(state, org, app).await;
+    let repo = decl
+        .as_ref()
+        .map(|d| d.repo().to_string())
+        .unwrap_or_else(|| app.to_string());
+    let key = decl
+        .as_ref()
+        .map(|d| d.release_unit().to_string())
+        .unwrap_or_else(|| app.to_string());
+    let tag = decl
+        .as_ref()
+        .map(|d| d.release_tag(&draft.version))
+        .unwrap_or_else(|| draft.version.clone());
+    create_release_tag(state, org, &repo, &tag).await?;
+    let (apps, _last) = unit_apps_and_last(state, org, app).await;
     for a in &apps {
         state
             .store
             .record_release_notes(org, a, &draft.version, &draft.notes, actor)?;
     }
-    state.store.delete_release_draft(org, repo)?;
+    state.store.delete_release_draft(org, &key)?;
     state.store.log_event(
         "release-cut",
         Some(org),
-        &format!("{repo} {} by {actor} (draft)", draft.version),
+        &format!("{key} {} by {actor} (draft)", draft.version),
     )?;
-    tracing::info!(org, %repo, version = %draft.version, actor, "submitted draft release");
+    tracing::info!(org, %key, %tag, version = %draft.version, actor, "submitted draft release");
     let scope = if apps.len() > 1 {
         format!(" (releases {} apps in {repo})", apps.len())
     } else {
@@ -702,16 +869,38 @@ pub async fn record(
 async fn resolve_commit(state: &AppState, org: &str, app: &str, tag: &str) -> Result<String> {
     let client = state.github.org_client(org).await?;
     // For a monorepo app the tag lives on the shared repo, not `/repos/{org}/{app}`.
-    let repo = app_repo(state, org, app).await;
-    // Try the tag verbatim first (`vX.Y.Z` / a solo app's tag), then — for a
-    // monorepo member — the changesets per-package form `@<repo>/<leaf>@<ver>`
-    // (its git tags are scoped even though the image tag is the bare version).
+    let decl = app_decl(state, org, app).await;
+    let repo = decl
+        .as_ref()
+        .map(|d| d.repo().to_string())
+        .unwrap_or_else(|| app.to_string());
+    // Try the tag verbatim first (`vX.Y.Z` / a solo app's tag), then the app's
+    // *configured* per-app scoped tag (ADR 0020 — covers a scope that differs
+    // from the repo name), then the legacy changesets form `@<repo>/<leaf>@<ver>`.
     // `/commits/{ref}` resolves any ref; the scoped ref needs URL-encoding.
     let mut refs = vec![tag.to_string()];
+    if let Some(d) = &decl {
+        if d.is_per_app_release() {
+            let configured = d.release_tag(tag);
+            if !refs.contains(&configured) {
+                refs.push(configured);
+            }
+        }
+    }
     if repo != app {
-        let leaf = app.strip_prefix(&format!("{repo}-")).unwrap_or(app);
+        let leaf = decl
+            .as_ref()
+            .map(|d| d.image_leaf().to_string())
+            .unwrap_or_else(|| {
+                app.strip_prefix(&format!("{repo}-"))
+                    .unwrap_or(app)
+                    .to_string()
+            });
         let ver = tag.strip_prefix('v').unwrap_or(tag);
-        refs.push(format!("@{repo}/{leaf}@{ver}"));
+        let legacy = format!("@{repo}/{leaf}@{ver}");
+        if !refs.contains(&legacy) {
+            refs.push(legacy);
+        }
     }
     let mut last_err = None;
     for r in &refs {
@@ -947,9 +1136,23 @@ pub async fn promote(
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_bump, generate_changelog, next_version, parse_semver, production_overlay,
-        LastRelease,
+        base_tag_candidates, classify_bump, generate_changelog, next_version, parse_semver,
+        production_overlay, LastRelease,
     };
+    use majnet_common::project::{AppDecl, Autorelease, ReleaseConfig};
+
+    fn per_app_decl(name: &str, repo: &str, scope: &str) -> AppDecl {
+        AppDecl {
+            name: name.into(),
+            template: "byo".into(),
+            repo: Some(repo.into()),
+            release: Some(ReleaseConfig {
+                scope: Some(scope.into()),
+                autorelease: Autorelease::Off,
+                paths: vec![],
+            }),
+        }
+    }
 
     fn msgs(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
@@ -1058,6 +1261,41 @@ mod tests {
             .tag_candidates("blog")
             .iter()
             .any(|c| c.starts_with('@')));
+    }
+
+    #[test]
+    fn base_candidates_prepend_configured_scoped_tag() {
+        // scope differs from the repo name → LastRelease::tag_candidates can't
+        // produce it, so base_tag_candidates must prepend the configured tag.
+        let decl = per_app_decl("sideline-server", "sideline", "acme");
+        let last = LastRelease {
+            ver: (0, 39, 0),
+            app: "sideline-server".into(),
+            prefix: "v",
+        };
+        let cands = base_tag_candidates(Some(&decl), "sideline", &last);
+        assert_eq!(cands[0], "@acme/server@v0.39.0", "{cands:?}");
+        // Generic fallbacks remain.
+        assert!(cands.iter().any(|c| c == "v0.39.0"));
+    }
+
+    #[test]
+    fn base_candidates_repo_wide_stay_generic() {
+        // A repo-wide app (no release block) yields only the generic refs.
+        let decl = AppDecl {
+            name: "blog".into(),
+            template: "web-app".into(),
+            repo: None,
+            release: None,
+        };
+        let last = LastRelease {
+            ver: (1, 2, 3),
+            app: "blog".into(),
+            prefix: "v",
+        };
+        let cands = base_tag_candidates(Some(&decl), "blog", &last);
+        assert!(cands.contains(&"v1.2.3".to_string()));
+        assert!(!cands.iter().any(|c| c.starts_with('@')));
     }
 
     const NEW: &str = "ghcr.io/o/a@sha256:new";

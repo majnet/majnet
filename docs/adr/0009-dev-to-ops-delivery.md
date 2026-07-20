@@ -1,6 +1,6 @@
 # ADR 0009 — DEV→OPS delivery: builds, releases, and the class gradient
 
-**Status:** accepted (design; implementation phased)
+**Status:** accepted (design; implementation phased) · amended by [0020](0020-per-app-monorepo-releases.md) (per-app monorepo release tags)
 **Date:** 2026-07-12
 
 > **Revision 2026-07-12 — the release descriptor is gone.** The original design

@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use crate::dashboard_api::ApiError;
 use crate::AppState;
-use majnet_common::project::Role;
+use majnet_common::project::{AppDecl, Role};
 
 /// Repo-relative template files that are platform-managed (kept in sync). Only
 /// the release contract for now — `build.yaml` and scaffolds are app-owned.
@@ -40,6 +40,12 @@ const SYNC_BRANCH: &str = "template-sync";
 /// once (a convenience, never overwritten), on its own branch/PR.
 const MONOREPO_CI_BRANCH: &str = "monorepo-ci";
 const BUILD_CALLER_PATH: &str = ".github/workflows/build.yaml";
+
+/// Per-app monorepo release CI (ADR 0020): a caller that parses a scoped release
+/// tag `@<scope>/<leaf>@<ver>` and builds only that app's nested image. Seeded on
+/// its own branch/PR, only for monorepos with per-app-release apps.
+const MONOREPO_RELEASE_BRANCH: &str = "monorepo-release-ci";
+const RELEASE_CALLER_PATH: &str = ".github/workflows/release.yaml";
 
 /// `POST /api/template-sync/{org}` — sync platform-managed template files into
 /// the org's app repos, opening a `template-sync` PR per repo that has drifted.
@@ -113,20 +119,23 @@ pub async fn sync_org(state: &AppState, org: &str) -> Result<Vec<String>> {
         }
     }
 
-    // Seed a build-tier matrix caller into each BYO-CI monorepo that lacks one
-    // (ADR 0018). One caller per shared repo, listing every app in it.
-    let mut monorepo_repos: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    // Seed CI into each BYO-CI monorepo that lacks it (ADR 0018/0020): a build-
+    // tier matrix caller for every app, and — for per-app-release monorepos
+    // (ADR 0020) — a release caller that resolves scoped tags. One caller each
+    // per shared repo.
+    let mut monorepo_repos: BTreeMap<String, Vec<AppDecl>> = BTreeMap::new();
     for app in &project.apps {
         if app.is_monorepo() {
             monorepo_repos
                 .entry(app.repo().to_string())
                 .or_default()
-                .push(app.name.clone());
+                .push(app.clone());
         }
     }
     for (repo, mut apps) in monorepo_repos {
-        apps.sort();
-        match seed_monorepo_ci(&client, org, &repo, &apps).await {
+        apps.sort_by(|a, b| a.name.cmp(&b.name));
+        let names: Vec<String> = apps.iter().map(|a| a.name.clone()).collect();
+        match seed_monorepo_ci(&client, org, &repo, &names).await {
             Ok(true) => synced.push(format!("{repo} (build CI)")),
             Ok(false) => {}
             Err(e) => tracing::error!(
@@ -135,6 +144,21 @@ pub async fn sync_org(state: &AppState, org: &str) -> Result<Vec<String>> {
                 error = format!("{e:#}"),
                 "monorepo build-CI scaffold failed"
             ),
+        }
+        // Per-app release caller — only when at least one app in the repo uses
+        // per-app scoped release tags (ADR 0020).
+        let per_app: Vec<&AppDecl> = apps.iter().filter(|a| a.is_per_app_release()).collect();
+        if !per_app.is_empty() {
+            match seed_monorepo_release_ci(&client, org, &repo, &per_app).await {
+                Ok(true) => synced.push(format!("{repo} (release CI)")),
+                Ok(false) => {}
+                Err(e) => tracing::error!(
+                    org,
+                    repo,
+                    error = format!("{e:#}"),
+                    "monorepo release-CI scaffold failed"
+                ),
+            }
         }
     }
     Ok(synced)
@@ -247,6 +271,144 @@ async fn seed_monorepo_ci(
             )
             .await
             .context("opening monorepo-ci PR")?;
+    }
+    Ok(true)
+}
+
+/// A `release.yaml` caller for a per-app-release monorepo (ADR 0020): triggers on
+/// a scoped release tag `@<scope>/<leaf>@<ver>`, a `resolve` job parses it into
+/// (leaf, version) and maps the leaf → build context, then the reusable
+/// `app-release.yaml` builds only that app's nested image `.../repo/<leaf>:<ver>`.
+/// One `case` arm per per-app app (`context` defaults to the leaf — adjust to the
+/// build dir). A one-time seed the owner then owns.
+fn monorepo_release_caller(apps: &[&AppDecl]) -> String {
+    let arms: String = apps
+        .iter()
+        .map(|a| {
+            let leaf = a.image_leaf();
+            format!("            {leaf}) CTX={leaf} ;;\n")
+        })
+        .collect();
+    let header = r#"name: release
+
+# Auto-scaffolded by MajNet for this per-app monorepo (ADR 0020). Each app is
+# released on its own scoped tag `@<scope>/<leaf>@<version>` (created by MajNet
+# on cut / autorelease). This resolves the tag to (leaf, version) and builds only
+# that app's nested image ghcr.io/<org>/<repo>/<leaf>:<version> via the reusable
+# release-tier workflow. Adjust each app's `CTX` to its build directory (match
+# build.yaml) — MajNet seeds this once and never overwrites it.
+on:
+  push:
+    tags: ['@*/**']
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      leaf: ${{ steps.p.outputs.leaf }}
+      version: ${{ steps.p.outputs.version }}
+      context: ${{ steps.p.outputs.context }}
+    steps:
+      - id: p
+        name: parse @<scope>/<leaf>@<version>
+        run: |
+          TAG="${{ github.ref_name }}"
+          REST="${TAG#@}"
+          LEAF="${REST%@*}"; LEAF="${LEAF#*/}"
+          VER="${REST##*@}"
+          case "$LEAF" in
+"#;
+    let footer = r#"            *) echo "unknown app leaf: $LEAF" >&2; exit 1 ;;
+          esac
+          echo "leaf=$LEAF" >> "$GITHUB_OUTPUT"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "context=$CTX" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: resolve
+    permissions: { contents: read, packages: write }
+    uses: majnet/majnet/.github/workflows/app-release.yaml@main
+    with:
+      leaf: ${{ needs.resolve.outputs.leaf }}
+      version: ${{ needs.resolve.outputs.version }}
+      context: ${{ needs.resolve.outputs.context }}
+"#;
+    format!("{header}{arms}{footer}")
+}
+
+/// Seed the per-app monorepo release caller if the repo has none. Never
+/// overwrites an existing `release.yaml`. Opens (or fast-forwards) a
+/// `monorepo-release-ci` PR. Returns whether a PR was opened/updated.
+async fn seed_monorepo_release_ci(
+    client: &octocrab::Octocrab,
+    org: &str,
+    repo: &str,
+    apps: &[&AppDecl],
+) -> Result<bool> {
+    let repo_path = format!("/repos/{org}/{repo}");
+    let Some(main_head) = crate::git::get_branch_head(client, &repo_path, "main").await? else {
+        return Ok(false); // repo absent / not initialized
+    };
+    let repos = client.repos(org, repo);
+    if read_file(&repos, RELEASE_CALLER_PATH).await.is_some() {
+        return Ok(false); // an existing release.yaml is the owner's to keep
+    }
+
+    let changes: BTreeMap<String, Option<String>> = BTreeMap::from([(
+        RELEASE_CALLER_PATH.to_string(),
+        Some(monorepo_release_caller(apps)),
+    )]);
+    let base_tree = crate::git::commit_tree(client, &repo_path, &main_head).await?;
+    let tree =
+        crate::git::create_tree_incremental(client, &repo_path, &base_tree, &changes).await?;
+    let commit = crate::git::create_commit(
+        client,
+        &repo_path,
+        &tree,
+        &[&main_head],
+        "chore: scaffold MajNet per-app release CI",
+    )
+    .await?;
+    if crate::git::get_branch_head(client, &repo_path, MONOREPO_RELEASE_BRANCH)
+        .await?
+        .is_some()
+    {
+        crate::git::force_update_ref(client, &repo_path, MONOREPO_RELEASE_BRANCH, &commit).await?;
+    } else {
+        crate::git::create_ref(client, &repo_path, MONOREPO_RELEASE_BRANCH, &commit).await?;
+    }
+
+    let open: serde_json::Value = client
+        .get(
+            format!("{repo_path}/pulls?state=open&base=main&head={org}:{MONOREPO_RELEASE_BRANCH}"),
+            None::<&()>,
+        )
+        .await?;
+    if open.as_array().and_then(|prs| prs.first()).is_none() {
+        let list = apps
+            .iter()
+            .map(|a| a.image_leaf())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _: serde_json::Value = client
+            .post(
+                format!("{repo_path}/pulls"),
+                Some(&json!({
+                    "title": "chore: scaffold MajNet per-app release CI",
+                    "head": MONOREPO_RELEASE_BRANCH,
+                    "base": "main",
+                    "body": format!(
+                        "MajNet scaffolds a per-app release workflow for this monorepo (ADR 0020): \
+                         each app ({list}) releases on its own scoped tag \
+                         `@<scope>/<leaf>@<version>` (created by MajNet on cut / autorelease), \
+                         building only that app's nested image via the reusable `app-release.yaml`.\
+                         \n\n**Adjust each app's `CTX`** to its build directory (match build.yaml) \
+                         before merging. This file is yours after seeding — MajNet won't overwrite it."
+                    ),
+                })),
+            )
+            .await
+            .context("opening monorepo-release-ci PR")?;
     }
     Ok(true)
 }
@@ -421,6 +583,46 @@ mod tests {
         assert_eq!(
             v["jobs"]["build"]["with"]["app"],
             serde_yaml::Value::from("${{ matrix.app.name }}")
+        );
+    }
+
+    #[test]
+    fn monorepo_release_caller_is_valid_yaml_with_a_case_arm_per_app() {
+        use majnet_common::project::{AppDecl, ReleaseConfig};
+        let server = AppDecl {
+            name: "sideline-server".into(),
+            template: "byo".into(),
+            repo: Some("sideline".into()),
+            release: Some(ReleaseConfig {
+                scope: Some("sideline".into()),
+                ..Default::default()
+            }),
+        };
+        let bot = AppDecl {
+            name: "sideline-bot".into(),
+            template: "byo".into(),
+            repo: Some("sideline".into()),
+            release: Some(ReleaseConfig {
+                scope: Some("sideline".into()),
+                ..Default::default()
+            }),
+        };
+        let out = monorepo_release_caller(&[&server, &bot]);
+        // Parses as a single YAML document.
+        let v: serde_yaml::Value = serde_yaml::from_str(&out).expect("valid workflow YAML");
+        // A case arm per app leaf (prefix stripped: server, bot).
+        assert!(out.contains("server) CTX=server ;;"), "{out}");
+        assert!(out.contains("bot) CTX=bot ;;"), "{out}");
+        // Triggers on scoped tags and delegates to the reusable release workflow,
+        // passing the parsed leaf/version/context.
+        assert_eq!(v["on"]["push"]["tags"][0], serde_yaml::Value::from("@*/**"));
+        assert_eq!(
+            v["jobs"]["release"]["uses"],
+            serde_yaml::Value::from("majnet/majnet/.github/workflows/app-release.yaml@main")
+        );
+        assert_eq!(
+            v["jobs"]["release"]["with"]["leaf"],
+            serde_yaml::Value::from("${{ needs.resolve.outputs.leaf }}")
         );
     }
 }
