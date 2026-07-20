@@ -358,17 +358,37 @@ async fn unit_apps_and_last(
     }
 }
 
+/// Both scoped-tag spellings for a per-app release at semver `core` — most
+/// specific first: `@<scope>/<leaf>@vX.Y.Z` then the bare `@<scope>/<leaf>@X.Y.Z`.
+/// The **git tag** may carry a `v` (Changesets tags `@<scope>/<leaf>@vX.Y.Z`)
+/// while the **image tag** MajNet records is bare (`X.Y.Z`), so we can't infer
+/// the git-tag prefix from the stored version — try both.
+fn scoped_tag_variants(decl: &AppDecl, core: &str) -> Vec<String> {
+    let core = core.trim_start_matches('v');
+    vec![
+        decl.release_tag(&format!("v{core}")),
+        decl.release_tag(core),
+    ]
+}
+
 /// Candidate base refs for the commit diff since `last`, most-specific first.
-/// Prepends the app's *configured* per-app tag (ADR 0020) — which
-/// `LastRelease::tag_candidates` can't know when the scope differs from the repo
-/// name — then the generic candidates (`vX.Y.Z`, bare, changesets-scoped).
+/// Prepends the app's *configured* per-app scoped tag (ADR 0020) in both `v` and
+/// bare spellings — which `LastRelease::tag_candidates` can't know when the scope
+/// differs from the repo name — then the generic candidates (`vX.Y.Z`, bare,
+/// changesets-scoped).
 fn base_tag_candidates(decl: Option<&AppDecl>, repo: &str, last: &LastRelease) -> Vec<String> {
     let mut c = last.tag_candidates(repo);
     if let Some(d) = decl {
         if d.is_per_app_release() {
-            let configured = d.release_tag(&last.display());
-            if !c.contains(&configured) {
-                c.insert(0, configured);
+            let (x, y, z) = last.ver;
+            // Insert in reverse so the final order keeps the `v` form first.
+            for t in scoped_tag_variants(d, &format!("{x}.{y}.{z}"))
+                .into_iter()
+                .rev()
+            {
+                if !c.contains(&t) {
+                    c.insert(0, t);
+                }
             }
         }
     }
@@ -946,9 +966,12 @@ async fn resolve_commit(state: &AppState, org: &str, app: &str, tag: &str) -> Re
     let mut refs = vec![tag.to_string()];
     if let Some(d) = &decl {
         if d.is_per_app_release() {
-            let configured = d.release_tag(tag);
-            if !refs.contains(&configured) {
-                refs.push(configured);
+            // Try both `@<scope>/<leaf>@vX.Y.Z` and the bare form — the git tag's
+            // prefix can differ from the recorded (image) version's.
+            for t in scoped_tag_variants(d, tag) {
+                if !refs.contains(&t) {
+                    refs.push(t);
+                }
             }
         }
     }
@@ -1387,9 +1410,27 @@ mod tests {
             prefix: "v",
         };
         let cands = base_tag_candidates(Some(&decl), "sideline", &last);
+        // The `v` scoped form is first (most specific), and the bare scoped form
+        // is also present — the git tag's prefix may differ from the version's.
         assert_eq!(cands[0], "@acme/server@v0.39.0", "{cands:?}");
+        assert!(
+            cands.iter().any(|c| c == "@acme/server@0.39.0"),
+            "{cands:?}"
+        );
         // Generic fallbacks remain.
         assert!(cands.iter().any(|c| c == "v0.39.0"));
+    }
+
+    #[test]
+    fn scoped_variants_cover_both_prefixes_from_either_input() {
+        use super::scoped_tag_variants;
+        let decl = per_app_decl("sideline-server", "sideline", "sideline");
+        // A bare recorded version still yields the `v` git-tag spelling…
+        let from_bare = scoped_tag_variants(&decl, "0.38.7");
+        assert!(from_bare.contains(&"@sideline/server@v0.38.7".to_string()));
+        assert!(from_bare.contains(&"@sideline/server@0.38.7".to_string()));
+        // …and a `v`-prefixed input normalizes to the same pair (no `@…@vv…`).
+        assert_eq!(scoped_tag_variants(&decl, "v0.38.7"), from_bare);
     }
 
     #[test]
