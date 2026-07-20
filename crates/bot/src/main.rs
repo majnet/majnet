@@ -166,6 +166,7 @@ async fn main() -> Result<()> {
             "/api/imports/{org}/{app}/retry",
             post(dashboard_api::imports_retry),
         )
+        .route("/api/releases/drafts", get(releases::drafts_all))
         .route("/api/releases/{org}/{app}", get(releases::list))
         .route("/api/releases/{org}/{app}/cut", post(releases::cut))
         .route(
