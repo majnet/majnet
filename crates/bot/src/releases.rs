@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
-use majnet_common::project::{AppDecl, Role};
+use majnet_common::project::{AppDecl, Autorelease, Role};
 use std::sync::Arc;
 
 use crate::state::StoredRelease;
@@ -586,37 +586,102 @@ pub(crate) async fn prepare_draft(state: &AppState, org: &str, app: &str) -> Res
     Ok(())
 }
 
-/// Best-effort draft refresh on a push to an app repo's `main` (webhook entry).
-/// A repo can host several release units (each per-app app + one repo-wide unit
-/// for the rest), so refresh a draft per unit. Only declared app repos get a
-/// draft; anything else is a no-op. Errors are swallowed — a draft is advisory
-/// and must never break the push flow.
-pub(crate) async fn on_app_main_push(state: &AppState, org: &str, repo: &str) {
+/// Handle a push to an app repo's `main` (webhook entry). A repo can host several
+/// release units (each per-app app + one repo-wide unit for the rest); for each,
+/// either **autorelease** it (ADR 0020 phase 2 — when `autorelease` is on and a
+/// `changed` file matches its `paths`) or refresh its advisory **draft**. Only
+/// declared app repos do anything. Errors are swallowed — a push must never
+/// break, and releasing is best-effort.
+pub(crate) async fn on_app_main_push(state: &AppState, org: &str, repo: &str, changed: &[String]) {
     let Ok(project) = crate::dashboard_api::read_project(state, org).await else {
         return;
     };
     // One representative app per release unit: each per-app app, plus one for the
-    // repo-wide unit (they share a single draft).
-    let mut reps: Vec<String> = Vec::new();
-    let mut repo_wide_rep: Option<String> = None;
+    // repo-wide unit (they share a single draft/line).
+    let mut reps: Vec<AppDecl> = Vec::new();
+    let mut repo_wide_rep: Option<AppDecl> = None;
     for a in project.apps.iter().filter(|a| a.repo() == repo) {
         if a.is_per_app_release() {
-            reps.push(a.name.clone());
+            reps.push(a.clone());
         } else if repo_wide_rep.is_none() {
-            repo_wide_rep = Some(a.name.clone());
+            repo_wide_rep = Some(a.clone());
         }
     }
     reps.extend(repo_wide_rep);
     for rep in reps {
-        if let Err(e) = prepare_draft(state, org, &rep).await {
+        // Autorelease-enabled units auto-cut on a matching change; the rest just
+        // refresh their draft (the two are mutually exclusive per unit).
+        let result = if rep.autorelease_mode() != Autorelease::Off {
+            try_autorelease(state, org, &rep, changed).await
+        } else {
+            prepare_draft(state, org, &rep.name).await
+        };
+        if let Err(e) = result {
             tracing::warn!(
                 org,
                 repo,
-                app = %rep,
+                app = %rep.name,
                 error = format!("{e:#}"),
-                "release draft refresh failed"
+                "release refresh/autorelease failed"
             );
         }
+    }
+}
+
+/// Autorelease `app` if the push changed a file under its configured `paths`
+/// (ADR 0020 phase 2). Cuts the per-app release via the same tag→CI path as a
+/// manual cut — `patch` always bumps patch, `auto` derives it from conventional
+/// commits. A no-op when nothing matched, no `paths` are set, or there are no
+/// unreleased commits (a benign `auto` case).
+async fn try_autorelease(
+    state: &AppState,
+    org: &str,
+    app: &AppDecl,
+    changed: &[String],
+) -> Result<()> {
+    let paths = app.release_paths();
+    if paths.is_empty() {
+        tracing::info!(org, app = %app.name, "autorelease on but no paths set — skipping");
+        return Ok(());
+    }
+    if !paths_match(paths, changed) {
+        return Ok(()); // this app's files didn't change in this push
+    }
+    let bump = match app.autorelease_mode() {
+        Autorelease::Patch => "patch",
+        Autorelease::Auto => "auto",
+        Autorelease::Off => return Ok(()),
+    };
+    match do_cut(state, org, &app.name, bump, "autorelease").await {
+        Ok(msg) => {
+            tracing::info!(org, app = %app.name, %msg, "autoreleased");
+            Ok(())
+        }
+        // `auto` with no new commits since the last release is benign here (the
+        // matching change may already be released) — don't surface it as an error.
+        Err(e) if format!("{e:#}").contains("nothing to release") => {
+            tracing::info!(org, app = %app.name, "autorelease: no new commits — skipping");
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether any `files` path matches any of the `patterns` globs (gitignore-style:
+/// `*` stops at `/`, `**` crosses it). Invalid globs are skipped with a warning.
+fn paths_match(patterns: &[String], files: &[String]) -> bool {
+    let mut builder = globset::GlobSetBuilder::new();
+    for p in patterns {
+        match globset::GlobBuilder::new(p).literal_separator(true).build() {
+            Ok(g) => {
+                builder.add(g);
+            }
+            Err(e) => tracing::warn!(pattern = %p, error = %e, "invalid autorelease glob"),
+        }
+    }
+    match builder.build() {
+        Ok(set) => files.iter().any(|f| set.is_match(f)),
+        Err(_) => false,
     }
 }
 
@@ -1277,6 +1342,30 @@ mod tests {
         assert_eq!(cands[0], "@acme/server@v0.39.0", "{cands:?}");
         // Generic fallbacks remain.
         assert!(cands.iter().any(|c| c == "v0.39.0"));
+    }
+
+    #[test]
+    fn autorelease_path_globs_match_the_right_app() {
+        use super::paths_match;
+        let pats = vec![
+            "applications/server/**".to_string(),
+            "packages/shared/**".to_string(),
+        ];
+        assert!(paths_match(
+            &pats,
+            &["applications/server/src/index.ts".into()]
+        ));
+        assert!(paths_match(&pats, &["packages/shared/util.ts".into()]));
+        // A sibling app's change doesn't match.
+        assert!(!paths_match(&pats, &["applications/web/index.ts".into()]));
+        // `*` doesn't cross `/`: a shallow glob won't match a nested file.
+        assert!(!paths_match(
+            &["applications/server/*".to_string()],
+            &["applications/server/src/index.ts".into()]
+        ));
+        // Nothing changed / no patterns ⇒ no match.
+        assert!(!paths_match(&pats, &[]));
+        assert!(!paths_match(&[], &["applications/server/x".into()]));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # 0020 — Per-app monorepo releases + autorelease
 
-**Status:** accepted (phase 1) · **Date:** 2026-07-20 · relates to [0018](0018-monorepo-apps.md), [0009](0009-dev-to-ops-delivery.md)
+**Status:** accepted · **Date:** 2026-07-20 · relates to [0018](0018-monorepo-apps.md), [0009](0009-dev-to-ops-delivery.md)
 
 ## Context
 
@@ -76,10 +76,14 @@ apps:
   `monorepo-release-ci` PR (setup, distinct from the release action; never
   overwritten).
 
-**Phase 2 — autorelease** (`autorelease: patch|auto`, `paths` globs): on a push
-to `main`, apps whose `paths` match a changed file are auto-cut — `patch` always
-bumps patch, `auto` derives the bump from conventional commits. Opt-in per app;
-manual `cut` still coexists; autorelease apps skip the draft (they auto-cut).
+**Autorelease** (`autorelease: patch|auto`, `paths` globs): on a push to `main`,
+each release unit whose `paths` match a changed file (gitignore-style globs via
+`globset`; changed files come from the push payload) is auto-cut — `patch` always
+bumps patch, `auto` derives the bump from conventional commits (reusing the same
+`do_cut` tag→CI path). Opt-in per app; manual `cut` still coexists; autorelease
+units skip the draft (they auto-cut instead). An `auto` unit with no unreleased
+commits is a benign no-op. (`releases::on_app_main_push` → `try_autorelease` /
+`paths_match`; `webhooks::changed_paths`.)
 
 ## Consequences
 
