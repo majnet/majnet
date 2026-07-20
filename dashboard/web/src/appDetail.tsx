@@ -5,8 +5,8 @@ import {
 } from 'lucide-react'
 import {
   send, urls, useApps, useAppContainers, useAppInfo, useAppLogs, useAppSecrets, useEvents, useImports,
-  useManifest, useNodeMetrics, useProjects, useReleases, useReleaseDraft, useWhoami,
-  type AppInfo, type ManifestFile,
+  useManifest, useNodeMetrics, useProjects, useReleases, useReleaseConfig, useReleaseDraft, useWhoami,
+  type AppInfo, type Autorelease, type ManifestFile, type ReleaseConfig,
 } from './api'
 import { useApiMutation } from './mutations'
 import { ConfirmButton, ExtLink, QueryState, short, StatusBadge } from './ui'
@@ -23,6 +23,7 @@ import {
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Sheet, SheetBody, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 
 const FILES = ['base.yaml', 'testing.yaml', 'stable.yaml', 'production.yaml', 'ephemeral.yaml']
@@ -227,7 +228,7 @@ export function AppDetail() {
         </>
       )}
 
-      <Releases org={org} app={app} prodImage={prodImage} />
+      <Releases org={org} app={app} repo={a?.repo} prodImage={prodImage} />
 
       {appEvents.length > 0 && (
         <>
@@ -473,7 +474,77 @@ function DraftCard({ org, app }: { org: string; app: string }) {
   )
 }
 
-function Releases({ org, app, prodImage }: { org: string; app: string; prodImage?: string }) {
+// Per-app release policy (ADR 0020): a scope enables per-app scoped tags
+// (`@<scope>/<leaf>@vX.Y.Z`); autorelease auto-cuts on merge for matched paths.
+// GitOps — saved into project.yaml via a plain commit (no PR). Admin-gated.
+function ReleaseSettings({ org, app, repo }: { org: string; app: string; repo?: string | null }) {
+  const q = useReleaseConfig(org, app)
+  const isAdmin = useWhoami().data?.admin ?? false
+  const m = useApiMutation({ invalidate: [['releaseConfig', org, app], ['releaseDraft', org, app], ['releaseDrafts'], ['events']] })
+  const cfg = q.data
+  const [scope, setScope] = useState('')
+  const [auto, setAuto] = useState<Autorelease>('off')
+  const [paths, setPaths] = useState('')
+  const [dirty, setDirty] = useState(false)
+  // Resync the editor from the server config unless there are local edits.
+  useEffect(() => {
+    if (dirty) return
+    setScope(cfg?.scope ?? '')
+    setAuto(cfg?.autorelease ?? 'off')
+    setPaths((cfg?.paths ?? []).join('\n'))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cfg?.scope, cfg?.autorelease, (cfg?.paths ?? []).join('\n')])
+  if (q.isLoading || q.error) return null
+  const save = () => send(urls.releaseConfig(org, app), {
+    method: 'PUT',
+    json: {
+      scope: scope.trim() || null,
+      autorelease: auto,
+      paths: paths.split('\n').map((s) => s.trim()).filter(Boolean),
+    } satisfies ReleaseConfig,
+  })
+  const perApp = !!cfg?.scope
+  return (
+    <details className="mb-3 rounded-lg border px-4 py-2.5 text-sm">
+      <summary className="cursor-pointer font-medium">
+        Release settings
+        <span className="ml-2 text-xs font-normal text-muted-foreground">
+          {perApp ? `per-app · @${cfg!.scope}/<leaf>@vX.Y.Z` : 'repo-wide vX.Y.Z'}
+          {cfg && cfg.autorelease !== 'off' ? ` · autorelease ${cfg.autorelease}` : ''}
+        </span>
+      </summary>
+      <div className="mt-3 flex flex-col gap-3">
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-muted-foreground">Tag scope — empty = repo-wide <code className="font-mono">vX.Y.Z</code>; set (e.g. <code className="font-mono">{repo ?? 'myscope'}</code>) for per-app <code className="font-mono">@scope/&lt;leaf&gt;@vX.Y.Z</code></span>
+          <Input value={scope} disabled={!isAdmin} placeholder={repo ? `${repo} (per-app)` : '(repo-wide)'} onChange={(e) => { setScope(e.target.value); setDirty(true) }} />
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-muted-foreground">Autorelease on merge to main</span>
+          <Select value={auto} onValueChange={(v) => { setAuto(v as Autorelease); setDirty(true) }} disabled={!isAdmin}>
+            <SelectTrigger className="w-56"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="off">off — manual cuts only</SelectItem>
+              <SelectItem value="patch">patch — always patch</SelectItem>
+              <SelectItem value="auto">auto — conventional commits</SelectItem>
+            </SelectContent>
+          </Select>
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-muted-foreground">Autorelease paths — one glob per line; a merge touching one cuts this app</span>
+          <Textarea className="min-h-24 font-mono text-xs" value={paths} disabled={!isAdmin}
+            placeholder={'applications/server/**\npackages/shared/**'}
+            onChange={(e) => { setPaths(e.target.value); setDirty(true) }} aria-label="Autorelease paths" />
+        </label>
+        <div className="flex justify-end">
+          <Button size="sm" disabled={!isAdmin || !dirty || m.isPending}
+            onClick={() => m.mutate(async () => { const r = await save(); setDirty(false); return r })}>Save settings</Button>
+        </div>
+      </div>
+    </details>
+  )
+}
+
+function Releases({ org, app, repo, prodImage }: { org: string; app: string; repo?: string | null; prodImage?: string }) {
   const q = useReleases(org, app)
   const m = useApiMutation({ invalidate: [['deploys', org], ['releases', org, app], ['events']] })
   const releases = q.data ?? []
@@ -500,10 +571,25 @@ function Releases({ org, app, prodImage }: { org: string; app: string; prodImage
             <DropdownMenuItem onSelect={() => m.mutate(() => send(urls.releaseCut(org, app, 'major')))}>Major <span className="ml-auto pl-4 font-mono text-xs text-muted-foreground">{nv.major}</span></DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
+        {repo && (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" size="sm" disabled={m.isPending} title={`Cut a release for every app in the ${repo} monorepo at once`}>Cut all in {repo} ▾</Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onSelect={() => m.mutate(() => send(urls.releaseCutRepo(org, repo, 'auto')))}>Auto <span className="ml-auto pl-4 text-xs text-muted-foreground">from commits</span></DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onSelect={() => m.mutate(() => send(urls.releaseCutRepo(org, repo, 'patch')))}>Patch</DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => m.mutate(() => send(urls.releaseCutRepo(org, repo, 'minor')))}>Minor</DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => m.mutate(() => send(urls.releaseCutRepo(org, repo, 'major')))}>Major</DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
         <Button variant="outline" size="sm" disabled={m.isPending}
           title="Recover any vX.Y.Z publishes the registry_package webhook missed"
           onClick={() => m.mutate(() => send(urls.releaseBackfill(org, app)))}>Backfill from registry</Button>
       </div>
+      <ReleaseSettings org={org} app={app} repo={repo} />
       <DraftCard org={org} app={app} />
       {releases.length === 0 && (
         <p className="text-sm text-muted-foreground">No releases yet. Tag <code className="font-mono">vX.Y.Z</code> in the app repo, or Backfill from the registry.</p>

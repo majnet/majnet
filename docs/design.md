@@ -304,6 +304,21 @@ stateDiagram-v2
     Deployed --> [*]: hard TTL (7 d) or manual removal
 ```
 
+**Releases (ADR 0009).** A release is a `vX.Y.Z`-tagged image publish, recorded
+per app and auto-tracked into `stable`; `promote` pins a chosen version into
+`production`. Cuts are review-gated via a bot-prepared **draft** (proposed version
++ generated changelog) that an operator submits.
+
+**Per-app monorepo releases (ADR 0020).** A monorepo app can opt into **per-app
+scoped release tags** `@<scope>/<leaf>@vX.Y.Z` (Changesets-style) via a `release:`
+block on its `project.yaml` entry (dashboard-written, no PR), instead of the
+default repo-wide `vX.Y.Z`. Cut/draft/provenance then work per **release unit**
+(the app, or the repo when repo-wide); MajNet creates the scoped git tag and
+seeds the repo's release CI (which parses the tag → builds the one nested image).
+The image tag stays the bare version, so recording is unchanged — only the git
+tag is scoped. Optional **autorelease** (phase 2) auto-cuts an app on a merge that
+touches its declared paths.
+
 ## 14. Secrets
 
 SOPS + age per file in each project's `ops` repo. Recipients: platform class key (`age-production` / `age-stable`) + that project's admin keys. Prod secrets cryptographically unreadable to non-admins and to lower classes; cross-project reads impossible. Delivered as tmpfs files, never env vars. Rotation = edit, commit, blue-green roll.

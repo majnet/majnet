@@ -113,6 +113,10 @@ async fn main() -> Result<()> {
             post(dashboard_api::app_rename_post),
         )
         .route(
+            "/api/apps/{org}/{app}/release-config",
+            get(dashboard_api::release_config_get).put(dashboard_api::release_config_put),
+        )
+        .route(
             "/api/projects/{org}/rename",
             post(dashboard_api::project_rename_post),
         )
@@ -169,6 +173,12 @@ async fn main() -> Result<()> {
         .route("/api/releases/drafts", get(releases::drafts_all))
         .route("/api/releases/{org}/{app}", get(releases::list))
         .route("/api/releases/{org}/{app}/cut", post(releases::cut))
+        // Same `{app}` param slot as the sibling release routes (matchit rejects a
+        // differently-named param at one position); the value is a repo name.
+        .route(
+            "/api/releases/{org}/{app}/cut-repo",
+            post(releases::cut_repo),
+        )
         .route(
             "/api/releases/{org}/{app}/draft",
             get(releases::draft_get).delete(releases::draft_discard),

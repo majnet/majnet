@@ -60,7 +60,10 @@ longer assume `app == repo`):
   HEAD, and computes both the "last version" and (for `bump=auto`) the
   commit range over the whole repo — the max release across every app sharing
   it. One tag releases every app in the monorepo. (`releases.rs::app_repo`,
-  `do_cut`, `commits_since`, `resolve_commit`.)
+  `do_cut`, `commits_since`, `resolve_commit`.) **Amended by [0020](0020-per-app-monorepo-releases.md):**
+  an app may instead opt into per-app scoped release tags
+  `@<scope>/<leaf>@vX.Y.Z` (cut/draft/provenance become per release unit); the
+  repo-wide line described here stays the default.
 - **PR-preview comments** post to the app's actual repo (the monorepo) and carry
   a **per-app marker** (`<!-- majnet-preview:<app> -->`), so several apps'
   previews on one shared PR each get their own comment instead of clobbering a
