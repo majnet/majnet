@@ -114,6 +114,24 @@ async fn dispatch(state: &AppState, event: &str, payload: serde_json::Value) -> 
     Ok(())
 }
 
+/// The files a push touched — the union of every commit's added/modified/removed
+/// paths (deduped). Drives autorelease path matching (ADR 0020).
+fn changed_paths(payload: &serde_json::Value) -> Vec<String> {
+    let mut set = std::collections::BTreeSet::new();
+    if let Some(commits) = payload["commits"].as_array() {
+        for c in commits {
+            for key in ["added", "modified", "removed"] {
+                if let Some(arr) = c[key].as_array() {
+                    for f in arr.iter().filter_map(|v| v.as_str()) {
+                        set.insert(f.to_string());
+                    }
+                }
+            }
+        }
+    }
+    set.into_iter().collect()
+}
+
 async fn on_push(state: &AppState, org: &str, payload: &serde_json::Value) -> anyhow::Result<()> {
     let repo = payload["repository"]["name"].as_str().unwrap_or_default();
     let git_ref = payload["ref"].as_str().unwrap_or_default();
@@ -148,9 +166,11 @@ async fn on_push(state: &AppState, org: &str, payload: &serde_json::Value) -> an
         let platform = majnet_common::tarball::untar(&platform_tar)?;
         crate::org_sync::sync_org(state, org, &platform).await?;
     } else if branch == "main" && repo != "ops" && repo != "platform" {
-        // A push to an app source repo's main: refresh its draft release from the
-        // new commits (best-effort — a no-op unless it's a declared app repo).
-        crate::releases::on_app_main_push(state, org, repo).await;
+        // A push to an app source repo's main: refresh its draft release (or
+        // autorelease apps whose paths changed) — best-effort, a no-op unless
+        // it's a declared app repo.
+        let changed = changed_paths(payload);
+        crate::releases::on_app_main_push(state, org, repo, &changed).await;
     } else {
         tracing::debug!(
             org,
@@ -164,9 +184,31 @@ async fn on_push(state: &AppState, org: &str, payload: &serde_json::Value) -> an
 
 #[cfg(test)]
 mod tests {
-    use super::verify_signature;
+    use super::{changed_paths, verify_signature};
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
+
+    #[test]
+    fn changed_paths_unions_and_dedups_commit_file_lists() {
+        let payload = serde_json::json!({
+            "commits": [
+                { "added": ["applications/server/a.ts"], "modified": ["shared/x.ts"], "removed": [] },
+                { "added": [], "modified": ["applications/server/a.ts"], "removed": ["old.ts"] },
+            ]
+        });
+        let paths = changed_paths(&payload);
+        // Deduped + sorted union across commits and all three change kinds.
+        assert_eq!(
+            paths,
+            vec![
+                "applications/server/a.ts".to_string(),
+                "old.ts".to_string(),
+                "shared/x.ts".to_string(),
+            ]
+        );
+        // No commits ⇒ empty.
+        assert!(changed_paths(&serde_json::json!({})).is_empty());
+    }
 
     fn sign(secret: &str, body: &[u8]) -> String {
         let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
