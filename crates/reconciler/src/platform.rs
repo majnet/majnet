@@ -50,6 +50,70 @@ const ADMIN_NETWORK: &str = "majnet-admin";
 // on the prod node's WireGuard IP (kept off any public interface).
 const ADMINER_CONTAINER_PORT: &str = "8080";
 const ADMINER_HOST_PORT: &str = "8081";
+// Host dir on the prod node holding Adminer's custom index.php (auto-login) +
+// the reconciler-derived DB→role/password map. Bind-mounted read-only, like the
+// db-root secret file — the reconciler is the only holder of the derivation key.
+const ADMINER_CONFIG_DIR: &str = "/etc/majnet/adminer";
+const ADMINER_CREDS_IN_CONTAINER: &str = "/etc/adminer/credentials.json";
+
+// Custom Adminer entrypoint (ADR 0014, per-project auto-login). Extends the
+// stock docker index.php (the DefaultServerPlugin prefill) with a pre-auth hook:
+// on the initial deep-link GET (`?pgsql=…&db=…`, no `username` yet) it looks up
+// the requested DB's per-project human role + password from the reconciler-
+// written map and seeds `$_POST["auth"]`. Adminer's own auth handler establishes
+// the session and redirects to its `?…&username=…` URLs — where the guard no
+// longer fires — so there's no redirect loop and real form POSTs are untouched.
+// (No CSRF token is needed for the login POST; verified against adminer.php.)
+const ADMINER_INDEX_PHP: &str = r##"<?php
+namespace docker {
+	function adminer_object() {
+		final class DefaultServerPlugin extends \Adminer\Plugin {
+			public function __construct(private \Adminer\Adminer $adminer) { }
+			public function loginFormField(...$args): string {
+				return (function (...$args): string {
+					$field = $this->loginFormField(...$args);
+					return \preg_replace_callback('/name="auth\[server\]" value="" title="(?:[^"]+)"/', static function (array $m): string {
+						return \str_replace('value=""', \sprintf('value="%s"', ($_ENV['ADMINER_DEFAULT_SERVER'] ?: 'db')), $m[0]);
+					}, $field);
+				})->call($this->adminer, ...$args);
+			}
+		}
+		$plugins = [];
+		foreach (glob('plugins-enabled/*.php') as $plugin) { $plugins[] = require($plugin); }
+		$adminer = new \Adminer\Plugins($plugins);
+		(function () {
+			$last = &$this->hooks['loginFormField'][\array_key_last($this->hooks['loginFormField'])];
+			if ($last instanceof \Adminer\Adminer) { $p = new DefaultServerPlugin($last); $this->plugins[] = $p; $last = $p; }
+		})->call($adminer);
+		return $adminer;
+	}
+}
+namespace {
+	// MajNet per-project auto-login (ADR 0014): seed the login on the initial
+	// deep-link GET; skipped once Adminer's own URLs carry `username`.
+	if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET' && !isset($_GET['username']) && empty($_POST['auth'])) {
+		$db = isset($_GET['db']) ? (string) $_GET['db'] : '';
+		$map = @json_decode(@file_get_contents('/etc/adminer/credentials.json'), true);
+		if ($db !== '' && is_array($map) && isset($map[$db]['user'])) {
+			$_POST['auth'] = [
+				'driver' => 'pgsql',
+				'server' => ($_ENV['ADMINER_DEFAULT_SERVER'] ?: 'majnet-postgres'),
+				'username' => $map[$db]['user'],
+				'password' => $map[$db]['password'],
+				'db' => $db,
+				'permanent' => 0,
+			];
+		}
+	}
+	if (basename($_SERVER['DOCUMENT_URI'] ?? $_SERVER['REQUEST_URI']) === 'adminer.css' && is_readable('adminer.css')) {
+		header('Content-Type: text/css');
+		readfile('adminer.css');
+		exit;
+	}
+	function adminer_object() { return \docker\adminer_object(); }
+	require('adminer.php');
+}
+"##;
 const ADMINER_MEM: i64 = 256 * MB;
 const ADMINER_NANO_CPUS: i64 = 500_000_000; // 0.5 CPU
 
@@ -83,23 +147,30 @@ pub async fn converge_platform(state: &AppState, nodes: &NodesFile, platform: &S
             &format!("FAILED: {e:#}"),
         );
     }
-    if let Err(e) = converge_adminer(&docker, &prod.wireguard_ip).await {
-        tracing::error!(error = format!("{e:#}"), "adminer convergence failed");
-        let _ = state.store.record(
-            &platform.commit,
-            "platform",
-            "prod",
-            "adminer",
-            &format!("FAILED: {e:#}"),
-        );
-    }
+    // Adminer converges separately, *after* the project loop — it needs the
+    // per-project DB credentials collected while converging each app.
 }
 
 /// Managed Adminer (ADR 0014): a DB browser on a private network shared with
-/// postgres, capped, config-hash-managed like edge-main. Idempotent; recreated
-/// only when its spec changes. Best-effort — never blocks project convergence.
-async fn converge_adminer(docker: &Docker, wireguard_ip: &str) -> Result<()> {
-    ensure_network(docker, ADMIN_NETWORK).await?;
+/// postgres, capped, config-hash-managed like edge-main, with per-project
+/// auto-login. Runs *after* the project loop so `creds` (DB name → the owning
+/// project's human role + derived password, production/Postgres only) is
+/// complete. Idempotent; recreated only when its spec — image, port, or the
+/// index.php + credential map — changes. Best-effort; never blocks the fleet.
+pub(crate) async fn converge_adminer(
+    state: &AppState,
+    nodes: &NodesFile,
+    creds: &BTreeMap<String, (String, String)>,
+) -> Result<()> {
+    if state.config.docker_local {
+        return Ok(());
+    }
+    let prod = nodes
+        .by_role("prod")
+        .context("no prod node in nodes.yaml")?;
+    let docker = state.nodes(nodes).client_for(prod).await?;
+
+    ensure_network(&docker, ADMIN_NETWORK).await?;
     // Put postgres (the engine humans browse) on the admin network so Adminer
     // can reach it by name. Best-effort: postgres may not exist yet, or may
     // already be attached — both are fine.
@@ -114,21 +185,50 @@ async fn converge_adminer(docker: &Docker, wireguard_ip: &str) -> Result<()> {
         .await;
 
     let env = vec!["ADMINER_DEFAULT_SERVER=majnet-postgres".to_string()];
-    let hash = adminer_hash(&env, wireguard_ip);
-    if running_with_hash(docker, ADMINER_NAME, &hash).await? {
+
+    // The custom entrypoint + the DB→{user,password} map it reads. The map is
+    // regenerated every converge; a change (app added/removed) reconciles.
+    let cred_map: BTreeMap<String, serde_json::Value> = creds
+        .iter()
+        .map(|(db, (user, password))| {
+            (
+                db.clone(),
+                serde_json::json!({ "user": user, "password": password }),
+            )
+        })
+        .collect();
+    let files: BTreeMap<String, Vec<u8>> = BTreeMap::from([
+        (
+            "index.php".to_string(),
+            ADMINER_INDEX_PHP.as_bytes().to_vec(),
+        ),
+        (
+            "credentials.json".to_string(),
+            serde_json::to_vec(&cred_map).context("serializing adminer credentials")?,
+        ),
+    ]);
+
+    let hash = adminer_hash(&env, &prod.wireguard_ip, &files);
+    if running_with_hash(&docker, ADMINER_NAME, &hash).await? {
         return Ok(());
     }
-    ensure_image(docker, ADMINER_IMAGE).await?;
-    remove_container(docker, ADMINER_NAME).await;
+    ensure_image(&docker, ADMINER_IMAGE).await?;
+    ensure_image(&docker, HELPER_IMAGE).await?;
+    deliver_files(&docker, ADMINER_CONFIG_DIR, &files).await?;
+    remove_container(&docker, ADMINER_NAME).await;
     // Publish the browser on the prod node's WireGuard IP only — the tailnet
     // Caddy dials `<wireguard_ip>:8081`; never bound to a public interface.
     let port_bindings = HashMap::from([(
         format!("{ADMINER_CONTAINER_PORT}/tcp"),
         Some(vec![PortBinding {
-            host_ip: Some(wireguard_ip.to_string()),
+            host_ip: Some(prod.wireguard_ip.clone()),
             host_port: Some(ADMINER_HOST_PORT.into()),
         }]),
     )]);
+    let binds = vec![
+        format!("{ADMINER_CONFIG_DIR}/index.php:/var/www/html/index.php:ro"),
+        format!("{ADMINER_CONFIG_DIR}/credentials.json:{ADMINER_CREDS_IN_CONTAINER}:ro"),
+    ];
     let created = docker
         .create_container(
             Some(qp::CreateContainerOptions {
@@ -142,6 +242,7 @@ async fn converge_adminer(docker: &Docker, wireguard_ip: &str) -> Result<()> {
                 exposed_ports: Some(vec![format!("{ADMINER_CONTAINER_PORT}/tcp")]),
                 host_config: Some(HostConfig {
                     network_mode: Some(ADMIN_NETWORK.into()),
+                    binds: Some(binds),
                     port_bindings: Some(port_bindings),
                     memory: Some(ADMINER_MEM),
                     nano_cpus: Some(ADMINER_NANO_CPUS),
@@ -160,11 +261,11 @@ async fn converge_adminer(docker: &Docker, wireguard_ip: &str) -> Result<()> {
         .start_container(&created.id, None::<qp::StartContainerOptions>)
         .await
         .context("starting adminer")?;
-    tracing::info!("adminer deployed");
+    tracing::info!(databases = creds.len(), "adminer deployed");
     Ok(())
 }
 
-fn adminer_hash(env: &[String], wireguard_ip: &str) -> String {
+fn adminer_hash(env: &[String], wireguard_ip: &str, files: &BTreeMap<String, Vec<u8>>) -> String {
     let mut h = Sha256::new();
     h.update(ADMINER_IMAGE.as_bytes());
     h.update(ADMIN_NETWORK.as_bytes());
@@ -177,6 +278,12 @@ fn adminer_hash(env: &[String], wireguard_ip: &str) -> String {
     h.update(wireguard_ip.as_bytes());
     h.update(ADMINER_HOST_PORT.as_bytes());
     h.update(ADMINER_CONTAINER_PORT.as_bytes());
+    for (name, content) in files {
+        h.update(name.as_bytes());
+        h.update([0]);
+        h.update(content);
+        h.update([0]);
+    }
     hex::encode(h.finalize())[..16].to_string()
 }
 
