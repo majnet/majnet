@@ -403,10 +403,18 @@ struct ContainerHistoryQuery {
     range: Option<i64>,
     /// The container name to chart (as it appears in `/api/metrics` `apps[].name`).
     container: String,
+    /// Chart the whole app across container generations: blue-green redeploys mint
+    /// a new `<project>-<app>-<class>-<hash>` name each time, so an exact-name
+    /// series resets on every deploy. With `prefix=true` the stable identity
+    /// (hash stripped) is matched and samples are summed per timestamp, so the
+    /// chart is continuous across redeploys. App-detail uses this; `/nodes`
+    /// (per-container) does not.
+    #[serde(default)]
+    prefix: bool,
 }
 
-/// `GET /api/metrics/container-history?range=<sec>&container=<name>` — persisted
-/// per-container samples (ADR 0017 follow-up), oldest first.
+/// `GET /api/metrics/container-history?range=<sec>&container=<name>[&prefix=true]`
+/// — persisted per-container samples (ADR 0017 follow-up), oldest first.
 async fn container_history_get(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ContainerHistoryQuery>,
@@ -417,9 +425,14 @@ async fn container_history_get(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
         - range;
-    state
-        .store
-        .container_history(&q.container, since)
+    let result = if q.prefix {
+        state
+            .store
+            .app_history(crate::state::app_identity(&q.container), since)
+    } else {
+        state.store.container_history(&q.container, since)
+    };
+    result
         .map(Json)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))
 }

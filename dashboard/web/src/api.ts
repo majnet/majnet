@@ -285,10 +285,10 @@ export const useMetricsHistory = (range: number, enabled = true) =>
   })
 
 export interface ContainerPoint { ts: number; container: string; cpu_pct: number; mem_used: number; mem_limit: number }
-export const useContainerHistory = (range: number, container: string, enabled = true) =>
+export const useContainerHistory = (range: number, container: string, enabled = true, byApp = false) =>
   useQuery({
-    queryKey: ['container-history', range, container],
-    queryFn: () => getJSON<ContainerPoint[]>(`${RECON}/metrics/container-history?range=${range}&container=${encodeURIComponent(container)}`),
+    queryKey: ['container-history', range, container, byApp],
+    queryFn: () => getJSON<ContainerPoint[]>(`${RECON}/metrics/container-history?range=${range}&container=${encodeURIComponent(container)}${byApp ? '&prefix=true' : ''}`),
     enabled,
     refetchInterval: 60_000,
   })
