@@ -42,6 +42,11 @@ After=wg-quick@wg0.service
 Requires=wg-quick@wg0.service
 
 [Service]
+# Docker 29's daemon refuses API < 1.40. The per-project ingress Traefik's
+# docker provider hard-pins API 1.24 (ignores DOCKER_API_VERSION), so without
+# this the provider can't reach the daemon → no routers → VPN hosts 404. Lower
+# the accepted minimum so old clients (Traefik) work.
+Environment=DOCKER_MIN_API_VERSION=1.24
 ExecStart=
 ExecStart=/usr/bin/dockerd --containerd=/run/containerd/containerd.sock
 EOF
