@@ -128,6 +128,8 @@ pub struct ConfigureForm {
     admin_ssh_keys: String,
     #[serde(default)]
     ghcr_token: String,
+    #[serde(default)]
+    acme_email: String,
 }
 
 pub async fn configure(
@@ -144,6 +146,7 @@ pub async fn configure(
     if !form.ghcr_token.trim().is_empty() {
         state.ghcr_token = form.ghcr_token.trim().to_string();
     }
+    state.acme_email = form.acme_email.trim().to_string();
     state.admin_ssh_keys = form.admin_ssh_keys.trim().to_string();
     state.save(&app.config.state_path()).map_err(fail)?;
     enroll::ensure_main_registered(&app.config, &mut state)
@@ -334,9 +337,13 @@ fn panel_basics(s: &SetupState) -> String {
 <div class="field"><label for="f-key">Tailscale API key <span class="opt">— optional</span></label>
 <input id="f-key" name="tailscale_api_key" type="password" placeholder="{ts_hint}">
 <span class="hint">Stored only on this node.</span></div></div>
+<div class="row2">
 <div class="field"><label for="f-ghcr">GHCR pull token <span class="opt">— optional</span></label>
 <input id="f-ghcr" name="ghcr_token" type="password" placeholder="ghp_… (read:packages)">
 <span class="hint">Classic PAT with read:packages so nodes can pull private app images. Also settable later in Settings.</span></div>
+<div class="field"><label for="f-acme">ACME email <span class="opt">— optional</span></label>
+<input id="f-acme" name="acme_email" type="email" value="{acme}" placeholder="you@example.com">
+<span class="hint">Enables Let&#39;s Encrypt certs for VPN ingress (ADR 0013); the CA emails expiry notices here. Blank = self-signed.</span></div></div>
 <div class="field"><label for="f-ssh">Admin SSH public keys <span class="opt">— one per line</span></label>
 <textarea id="f-ssh" name="admin_ssh_keys" spellcheck="false" placeholder="ssh-ed25519 AAAA… you@laptop">{keys}</textarea>
 <span class="hint">Authorized for the <code>majnet</code> admin user on this and every enrolled node.</span></div>
@@ -346,6 +353,7 @@ fn panel_basics(s: &SetupState) -> String {
         org = esc(&s.root_org),
         host = esc(&s.public_host),
         net = esc(&s.tailnet),
+        acme = esc(&s.acme_email),
         keys = esc(&s.admin_ssh_keys),
         ts_hint = if s.tailscale_api_key.is_empty() {
             "tskey-api-…"

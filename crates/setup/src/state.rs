@@ -18,6 +18,11 @@ pub struct SetupState {
     /// bot.env, so nodes can pull private app images (ADR 0012).
     #[serde(default)]
     pub ghcr_token: String,
+    /// ACME account email → `MAJNET_ACME_EMAIL` in bot.env. Enables Let's Encrypt
+    /// issuance for per-project VPN ingress certs (ADR 0013); the CA uses it for
+    /// expiry notices. Optional — blank leaves ingress on self-signed certs.
+    #[serde(default)]
+    pub acme_email: String,
     /// Public IP/hostname of the main node (webhook + wizard callbacks).
     #[serde(default)]
     pub public_host: String,

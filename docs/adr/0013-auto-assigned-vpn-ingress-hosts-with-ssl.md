@@ -153,7 +153,9 @@ edits inside the bot's existing Cloudflare + Tailscale ownership.)*
    key to the production recipient, and commits cert+key to
    `platform/ingress-certs/{project}.{crt,key.age}`; hooked into org-sync
    per synced project (non-fatal), committing only on change, renewing inside a
-   30-day window. Config: `MAJNET_ACME_EMAIL` (+ `MAJNET_ACME_STAGING`).
+   30-day window. Config: `MAJNET_ACME_EMAIL` (+ `MAJNET_ACME_STAGING`) — the
+   setup wizard collects `MAJNET_ACME_EMAIL` (optional field) and writes it to
+   `bot.env`, so it no longer has to be added by hand.
 3. ✅ **Reconciler: install the cert.** `ensure_ingress` decrypts
    `{project}.key.age` (age-production key), delivers `wildcard.{crt,key}` +
    a Traefik file-provider config setting `tls.stores.default.defaultCertificate`
