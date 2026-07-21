@@ -547,6 +547,19 @@ pub struct ContainerPoint {
     pub mem_limit: i64,
 }
 
+/// The stable app identity of a container name: `<project>-<app>-<class>-<hash>`
+/// → `<project>-<app>-<class>` (the volatile blue-green hash stripped). Left
+/// unchanged when the last segment isn't a hex hash (e.g. platform containers
+/// like `majnet-postgres`, `edge-main`), so those still match exactly.
+pub fn app_identity(container: &str) -> &str {
+    match container.rsplit_once('-') {
+        Some((prefix, hash)) if hash.len() >= 6 && hash.chars().all(|c| c.is_ascii_hexdigit()) => {
+            prefix
+        }
+        _ => container,
+    }
+}
+
 impl Store {
     /// Write one raw per-container sample (ADR 0017 follow-up).
     pub fn insert_container_sample(
@@ -614,6 +627,31 @@ impl Store {
                     cpu_pct: row.get(2)?,
                     mem_used: row.get(3)?,
                     mem_limit: row.get(4)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// App history across container generations: matches `<prefix>-%` (see
+    /// `app_identity`) and sums cpu/mem per timestamp, so blue-green redeploys
+    /// (each a new `-<hash>` container) don't reset the series. The `container`
+    /// field of each point is the stable prefix.
+    pub fn app_history(&self, prefix: &str, since: i64) -> Result<Vec<ContainerPoint>> {
+        let conn = self.conn.lock().unwrap();
+        let like = format!("{prefix}-%");
+        let mut stmt = conn.prepare(
+            "SELECT ts, SUM(cpu_pct), SUM(mem_used), MAX(mem_limit) FROM container_samples
+             WHERE container LIKE ?1 AND ts >= ?2 GROUP BY ts ORDER BY ts",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![like, since], |row| {
+                Ok(ContainerPoint {
+                    ts: row.get(0)?,
+                    container: prefix.to_string(),
+                    cpu_pct: row.get(1)?,
+                    mem_used: row.get(2)?,
+                    mem_limit: row.get(3)?,
                 })
             })?
             .collect::<Result<_, _>>()?;
@@ -781,6 +819,22 @@ mod tests {
 
         // Unrelated app → nothing.
         assert!(s.app_info_for("proj", "other").unwrap().is_empty());
+    }
+
+    #[test]
+    fn app_identity_strips_only_the_blue_green_hash() {
+        assert_eq!(
+            app_identity("zyme-pelican-production-fbbbaaa7"),
+            "zyme-pelican-production"
+        );
+        assert_eq!(
+            app_identity("projects-poletime-production-99dace03"),
+            "projects-poletime-production"
+        );
+        // Non-hash last segments (platform containers) are left exact.
+        assert_eq!(app_identity("majnet-postgres"), "majnet-postgres");
+        assert_eq!(app_identity("edge-main"), "edge-main");
+        assert_eq!(app_identity("majnet-adminer"), "majnet-adminer");
     }
 
     #[test]

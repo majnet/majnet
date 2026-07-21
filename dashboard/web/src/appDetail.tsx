@@ -385,7 +385,7 @@ function EnvironmentZone({
                     <td className="py-1 pr-3">{c.name}</td><td className="py-1 pr-3">{c.state}</td>
                     <td className="py-1 pr-3 tabular-nums">{c.cpu_pct.toFixed(1)}%</td>
                     <td className="py-1 pr-3 tabular-nums">{(c.mem_used / 1e6).toFixed(0)} MB{c.mem_limit ? ` / ${(c.mem_limit / 1e9).toFixed(1)} GB` : ''}</td>
-                    <td className="py-1"><ContainerSpark container={c.name} range={3600} /></td>
+                    <td className="py-1"><ContainerSpark container={c.name} range={3600} byApp /></td>
                   </tr>
                 ))}
               </tbody>
