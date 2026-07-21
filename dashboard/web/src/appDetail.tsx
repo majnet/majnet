@@ -582,12 +582,14 @@ function ServiceVersions({ org, app, current }: { org: string; app: string; curr
   const versions = q.data?.versions ?? []
   const currentIdx = current ? versions.indexOf(current) : -1
   return (
-    <Card className="gap-0 py-0">
+    <>
+      <SectionHead title="Version" hint="running version + available upstream releases" />
+      <Card className="gap-0 py-0">
       <div className="flex flex-wrap items-center gap-2.5 border-b px-4 py-3">
-        <h2 className="font-semibold">Version</h2>
+        <span className="text-sm font-medium text-muted-foreground">Running</span>
         {current
           ? <StatusBadge tone="accent">{current}</StatusBadge>
-          : <span className="text-xs text-muted-foreground">unknown</span>}
+          : <span className="text-xs text-muted-foreground">unknown (set on next deploy)</span>}
         {q.data?.image_repo && <span className="font-mono text-[11px] text-muted-foreground">{q.data.image_repo}</span>}
         <div className="flex-1" />
         {currentIdx === 0 && <span className="text-xs text-muted-foreground">up to date</span>}
@@ -624,7 +626,8 @@ function ServiceVersions({ org, app, current }: { org: string; app: string; curr
           )}
         </QueryState>
       </div>
-    </Card>
+      </Card>
+    </>
   )
 }
 
