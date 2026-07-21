@@ -345,15 +345,16 @@ impl Store {
         Ok(())
     }
 
-    /// Release progress rows for `org`, newest first — active ones plus terminal
-    /// (done/failed) ones from the last hour (older terminal rows are pruned on
-    /// read, a lightweight TTL GC).
+    /// Release progress rows for `org`, newest first. Terminal rows are pruned on
+    /// read (a lightweight TTL GC): a **done** release (reached `stable`) lingers
+    /// only briefly as a "✓ released" confirmation, then drops off; a **failed**
+    /// one stays much longer so an operator can still see + act on it.
     pub fn release_progress(&self, org: &str) -> Result<Vec<ReleaseProgress>> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "DELETE FROM release_progress
-             WHERE status IN ('done', 'failed')
-               AND updated_at < datetime('now', '-1 hour')",
+             WHERE (status = 'done'   AND updated_at < datetime('now', '-5 minutes'))
+                OR (status = 'failed' AND updated_at < datetime('now', '-1 hour'))",
             [],
         )?;
         let mut stmt = conn.prepare(
@@ -657,24 +658,48 @@ mod tests {
         assert_eq!(web.stage, "tagging");
         assert_eq!(web.detail, "boom");
 
-        // Terminal rows older than the TTL are pruned on read; active rows stay.
+        // Terminal-row TTL, pruned on read: a `done` release fades fast (~5 min),
+        // a `failed` one lingers (~1 h), and `active` rows never age out.
         {
             let conn = s.conn.lock().unwrap();
+            // done, 10 min old → past the short TTL, pruned.
             conn.execute(
-                "UPDATE release_progress SET updated_at = datetime('now', '-2 hours')",
+                "INSERT INTO release_progress (org, app, version, status, stage, updated_at)
+                 VALUES ('o', 'done-old', '1.0.0', 'done', 'tracked', datetime('now','-10 minutes'))",
                 [],
-            )
-            .unwrap();
+            ).unwrap();
+            // done, 1 min old → still within the confirmation window, kept.
             conn.execute(
-                "INSERT INTO release_progress (org, app, version, status, stage)
-                 VALUES ('o', 'live', '9.9.9', 'active', 'building')",
+                "INSERT INTO release_progress (org, app, version, status, stage, updated_at)
+                 VALUES ('o', 'done-fresh', '1.0.0', 'done', 'tracked', datetime('now','-1 minutes'))",
                 [],
-            )
-            .unwrap();
+            ).unwrap();
+            // failed, 30 min old → within the long TTL, kept for triage.
+            conn.execute(
+                "INSERT INTO release_progress (org, app, version, status, stage, updated_at)
+                 VALUES ('o', 'failed-mid', '1.0.0', 'failed', 'tagging', datetime('now','-30 minutes'))",
+                [],
+            ).unwrap();
+            // active, ancient → active never ages out.
+            conn.execute(
+                "INSERT INTO release_progress (org, app, version, status, stage, updated_at)
+                 VALUES ('o', 'active-old', '1.0.0', 'active', 'building', datetime('now','-2 hours'))",
+                [],
+            ).unwrap();
         }
-        let rows = s.release_progress("o").unwrap();
-        assert_eq!(rows.len(), 1, "stale done/failed pruned, active kept");
-        assert_eq!(rows[0].app, "live");
+        let apps: std::collections::BTreeSet<_> = s
+            .release_progress("o")
+            .unwrap()
+            .into_iter()
+            .map(|r| r.app)
+            .collect();
+        assert!(!apps.contains("done-old"), "done past 5 min pruned");
+        assert!(
+            apps.contains("done-fresh"),
+            "recent done kept as confirmation"
+        );
+        assert!(apps.contains("failed-mid"), "failed kept for triage");
+        assert!(apps.contains("active-old"), "active never ages out");
     }
 
     #[test]
