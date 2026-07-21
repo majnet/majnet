@@ -133,7 +133,9 @@ async fn mint_authkey(state: &AppState, project: &str) -> Result<String> {
             "tags": [format!("tag:proj-{project}")],
         }}},
         "expirySeconds": 3600,
-        "description": format!("majnet ingress: {project}"),
+        // Tailscale rejects `:` (and other punctuation) in key descriptions —
+        // keep it to letters/digits/spaces/hyphens.
+        "description": format!("majnet ingress {project}"),
     });
     let response = state
         .http
