@@ -132,6 +132,9 @@ pub fn write_bot_config(
     if !state.ghcr_token.is_empty() {
         env.insert("MAJNET_GHCR_TOKEN".into(), state.ghcr_token.clone());
     }
+    if !state.acme_email.is_empty() {
+        env.insert("MAJNET_ACME_EMAIL".into(), state.acme_email.clone());
+    }
 
     let content: String = env.iter().map(|(k, v)| format!("{k}={v}\n")).collect();
     std::fs::write(config.bot_env_path(), content)
