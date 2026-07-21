@@ -414,12 +414,18 @@ async fn local_sh(cmd: &str, stdin: &str, timeout: u64) -> Result<String> {
 /// is never written to disk, passed on the argv, or logged. The remote command
 /// is idempotent (skips a key already present).
 async fn install_enroll_key(host: &str, password: &str, enroll_key: &str) -> Result<()> {
-    anyhow::ensure!(!enroll_key.trim().is_empty(), "no enrollment pubkey to install");
+    anyhow::ensure!(
+        !enroll_key.trim().is_empty(),
+        "no enrollment pubkey to install"
+    );
     // Askpass helper: a tiny script that just echoes the password from the env.
     // Only the script path is on disk; the secret stays in the env var.
     let askpass = std::env::temp_dir().join(format!("majnet-askpass-{}", std::process::id()));
-    std::fs::write(&askpass, "#!/bin/sh\nprintf '%s\\n' \"$MAJNET_ENROLL_PW\"\n")
-        .context("writing askpass helper")?;
+    std::fs::write(
+        &askpass,
+        "#!/bin/sh\nprintf '%s\\n' \"$MAJNET_ENROLL_PW\"\n",
+    )
+    .context("writing askpass helper")?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -458,7 +464,8 @@ async fn install_enroll_key(host: &str, password: &str, enroll_key: &str) -> Res
     )
     .await;
     let _ = std::fs::remove_file(&askpass);
-    res.map(|_| ()).context("installing enrollment key via password")
+    res.map(|_| ())
+        .context("installing enrollment key via password")
 }
 
 async fn run_cmd(program: &str, args: &[&str], stdin: &str, timeout_secs: u64) -> Result<String> {
@@ -600,9 +607,10 @@ mod tests {
             serde_json::from_str(r#"{"role":"private","ssh_host":"10.0.0.9"}"#).unwrap();
         assert!(r.ssh_password.is_none());
         // …and threads through when supplied.
-        let r: EnrollRequest =
-            serde_json::from_str(r#"{"role":"private","ssh_host":"10.0.0.9","ssh_password":"s3cr3t"}"#)
-                .unwrap();
+        let r: EnrollRequest = serde_json::from_str(
+            r#"{"role":"private","ssh_host":"10.0.0.9","ssh_password":"s3cr3t"}"#,
+        )
+        .unwrap();
         assert_eq!(r.ssh_password.as_deref(), Some("s3cr3t"));
         assert!(validate(&r).is_ok());
     }
