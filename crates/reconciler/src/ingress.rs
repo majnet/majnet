@@ -169,6 +169,11 @@ pub async fn ensure_ingress(
                 ContainerCreateBody {
                     image: Some(TRAEFIK_IMAGE.into()),
                     cmd: Some(cmd),
+                    // Docker 29's daemon refuses API < 1.40; Traefik's docker
+                    // client otherwise defaults to 1.24 → the provider errors
+                    // ("client version 1.24 is too old") and discovers no
+                    // containers → every route 404s. Pin a supported version.
+                    env: Some(vec!["DOCKER_API_VERSION=1.44".to_string()]),
                     labels: Some(HashMap::from([
                         (LABEL_PROJECT.to_string(), project.to_string()),
                         (LABEL_CONFIG.to_string(), hash),
@@ -224,11 +229,15 @@ async fn load_wildcard_cert(
     ])))
 }
 
-/// Config hash for the ingress Traefik: image + the delivered cert bytes, so a
-/// renewed cert (or first issuance) changes the hash and forces a recreate.
+/// Config hash for the ingress Traefik: image + spec salt + the delivered cert
+/// bytes, so a renewed cert (or first issuance) — or a change to the container
+/// spec below (bump the salt) — changes the hash and forces a recreate.
 fn ingress_hash(cert: Option<&BTreeMap<String, Vec<u8>>>) -> String {
     let mut h = Sha256::new();
     h.update(TRAEFIK_IMAGE.as_bytes());
+    // Bump when the Traefik container spec changes (env/cmd/mounts) so existing
+    // ingresses recreate. v2: pin DOCKER_API_VERSION for Docker 29 daemons.
+    h.update(b"spec-v2");
     if let Some(files) = cert {
         for (name, content) in files {
             h.update(name.as_bytes());

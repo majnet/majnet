@@ -89,7 +89,9 @@ pub async fn ensure_domains(state: &AppState, rendered: &BTreeMap<String, String
 pub async fn ensure_ingress_dns(state: &AppState, project: &str, base_domain: &str) -> Result<()> {
     let (Some(token), Some(tailnet)) = (
         state.config.cloudflare_token.clone(),
-        state.config.tailnet.clone(),
+        // DB-first (dashboard Settings), literal name only — not the `-` API
+        // default, since we build the CNAME target `{project}.{tailnet}`.
+        crate::tailscale::literal_tailnet(state),
     ) else {
         tracing::debug!(
             project,
