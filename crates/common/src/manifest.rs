@@ -60,7 +60,11 @@ pub struct AppManifest {
     /// private node publishing `[4317, 4318]` so prod-node apps can push OTLP
     /// over WG (ADR 0023). Empty (the default) publishes nothing. Requires
     /// `replicas: 1` — a fixed host port has a single binder.
-    #[serde(default)]
+    ///
+    /// Skipped when empty on serialization so adding this field doesn't perturb
+    /// the reconciler's `config_hash` for existing apps — no fleet-wide recycle
+    /// on rollout; only an app that actually sets `wg_ports` re-converges.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub wg_ports: Vec<u16>,
 }
 
@@ -487,6 +491,15 @@ mod tests {
             format!("name: api\nimage: ghcr.io/org/api@{DIGEST}\nwg_ports:\n  - 4317\n  - 4318\n");
         let m = AppManifest::parse(&yaml).unwrap();
         assert_eq!(m.wg_ports, vec![4317, 4318]);
+    }
+
+    #[test]
+    fn empty_wg_ports_is_not_serialized() {
+        // Skipped-when-empty so the reconciler's manifest-serialized config_hash
+        // is unchanged for existing apps — no fleet-wide recycle on rollout.
+        let m = AppManifest::parse(&valid()).unwrap();
+        assert!(m.wg_ports.is_empty());
+        assert!(!serde_yaml::to_string(&m).unwrap().contains("wg_ports"));
     }
 
     #[test]
