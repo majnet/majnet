@@ -309,6 +309,16 @@ fn ts_tailnet(state: &AppState) -> Option<String> {
     )
 }
 
+/// The *literal* configured tailnet (DB-first, then env) — `None` if unset or the
+/// `-` API default. Callers that build a real hostname (e.g. the split-DNS CNAME
+/// target `{project}.{tailnet}`) need the literal name, not `-`. DB-first so the
+/// value set via the dashboard Settings is honored, not just `MAJNET_TAILNET`.
+pub fn literal_tailnet(state: &AppState) -> Option<String> {
+    cfg(state, "tailnet")
+        .or_else(|| state.config.tailnet.clone())
+        .filter(|t| !t.is_empty() && t != "-")
+}
+
 struct OauthToken {
     token: String,
     expires_at: Instant,
