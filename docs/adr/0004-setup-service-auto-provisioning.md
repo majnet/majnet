@@ -53,11 +53,14 @@ units (bot, reconciler, setup) → print the wizard URL
    checkout, renders it (age recipients into `.sops.yaml`, main node into
    `nodes.yaml`), and hands the tree to the **bot** to commit — see below.
 5. Node enrollment (also available later, WG-internal only): operator gives
-   host + role and authorizes setup's SSH pubkey → setup pushes the
-   `bootstrap/` payload, renders `node.env` (static WG IP by role, current
-   peer set), runs `bootstrap.sh` remotely, captures the node's WG pubkey,
-   issues its Docker server cert from the CA, re-renders peers on existing
-   nodes, and registers the node in `nodes.yaml` — via the bot.
+   host + role and either authorizes setup's SSH pubkey on the box's `root`
+   **or** supplies the `root` password in the dashboard (setup installs its
+   enrollment key over a one-shot password login — `SSH_ASKPASS`, never stored
+   or logged — then proceeds key-only). Setup pushes the `bootstrap/` payload,
+   renders `node.env` (static WG IP by role, current peer set), runs
+   `bootstrap.sh` remotely, captures the node's WG pubkey, issues its Docker
+   server cert from the CA, re-renders peers on existing nodes, and registers
+   the node in `nodes.yaml` — via the bot.
 6. Done → the public listener closes permanently (`/etc/majnet/setup-done`);
    only the WG-internal enrollment API remains.
 

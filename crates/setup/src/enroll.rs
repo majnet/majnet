@@ -29,6 +29,13 @@ pub struct EnrollRequest {
     /// SSH destination: the node's public IP or hostname, with the
     /// enrollment pubkey authorized for root (fresh) or majnet (re-run).
     pub ssh_host: String,
+    /// Optional `root` password for a fresh box that doesn't yet have the
+    /// enrollment key authorized. When set, the enrollment key is installed
+    /// into `root`'s authorized_keys over a one-shot password login, then the
+    /// rest of the flow proceeds key-only. Empty/None ⇒ key-only (the operator
+    /// pre-authorized the key). Never logged or persisted.
+    #[serde(default)]
+    pub ssh_password: Option<String>,
 }
 
 /// Run the whole enrollment; returns the step-by-step log shown to the
@@ -45,6 +52,22 @@ pub async fn run(
 
     ensure_main_registered(config, state).await?;
     let enroll_key = enroll_pubkey(config);
+
+    // Fresh box with only root+password? Install the enrollment key first, over
+    // a one-shot password login; everything after this is key-only. Non-fatal:
+    // a re-run on an already-hardened node (root disabled) keeps working via the
+    // key that's already authorized.
+    if let Some(pw) = req.ssh_password.as_deref().filter(|p| !p.is_empty()) {
+        writeln!(
+            log,
+            "→ installing enrollment key on {} (root password login)",
+            req.ssh_host
+        )
+        .ok();
+        if let Err(e) = install_enroll_key(&req.ssh_host, pw, &enroll_key).await {
+            writeln!(log, "  ! password key-install skipped: {e:#}").ok();
+        }
+    }
 
     writeln!(
         log,
@@ -385,10 +408,77 @@ async fn local_sh(cmd: &str, stdin: &str, timeout: u64) -> Result<String> {
     run_cmd("sh", &["-c", cmd], stdin, timeout).await
 }
 
+/// Install the enrollment pubkey into `root`'s authorized_keys on a fresh box,
+/// authenticating with a one-shot root password. Uses OpenSSH's `SSH_ASKPASS`
+/// (force mode) so the password rides an env var into the ssh child only — it
+/// is never written to disk, passed on the argv, or logged. The remote command
+/// is idempotent (skips a key already present).
+async fn install_enroll_key(host: &str, password: &str, enroll_key: &str) -> Result<()> {
+    anyhow::ensure!(!enroll_key.trim().is_empty(), "no enrollment pubkey to install");
+    // Askpass helper: a tiny script that just echoes the password from the env.
+    // Only the script path is on disk; the secret stays in the env var.
+    let askpass = std::env::temp_dir().join(format!("majnet-askpass-{}", std::process::id()));
+    std::fs::write(&askpass, "#!/bin/sh\nprintf '%s\\n' \"$MAJNET_ENROLL_PW\"\n")
+        .context("writing askpass helper")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&askpass, std::fs::Permissions::from_mode(0o700))
+            .context("chmod askpass helper")?;
+    }
+    // The key arrives on stdin; the remote shell appends it once.
+    let remote = "install -d -m 700 /root/.ssh && \
+         k=$(cat) && \
+         { grep -qxF \"$k\" /root/.ssh/authorized_keys 2>/dev/null || \
+           printf '%s\\n' \"$k\" >> /root/.ssh/authorized_keys; } && \
+         chmod 600 /root/.ssh/authorized_keys";
+    let res = run_cmd_env(
+        "ssh",
+        &[
+            "-o",
+            "PreferredAuthentications=password",
+            "-o",
+            "PubkeyAuthentication=no",
+            "-o",
+            "NumberOfPasswordPrompts=1",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-o",
+            "ConnectTimeout=15",
+            &format!("root@{host}"),
+            remote,
+        ],
+        &[
+            ("MAJNET_ENROLL_PW", password),
+            ("SSH_ASKPASS", &askpass.display().to_string()),
+            ("SSH_ASKPASS_REQUIRE", "force"),
+        ],
+        enroll_key,
+        45,
+    )
+    .await;
+    let _ = std::fs::remove_file(&askpass);
+    res.map(|_| ()).context("installing enrollment key via password")
+}
+
 async fn run_cmd(program: &str, args: &[&str], stdin: &str, timeout_secs: u64) -> Result<String> {
+    run_cmd_env(program, args, &[], stdin, timeout_secs).await
+}
+
+async fn run_cmd_env(
+    program: &str,
+    args: &[&str],
+    envs: &[(&str, &str)],
+    stdin: &str,
+    timeout_secs: u64,
+) -> Result<String> {
     use tokio::io::AsyncWriteExt;
-    let mut child = tokio::process::Command::new(program)
-        .args(args)
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(args);
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let mut child = cmd
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -497,8 +587,23 @@ mod tests {
             assert!(validate(&EnrollRequest {
                 role: role.into(),
                 ssh_host: host.into(),
+                ssh_password: None,
             })
             .is_err());
         }
+    }
+
+    #[test]
+    fn ssh_password_is_optional_in_json() {
+        // Dashboard omits the field on a key-only enroll.
+        let r: EnrollRequest =
+            serde_json::from_str(r#"{"role":"private","ssh_host":"10.0.0.9"}"#).unwrap();
+        assert!(r.ssh_password.is_none());
+        // …and threads through when supplied.
+        let r: EnrollRequest =
+            serde_json::from_str(r#"{"role":"private","ssh_host":"10.0.0.9","ssh_password":"s3cr3t"}"#)
+                .unwrap();
+        assert_eq!(r.ssh_password.as_deref(), Some("s3cr3t"));
+        assert!(validate(&r).is_ok());
     }
 }

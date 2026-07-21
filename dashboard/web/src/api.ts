@@ -165,12 +165,20 @@ export async function getText(url: string): Promise<string> {
 export interface EnrollResult { ok: boolean; log: string }
 
 /** Enroll a worker node via the setup service (JSON). Returns the log either
- *  way — the request only throws on transport/proxy errors, not enroll failure. */
-export async function enrollNode(role: string, ssh_host: string): Promise<EnrollResult> {
+ *  way — the request only throws on transport/proxy errors, not enroll failure.
+ *  `ssh_password` (optional) installs the enrollment key on a fresh box over a
+ *  one-shot root password login; omit it when the key is already authorized. */
+export async function enrollNode(
+  role: string,
+  ssh_host: string,
+  ssh_password?: string,
+): Promise<EnrollResult> {
+  const body: { role: string; ssh_host: string; ssh_password?: string } = { role, ssh_host }
+  if (ssh_password) body.ssh_password = ssh_password
   const r = await fetch(urls.setupEnroll, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ role, ssh_host }),
+    body: JSON.stringify(body),
   })
   const text = await r.text()
   if (!r.ok) throw new Error(text || `${r.status} ${r.statusText}`)

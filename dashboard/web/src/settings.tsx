@@ -321,6 +321,7 @@ function NodeRow({ n }: { n: PlatformNode }) {
 
 function Onboard({ role }: { role: string }) {
   const [host, setHost] = useState('')
+  const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<EnrollResult | null>(null)
   const qc = useQueryClient()
@@ -328,11 +329,12 @@ function Onboard({ role }: { role: string }) {
   const run = async () => {
     setBusy(true)
     try {
-      const res = await enrollNode(role, host.trim())
+      const res = await enrollNode(role, host.trim(), password || undefined)
       setResult(res)
       if (res.ok) {
         toast.success(`${role} node enrolled`)
         setHost('')
+        setPassword('')
         qc.invalidateQueries({ queryKey: ['nodes'] })
       } else {
         toast.error(`${role} enrollment failed`)
@@ -349,12 +351,15 @@ function Onboard({ role }: { role: string }) {
     <div className="rounded-lg border border-dashed p-3.5">
       <div className="mb-2 flex items-center gap-2 text-sm font-medium"><ServerCog className="size-4" /> Onboard the <code className="font-mono">{role}</code> node</div>
       <p className="mb-3 text-xs text-muted-foreground">
-        Provision a fresh Debian server, authorize the platform enrollment key on <code>root</code> (or the <code>majnet</code> user on a re-run),
-        then enter its IP/host. The setup service SSHes in, runs bootstrap, brings up WireGuard, and registers it in <code>nodes.yaml</code>. Takes a few minutes.
+        Provision a fresh Debian server, then enter its IP/host. Either authorize the platform enrollment key on <code>root</code> beforehand,
+        <strong> or</strong> give the <code>root</code> password below and the setup service installs the key for you (used once, over a single login; never stored).
+        It then SSHes in, runs bootstrap, brings up WireGuard, and registers the node in <code>nodes.yaml</code>. Takes a few minutes.
       </p>
       <div className="flex flex-wrap items-end gap-2">
         <div className="flex flex-1 flex-col gap-1.5"><Label className="text-xs">SSH host</Label>
           <Input value={host} onChange={(e) => setHost(e.target.value)} placeholder="203.0.113.9 or node.example.com" /></div>
+        <div className="flex flex-1 flex-col gap-1.5"><Label className="text-xs">root password <span className="font-normal text-muted-foreground">(optional)</span></Label>
+          <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="leave blank if key is pre-authorized" autoComplete="new-password" /></div>
         <Button disabled={busy || !host.trim()} onClick={run}>{busy ? 'Enrolling…' : 'Enroll'}</Button>
       </div>
       <Dialog open={!!result} onOpenChange={(o) => !o && setResult(null)}>
