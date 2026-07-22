@@ -709,8 +709,9 @@ async fn info_get(
 }
 
 /// `GET /api/secrets/{project}/{class}/{app}` — decrypt and return an app's
-/// current secret values for the dashboard editor. Reads the SOPS source of
-/// truth `apps/{app}/secrets.{class}.yaml` from ops `main` and decrypts it with
+/// current secret values for the dashboard editor. Reads the source of truth from
+/// ops `main` (base ⊕ class overlay), decrypting the inline `secrets:` map (ADR
+/// 0024) or, for a legacy app, the sidecar `secrets.{class}.yaml` SOPS file, with
 /// the class age key. Production is admin-gated. This is the one place secret
 /// plaintext leaves the reconciler for a reader (the VPN-only dashboard); every
 /// other path keeps it write-only (§14).
@@ -740,12 +741,47 @@ async fn secrets_get(
     let Some(snap) = snap else {
         return Ok(Json(BTreeMap::new()));
     };
-    let Some(enc) = snap.files.get(&format!("apps/{app}/secrets.{class}.yaml")) else {
-        return Ok(Json(BTreeMap::new())); // no secrets set for this class yet
+
+    // Effective secrets for this class come from base ⊕ overlay — merge like the
+    // renderer does, then read the manifest `secrets`. Inline (ADR 0024) decrypts
+    // in place; the legacy bare-name list falls back to the sidecar SOPS file.
+    let parse = |bytes: &[u8]| -> Result<serde_yaml::Value, (StatusCode, String)> {
+        serde_yaml::from_slice(bytes)
+            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("parsing manifest: {e}")))
     };
-    let values = crate::secrets::decrypt(&state.config, class_e, enc)
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
+    let mut merged: Option<serde_yaml::Value> = None;
+    if let Some(b) = snap.files.get(&format!("apps/{app}/base.yaml")) {
+        merged = Some(parse(b)?);
+    }
+    if let Some(o) = snap.files.get(&format!("apps/{app}/{class}.yaml")) {
+        let ov = parse(o)?;
+        merged = Some(match merged {
+            Some(base) => majnet_common::merge::merge(base, ov),
+            None => ov,
+        });
+    }
+    let secrets: majnet_common::manifest::Secrets = merged
+        .as_ref()
+        .and_then(|m| m.get("secrets").cloned())
+        .map(serde_yaml::from_value)
+        .transpose()
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("parsing secrets: {e}")))?
+        .unwrap_or_default();
+
+    let values = if let Some(inline) = secrets.inline() {
+        crate::secrets::decrypt_inline(&state.config, class_e, inline)
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?
+    } else if secrets.names().is_some() {
+        match snap.files.get(&format!("apps/{app}/secrets.{class}.yaml")) {
+            Some(enc) => crate::secrets::decrypt(&state.config, class_e, enc)
+                .await
+                .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?,
+            None => BTreeMap::new(),
+        }
+    } else {
+        BTreeMap::new()
+    };
     Ok(Json(values))
 }
 

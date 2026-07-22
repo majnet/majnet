@@ -16,8 +16,14 @@ pub struct AppManifest {
     pub image: String,
     #[serde(default)]
     pub env: std::collections::BTreeMap<String, String>,
+    /// Secrets delivered to the container as tmpfs files at `/run/secrets/<KEY>`
+    /// (never env vars). Two on-disk shapes during the SOPS→inline migration
+    /// (ADR 0024) — see [`Secrets`]. Always serialized (default = empty legacy
+    /// list → `secrets: []`, exactly as the pre-0024 `Vec<String>` field did), so
+    /// existing apps' serialized manifests — and thus their `config_hash` — are
+    /// byte-identical: the schema change triggers no fleet recycle.
     #[serde(default)]
-    pub secrets: Vec<String>,
+    pub secrets: Secrets,
     #[serde(default)]
     pub ingress: Option<Ingress>,
     #[serde(default)]
@@ -66,6 +72,63 @@ pub struct AppManifest {
     /// on rollout; only an app that actually sets `wg_ports` re-converges.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub wg_ports: Vec<u16>,
+}
+
+/// An app's secrets. Two on-disk shapes during the SOPS→inline migration
+/// (ADR 0024), distinguished by YAML shape (an app/class uses one or the other):
+///
+/// - [`Secrets::Inline`] — a `KEY: majnet:<base64(age ciphertext)>` map. The
+///   value is encrypted in place with the platform class recipient; only the
+///   reconciler decrypts it, at deploy time. This is the target model.
+/// - [`Secrets::Names`] — a bare allowlist of names whose values live in the
+///   legacy `secrets.<class>.yaml` SOPS file (pre-migration).
+///
+/// The `majnet:` envelope keeps each value on a single line. Empty (the default)
+/// declares no secrets. Rendering never decrypts either shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Secrets {
+    /// New: `KEY → majnet:<ciphertext>` inline map.
+    Inline(std::collections::BTreeMap<String, String>),
+    /// Legacy: bare-name allowlist; values in the sibling SOPS file.
+    Names(Vec<String>),
+}
+
+/// The single-line encrypted-value prefix (`majnet:<base64(age ciphertext)>`).
+pub const SECRET_ENVELOPE_PREFIX: &str = "majnet:";
+
+impl Default for Secrets {
+    /// Empty legacy list, so a manifest with no secrets serializes as `secrets: []`
+    /// — byte-identical to the pre-ADR-0024 `Vec<String>` default (no config_hash
+    /// change / fleet recycle when this schema lands).
+    fn default() -> Self {
+        Secrets::Names(Vec::new())
+    }
+}
+
+impl Secrets {
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Secrets::Inline(m) => m.is_empty(),
+            Secrets::Names(v) => v.is_empty(),
+        }
+    }
+
+    /// The inline `KEY → majnet:ciphertext` map, if declared inline and non-empty.
+    pub fn inline(&self) -> Option<&std::collections::BTreeMap<String, String>> {
+        match self {
+            Secrets::Inline(m) if !m.is_empty() => Some(m),
+            _ => None,
+        }
+    }
+
+    /// The legacy bare-name allowlist, if declared as a list and non-empty.
+    pub fn names(&self) -> Option<&[String]> {
+        match self {
+            Secrets::Names(v) if !v.is_empty() => Some(v.as_slice()),
+            _ => None,
+        }
+    }
 }
 
 fn default_replicas() -> u32 {
@@ -292,11 +355,39 @@ impl AppManifest {
                 validate_digest_pinned(image)?;
             }
         }
-        for secret in &self.secrets {
-            ensure!(
-                !secret.is_empty() && !secret.contains('/') && !secret.contains(".."),
-                "secret name '{secret}' must be a bare file name"
-            );
+        match &self.secrets {
+            // Legacy allowlist: bare file names (values in the SOPS file).
+            Secrets::Names(names) => {
+                for secret in names {
+                    ensure!(
+                        !secret.is_empty() && !secret.contains('/') && !secret.contains(".."),
+                        "secret name '{secret}' must be a bare file name"
+                    );
+                }
+            }
+            // Inline (ADR 0024): each key becomes a `/run/secrets/<KEY>` file, so
+            // it must be a bare name; each value is a `majnet:` encrypted blob.
+            Secrets::Inline(map) => {
+                for (key, val) in map {
+                    ensure!(
+                        !key.is_empty() && !key.contains('/') && !key.contains(".."),
+                        "secret key '{key}' must be a bare name"
+                    );
+                    let body = val.strip_prefix(SECRET_ENVELOPE_PREFIX).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "secret '{key}' must be a '{SECRET_ENVELOPE_PREFIX}…' encrypted blob"
+                        )
+                    })?;
+                    ensure!(
+                        !body.is_empty()
+                            && body.bytes().all(|b| b.is_ascii_alphanumeric()
+                                || b == b'+'
+                                || b == b'/'
+                                || b == b'='),
+                        "secret '{key}' has a malformed '{SECRET_ENVELOPE_PREFIX}' envelope"
+                    );
+                }
+            }
         }
         let mut seen_names = std::collections::BTreeSet::new();
         let mut seen_paths = std::collections::BTreeSet::new();
@@ -483,6 +574,56 @@ mod tests {
         assert!(AppManifest::parse(&valid().replace("name: api", "name: -api")).is_err());
         let with_secret = format!("{}secrets: [../etc/passwd]\n", valid());
         assert!(AppManifest::parse(&with_secret).is_err());
+    }
+
+    #[test]
+    fn parses_legacy_name_list_secrets() {
+        // Pre-ADR-0024 shape: a bare allowlist (values live in the SOPS file).
+        let m = AppManifest::parse(&format!("{}secrets: [DATABASE_URL, API_KEY]\n", valid())).unwrap();
+        assert_eq!(m.secrets.names(), Some(&["DATABASE_URL".into(), "API_KEY".into()][..]));
+        assert!(m.secrets.inline().is_none());
+    }
+
+    #[test]
+    fn parses_inline_encrypted_secrets() {
+        let yaml = format!(
+            "{}secrets:\n  DATABASE_URL: majnet:AgV1aGVsbG8=\n  API_KEY: majnet:AgB9d29ybGQ=\n",
+            valid()
+        );
+        let m = AppManifest::parse(&yaml).unwrap();
+        let inline = m.secrets.inline().expect("inline map");
+        assert_eq!(inline.get("DATABASE_URL").map(String::as_str), Some("majnet:AgV1aGVsbG8="));
+        assert!(m.secrets.names().is_none());
+    }
+
+    #[test]
+    fn rejects_inline_secret_without_envelope() {
+        // A plaintext value (no `majnet:` prefix) must be refused.
+        let yaml = format!("{}secrets:\n  DATABASE_URL: postgres://plaintext\n", valid());
+        assert!(AppManifest::parse(&yaml).is_err());
+        // A bad base64 body is refused too.
+        let bad = format!("{}secrets:\n  API_KEY: majnet:not base64!\n", valid());
+        assert!(AppManifest::parse(&bad).is_err());
+    }
+
+    #[test]
+    fn empty_secrets_serializes_as_legacy_empty_list() {
+        // Byte-identical to the pre-ADR-0024 `Vec<String>` default (`secrets: []`),
+        // so the reconciler's manifest-serialized config_hash is unchanged for
+        // existing apps — the schema change triggers no fleet recycle.
+        let m = AppManifest::parse(&valid()).unwrap();
+        assert!(m.secrets.is_empty());
+        assert!(serde_yaml::to_string(&m).unwrap().contains("secrets: []"));
+    }
+
+    #[test]
+    fn inline_secrets_round_trip_as_a_map() {
+        let yaml = format!("{}secrets:\n  API_KEY: majnet:AgB9d29ybGQ=\n", valid());
+        let m = AppManifest::parse(&yaml).unwrap();
+        let out = serde_yaml::to_string(&m).unwrap();
+        assert!(out.contains("API_KEY: majnet:AgB9d29ybGQ="));
+        // Re-parses to the same inline shape.
+        assert!(AppManifest::parse(&out).unwrap().secrets.inline().is_some());
     }
 
     #[test]

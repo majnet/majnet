@@ -74,6 +74,67 @@ pub async fn decrypt(
     Ok(map)
 }
 
+/// Decrypt an inline `secrets:` map (ADR 0024) — each value is
+/// `majnet:<base64(age ciphertext)>` — with the class key. Returns the plaintext
+/// name→value map. Bails on the first malformed envelope or decrypt failure — no
+/// partial applies (§12). Uses the `age` binary directly (no SOPS envelope).
+pub async fn decrypt_inline(
+    config: &Config,
+    class: EnvClass,
+    inline: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>> {
+    use base64::Engine;
+    let key_file = config
+        .age_key_dir
+        .join(format!("age-{}.key", class.as_str()));
+    ensure!(
+        key_file.exists(),
+        "missing class age key {}",
+        key_file.display()
+    );
+
+    let mut out = BTreeMap::new();
+    for (key, value) in inline {
+        let body = value
+            .strip_prefix(majnet_common::manifest::SECRET_ENVELOPE_PREFIX)
+            .with_context(|| format!("secret '{key}' is not a majnet: envelope"))?;
+        let ciphertext = base64::engine::general_purpose::STANDARD
+            .decode(body)
+            .with_context(|| format!("secret '{key}' has an invalid base64 body"))?;
+        let plaintext = age_decrypt(&key_file, &ciphertext)
+            .await
+            .with_context(|| format!("decrypting secret '{key}'"))?;
+        out.insert(key.clone(), plaintext);
+    }
+    Ok(out)
+}
+
+/// Decrypt raw `age` ciphertext with a specific class key file, returning the
+/// plaintext as a UTF-8 string.
+async fn age_decrypt(key_file: &std::path::Path, ciphertext: &[u8]) -> Result<String> {
+    let mut child = tokio::process::Command::new("age")
+        .args(["-d", "-i", key_file.to_str().context("non-utf8 key path")?])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("spawning age (is it installed?)")?;
+    child
+        .stdin
+        .take()
+        .context("no stdin")?
+        .write_all(ciphertext)
+        .await?;
+    let out = child.wait_with_output().await?;
+    if !out.status.success() {
+        bail!(
+            "age decrypt failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    String::from_utf8(out.stdout).context("decrypted secret is not valid UTF-8")
+}
+
 /// Host path where a stack's secrets live (tmpfs on Debian).
 pub fn host_dir(project: &str, app: &str, class: EnvClass) -> String {
     format!("/run/majnet/secrets/{project}-{app}-{}", class.as_str())

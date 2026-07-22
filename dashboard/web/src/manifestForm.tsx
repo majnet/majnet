@@ -14,7 +14,10 @@ export interface ManifestDraft {
   health: { on: boolean; path: string; port: string; retries: string }
   database: { on: boolean; engine: string }
   env: [string, string][]
-  secrets: string[]
+  // Opaque passthrough — the manifest form does NOT edit secret values (that's the
+  // Secrets tab). Carried verbatim (legacy name list OR inline `majnet:` map, ADR
+  // 0024) so a manifest edit never drops secrets.
+  secrets: unknown
   migration: { on: boolean; command: string[] }
   volumes: [string, string][]
   replicas: string
@@ -36,7 +39,7 @@ export function fromData(data: unknown): ManifestDraft {
     env: Object.entries(env)
       .map(([k, v]) => [k, String(v)] as [string, string])
       .sort((a, b) => a[0].localeCompare(b[0])),
-    secrets: Array.isArray(d.secrets) ? d.secrets.map(String) : [],
+    secrets: d.secrets,
     migration: { on: !!d.migration, command: Array.isArray(mig.command) ? mig.command.map(String) : [] },
     volumes: Array.isArray(d.volumes)
       ? d.volumes.map((v) => { const r = asRec(v); return [str(r.name), str(r.path)] as [string, string] })
@@ -64,8 +67,12 @@ export function toManifest(d: ManifestDraft, file: string, app: string): Rec {
   if (d.database.on) out.database = { engine: d.database.engine }
   const env = Object.fromEntries(d.env.map(([k, v]) => [k.trim(), v]).filter(([k]) => k))
   if (Object.keys(env).length) out.env = env
-  const secrets = d.secrets.map((s) => s.trim()).filter(Boolean)
-  if (secrets.length) out.secrets = secrets
+  // Preserve secrets verbatim (list or inline map); the Secrets tab owns edits.
+  const sec = d.secrets
+  const hasSecrets = Array.isArray(sec)
+    ? sec.length > 0
+    : !!sec && typeof sec === 'object' && Object.keys(sec).length > 0
+  if (hasSecrets) out.secrets = sec
   if (d.migration.on) {
     const command = d.migration.command.map((s) => s.trim()).filter(Boolean)
     if (command.length) out.migration = { command }
@@ -134,6 +141,24 @@ function Fld({ label, children }: { label: string; children: ReactNode }) {
   return <div className="flex flex-col gap-1.5"><Label className="text-xs">{label}</Label>{children}</div>
 }
 
+// Read-only list of the app's secret key names (from the legacy name list or the
+// inline map's keys). Values are never shown here — the Secrets tab owns editing.
+function SecretsSummary({ secrets }: { secrets: unknown }) {
+  const names = Array.isArray(secrets)
+    ? secrets.map(String)
+    : secrets && typeof secrets === 'object'
+      ? Object.keys(secrets as Record<string, unknown>)
+      : []
+  if (!names.length) return <span className="text-xs text-muted-foreground">No secrets set.</span>
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {names.map((n) => (
+        <span key={n} className="rounded-md border bg-muted/40 px-2 py-0.5 font-mono text-xs">{n}</span>
+      ))}
+    </div>
+  )
+}
+
 const ENGINES = ['postgres', 'mariadb', 'valkey', 'mongodb']
 
 export function ManifestForm({ file, draft, onChange }: { file: string; draft: ManifestDraft; onChange: (d: ManifestDraft) => void }) {
@@ -186,8 +211,8 @@ export function ManifestForm({ file, draft, onChange }: { file: string; draft: M
 
       <Fld label="Environment variables"><KvEditor pairs={draft.env} onChange={(env) => set('env', env)} /></Fld>
       <Fld label="Secrets">
-        <ListEditor values={draft.secrets} placeholder="SECRET_NAME" onChange={(secrets) => set('secrets', secrets)} />
-        <span className="text-xs text-muted-foreground">Names of secret env vars; the values live SOPS-encrypted and are edited outside the UI.</span>
+        <SecretsSummary secrets={draft.secrets} />
+        <span className="text-xs text-muted-foreground">Encrypted per key and delivered as tmpfs files. Add or change values in the <b>Secrets</b> tab — this form preserves them untouched.</span>
       </Fld>
 
       <Fld label="Volumes">

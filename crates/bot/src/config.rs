@@ -51,6 +51,12 @@ pub struct Config {
     /// disables origin-cert issuance (DNS-only). Get it with
     /// `age-keygen -y /etc/majnet/age/age-production.key`.
     pub age_production_recipient: Option<String>,
+    /// The `age-stable` *public* recipient (ADR 0024) — used to encrypt inline
+    /// secrets for the non-production classes (stable/testing/ephemeral), which
+    /// the reconciler decrypts with `age-stable.key`. `None` disables inline-secret
+    /// encoding for those classes. Get it with
+    /// `age-keygen -y /etc/majnet/age/age-stable.key`.
+    pub age_stable_recipient: Option<String>,
     /// A GHCR credential (fine-grained/classic PAT with `read:packages`) served
     /// to the reconciler so nodes can pull **private** app images (ADR 0012).
     /// GitHub App installation tokens are not honored by GHCR for package pulls,
@@ -67,6 +73,16 @@ pub struct Config {
 }
 
 impl Config {
+    /// The public age recipient to encrypt a class's inline secrets to (ADR 0024):
+    /// production → `age-production`, any other class → `age-stable` (the non-prod
+    /// class key). `None` when that recipient isn't configured.
+    pub fn age_recipient(&self, class: &str) -> Option<&str> {
+        match class {
+            "production" => self.age_production_recipient.as_deref(),
+            _ => self.age_stable_recipient.as_deref(),
+        }
+    }
+
     pub fn from_env() -> Result<Self> {
         fn var(name: &str) -> Result<String> {
             std::env::var(name).with_context(|| format!("missing env var {name}"))
@@ -102,6 +118,9 @@ impl Config {
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
             cloudflare_token: std::env::var("MAJNET_CLOUDFLARE_TOKEN")
+                .ok()
+                .filter(|v| !v.is_empty()),
+            age_stable_recipient: std::env::var("MAJNET_AGE_STABLE_RECIPIENT")
                 .ok()
                 .filter(|v| !v.is_empty()),
             age_production_recipient: std::env::var("MAJNET_AGE_PRODUCTION_RECIPIENT")
