@@ -46,6 +46,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(crate::obs::overview),
         )
         .route(
+            "/api/obs/{project}/{class}/{app}/traces",
+            get(crate::obs::traces),
+        )
+        .route(
             "/api/obs/{project}/{class}/{app}/logs",
             get(crate::obs::logs),
         )
