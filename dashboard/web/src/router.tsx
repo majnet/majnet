@@ -3,7 +3,7 @@ import { Shell } from './shell'
 import { Activity, Nodes, ProjectDetail, Projects } from './views'
 import { Overview } from './overview'
 import { NewApp, NewProject, NewService } from './forms'
-import { AppDetail } from './appDetail'
+import { AppDetail, AppOverview, AppConfiguration, AppObservability, AppReleases } from './appDetail'
 import { Members } from './members'
 import { Deploys } from './deploys'
 import { AllReleases, AllDeploys } from './fleet'
@@ -41,12 +41,28 @@ const newAppRoute = createRoute({ getParentRoute: () => rootRoute, path: '/proje
 const newServiceRoute = createRoute({ getParentRoute: () => rootRoute, path: '/projects/$org/new-service', component: NewService })
 const membersRoute = createRoute({ getParentRoute: () => rootRoute, path: '/projects/$org/members', component: Members })
 const deploysRoute = createRoute({ getParentRoute: () => rootRoute, path: '/projects/$org/deploys', component: Deploys })
-const appRoute = createRoute({ getParentRoute: () => rootRoute, path: '/projects/$org/apps/$app', component: AppDetail })
+// App detail is a layout (header + tab bar + Outlet); its sections are nested,
+// deep-linkable routes. The selected environment rides in `?env=` so the top-bar
+// env selector and every section read one source of truth.
+interface AppSearch { env?: string }
+const appRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/projects/$org/apps/$app',
+  component: AppDetail,
+  validateSearch: (s: Record<string, unknown>): AppSearch => ({
+    env: typeof s.env === 'string' ? s.env : undefined,
+  }),
+})
+const appOverviewRoute = createRoute({ getParentRoute: () => appRoute, path: '/', component: AppOverview })
+const appConfigRoute = createRoute({ getParentRoute: () => appRoute, path: 'config', component: AppConfiguration })
+const appObsRoute = createRoute({ getParentRoute: () => appRoute, path: 'observability', component: AppObservability })
+const appReleasesRoute = createRoute({ getParentRoute: () => appRoute, path: 'releases', component: AppReleases })
+const appRouteTree = appRoute.addChildren([appOverviewRoute, appConfigRoute, appObsRoute, appReleasesRoute])
 
 const routeTree = rootRoute.addChildren([
   indexRoute, projectsRoute, newProjectRoute, activityRoute, settingsRoute, nodesRoute, controlPlaneRoute, terminalRoute,
   releasesRoute, allDeploysRoute,
-  projectRoute, newAppRoute, newServiceRoute, membersRoute, deploysRoute, appRoute,
+  projectRoute, newAppRoute, newServiceRoute, membersRoute, deploysRoute, appRouteTree,
 ])
 
 export const router = createRouter({ routeTree, defaultPreload: 'intent' })

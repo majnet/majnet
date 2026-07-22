@@ -324,7 +324,7 @@ export const useWhoami = () => useQuery({ queryKey: ['whoami'], queryFn: () => g
 export const useProjects = () =>
   useQuery({ queryKey: ['projects'], queryFn: () => getJSON<ProjectSummary[]>(urls.projects) })
 export const useApps = (org: string) =>
-  useQuery({ queryKey: ['apps', org], queryFn: () => getJSON<AppSummary[]>(urls.apps(org)) })
+  useQuery({ queryKey: ['apps', org], queryFn: () => getJSON<AppSummary[]>(urls.apps(org)), enabled: !!org })
 export const useImports = (org: string) =>
   useQuery({
     queryKey: ['imports', org],

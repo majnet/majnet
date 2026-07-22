@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
-import { Link, useNavigate, useParams } from '@tanstack/react-router'
+import { Link, Outlet, useNavigate, useParams, useSearch } from '@tanstack/react-router'
 import {
   RotateCw, ScrollText, SlidersHorizontal, ArrowUpFromLine, MoreVertical, TerminalSquare,
+  LayoutGrid, Activity as ActivityIcon, Tag, ChevronRight,
 } from 'lucide-react'
 import {
   send, urls, useApps, useAppContainers, useAppInfo, useAppLogs, useAppSecrets, useEvents, useImports,
@@ -59,61 +60,59 @@ function nextVersions(versions: string[]): { patch: string; minor: string; major
   return { patch: `v${x}.${y}.${z + 1}`, minor: `v${x}.${y + 1}.0`, major: `v${x + 1}.0.0` }
 }
 
-type Sheeted = null | 'config' | 'logs'
-
-export function AppDetail() {
+/** Shared per-app derived state for the layout + every section. React Query
+ *  dedupes the underlying fetches, so each section can call this freely. The
+ *  selected environment comes from `?env=` (written by the top-bar selector),
+ *  falling back to the app's first class. */
+function useAppView() {
   const { org, app } = useParams({ from: '/projects/$org/apps/$app' })
+  const { env: envParam } = useSearch({ from: '/projects/$org/apps/$app' })
   const apps = useApps(org)
   const a = apps.data?.find((x) => x.name === app)
-  const imports = useImports(org)
-  const imp = imports.data?.find((x) => x.app === app)
-  const manifest = useManifest(org, app)
-  const events = useEvents()
   const info = useAppInfo(org, app)
   const metrics = useNodeMetrics()
   const project = useProjects().data?.find((p) => p.org === org)?.name
   const isAdmin = useWhoami().data?.admin ?? false
-  const appEvents = (events.data ?? []).filter((e) => e.action.trim().split(/\s+/).pop() === app)
-  const imageOf = (f?: ManifestFile) => (f?.data as { image?: string } | null)?.image
-  const prodImage = imageOf(manifest.data?.['production.yaml']) ?? imageOf(manifest.data?.['base.yaml'])
-  // A service (ADR 0021) has no repo, no CI, and one environment — so the repo
-  // link, Promote, Rename and the Releases section don't apply (and would error
-  // or orphan its services: entry). Keep the env zone (live status/logs/secrets),
-  // Configuration, Roll back, and Archive.
   const isService = !!a?.service
-
   const classes: string[] = ENV_ORDER.filter((c) => a?.classes.includes(c))
-  const [env, setEnv] = useState<string>('production')
-  // Settle the selection on a class the app actually has, once they load.
-  useEffect(() => {
-    if (classes.length && !classes.includes(env)) setEnv(classes[0]!)
-  }, [classes, env])
-
-  const [sheet, setSheet] = useState<Sheeted>(null)
-  const [renameOpen, setRenameOpen] = useState(false)
-
-  const navigate = useNavigate()
-  const act = useApiMutation({ invalidate: [['events']] })
-  const deploy = useApiMutation({ invalidate: [['deploys', org], ['events']] })
-  const retry = useApiMutation({ invalidate: [['imports', org], ['apps', org]] })
-  const archive = useApiMutation({
-    invalidate: [['apps', org], ['archived', org], ['events']],
-    onDone: () => navigate({ to: '/projects/$org', params: { org } }),
-  })
-
-  // Live, per-environment state.
+  const env = envParam && classes.includes(envParam) ? envParam : (classes[0] ?? 'production')
   const containersFor = (cls: string) =>
     project ? (metrics.data ?? []).flatMap((n) => n.apps).filter((c) => c.name.startsWith(`${project}-${app}-${cls}-`)) : []
   const versionFor = (cls: string): string | null => {
     const v = info.data?.find((r) => r.class === cls)?.info?.version
     return typeof v === 'string' ? v : null
   }
-  const digestShort = (img?: string) => img?.split('@sha256:')[1]?.slice(0, 7) ?? null
+  return { org, app, a, project, isAdmin, isService, classes, env, info, containersFor, versionFor }
+}
 
-  const adminerUrl =
-    project && a?.database && a.classes.includes('production')
-      ? `https://adminer.prod.majksa.net/?pgsql=majnet-postgres&db=${`${project}_${app}_production`.replace(/-/g, '_')}`
-      : null
+const digestShort = (img?: string) => img?.split('@sha256:')[1]?.slice(0, 7) ?? null
+
+// The app-detail sections, as a tab bar over nested routes. Releases lives in the
+// top-bar Releases popover (+ an Overview link), Deployments in the top-bar
+// Deployments popover — so neither is a tab here.
+const TABS = [
+  { to: '/projects/$org/apps/$app', label: 'Overview', icon: LayoutGrid, exact: true },
+  { to: '/projects/$org/apps/$app/config', label: 'Configuration', icon: SlidersHorizontal, exact: false },
+  { to: '/projects/$org/apps/$app/observability', label: 'Observability', icon: ActivityIcon, exact: false },
+] as const
+
+/** App-detail layout: header + actions + tab bar + the active section (Outlet).
+ *  The environment selector now lives in the global top bar (`?env=`). */
+export function AppDetail() {
+  const { org, app } = useParams({ from: '/projects/$org/apps/$app' })
+  const apps = useApps(org)
+  const a = apps.data?.find((x) => x.name === app)
+  const imports = useImports(org)
+  const imp = imports.data?.find((x) => x.app === app)
+  const isService = !!a?.service
+  const [renameOpen, setRenameOpen] = useState(false)
+  const navigate = useNavigate()
+  const deploy = useApiMutation({ invalidate: [['deploys', org], ['events']] })
+  const retry = useApiMutation({ invalidate: [['imports', org], ['apps', org]] })
+  const archive = useApiMutation({
+    invalidate: [['apps', org], ['archived', org], ['events']],
+    onDone: () => navigate({ to: '/projects/$org', params: { org } }),
+  })
 
   return (
     <>
@@ -138,9 +137,6 @@ export function AppDetail() {
               <a href={`https://github.com/${org}/${a?.repo ?? app}`} target="_blank" rel="noreferrer">GitHub ↗</a>
             </Button>
           )}
-          <Button variant="outline" size="sm" onClick={() => setSheet('config')}>
-            <SlidersHorizontal className="size-4" /> Configuration
-          </Button>
           <ConfirmButton variant="outline" size="sm" title={`Roll back ${app}?`}
             description={`Revert the last change on ${org}/ops.`} confirmText="Roll back"
             onConfirm={() => deploy.mutate(() => send(urls.rollback(org)))}>
@@ -187,73 +183,62 @@ export function AppDetail() {
         </CardContent></Card>
       )}
 
-      {/* ── environment selector (the centerpiece) ─────────────────────────── */}
+      {/* ── section tab bar ────────────────────────────────────────────────── */}
+      <div className="mt-6 flex flex-wrap gap-1 border-b">
+        {TABS.map((t) => (
+          <Link key={t.to} to={t.to} params={{ org, app }} activeOptions={{ exact: t.exact }}
+            className="-mb-px inline-flex items-center gap-2 border-b-2 border-transparent px-3.5 py-2.5 text-[13.5px] font-medium text-muted-foreground hover:text-foreground"
+            activeProps={{ className: '-mb-px inline-flex items-center gap-2 border-b-2 border-primary px-3.5 py-2.5 text-[13.5px] font-medium text-foreground' }}>
+            <t.icon className="size-4" /> {t.label}
+          </Link>
+        ))}
+      </div>
+
+      <div className="pt-6"><Outlet /></div>
+
+      <RenameDialog org={org} app={app} stateful={!!a?.database} open={renameOpen} onOpenChange={setRenameOpen} />
+    </>
+  )
+}
+
+/** Overview section: the selected environment's live status + a comparison of
+ *  all environments + this app's recent deploys. */
+export function AppOverview() {
+  const { org, app, a, project, isAdmin, classes, env, containersFor, versionFor, info } = useAppView()
+  const [logsOpen, setLogsOpen] = useState(false)
+  const act = useApiMutation({ invalidate: [['events']] })
+  const events = useEvents()
+  const appEvents = (events.data ?? []).filter((e) => e.action.trim().split(/\s+/).pop() === app)
+  const adminerUrl =
+    project && a?.database && a.classes.includes('production')
+      ? `https://adminer.prod.majksa.net/?pgsql=majnet-postgres&db=${`${project}_${app}_production`.replace(/-/g, '_')}`
+      : null
+
+  return (
+    <>
       {classes.length > 0 && (
-        <>
-          <div className="mt-6 flex flex-wrap items-center gap-x-4 gap-y-2">
-            <div className="inline-flex gap-0.5 rounded-xl bg-muted p-1">
-              {classes.map((c) => {
-                const live = containersFor(c).length > 0
-                return (
-                  <button key={c} onClick={() => setEnv(c)}
-                    className={`inline-flex h-8 items-center gap-2 rounded-lg px-3.5 text-[13px] font-medium transition-colors ${
-                      env === c ? 'bg-card text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}>
-                    <span className={`size-1.5 rounded-full ${live ? 'bg-success' : 'bg-muted-foreground/40'}`} />
-                    {c.charAt(0).toUpperCase() + c.slice(1)}
-                  </button>
-                )
-              })}
-            </div>
-            <span className="text-xs text-muted-foreground">Status, containers, logs & secrets below follow this selection.</span>
-          </div>
-
-          <EnvironmentZone
-            app={app} env={env} org={org} isAdmin={isAdmin}
-            containers={containersFor(env)}
-            version={versionFor(env)}
-            domains={env === 'production' ? (a?.domains ?? []) : []}
-            adminerUrl={env === 'production' ? adminerUrl : null}
-            onLogs={() => setSheet('logs')}
-            restart={() => act.mutate(() => send(urls.restart(org, env, app)))} busy={act.isPending}
-          />
-        </>
+        <EnvironmentZone
+          app={app} env={env} org={org} isAdmin={isAdmin}
+          containers={containersFor(env)}
+          version={versionFor(env)}
+          domains={env === 'production' ? (a?.domains ?? []) : []}
+          adminerUrl={env === 'production' ? adminerUrl : null}
+          onLogs={() => setLogsOpen(true)}
+          restart={() => act.mutate(() => send(urls.restart(org, env, app)))} busy={act.isPending}
+        />
       )}
 
-      {/* ── all environments (comparison; not filtered) ────────────────────── */}
-      {classes.length > 1 && (
-        <>
-          <SectionHead title="All environments" hint="click to switch · not filtered by the selector" />
-          <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(${Math.min(classes.length, 4)}, minmax(0, 1fr))` }}>
-            {classes.map((c) => {
-              const ver = versionFor(c) ?? digestShort(containersFor(c)[0]?.image) ?? null
-              const live = containersFor(c).length > 0
-              return (
-                <button key={c} onClick={() => setEnv(c)}
-                  className={`flex flex-col gap-1.5 rounded-lg border p-3.5 text-left transition-colors hover:border-primary/50 ${
-                    env === c ? 'border-primary/60 ring-1 ring-primary/40' : ''}`}>
-                  <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{c}</span>
-                  <span className="font-mono text-base font-semibold">{ver ?? '—'}</span>
-                  {live
-                    ? <StatusBadge tone="success" dot>healthy</StatusBadge>
-                    : <StatusBadge tone="muted">not deployed</StatusBadge>}
-                </button>
-              )
-            })}
-          </div>
-        </>
-      )}
+      {classes.length > 1 && <AllEnvironments classes={classes} env={env} containersFor={containersFor} versionFor={versionFor} />}
 
-      {/* Observability tab (ADR 0023): traces/logs/RED for apps that opt into
-          OTEL, scoped to the selected environment. */}
-      {a?.otel && classes.includes(env) && (
-        <Observability org={org} app={app} cls={env} containers={containersFor(env)} />
-      )}
-
-      {/* Releases (cut/draft/promote) need a repo + CI — N/A for a service. */}
-      {!isService && <Releases org={org} app={app} repo={a?.repo} prodImage={prodImage} />}
-      {/* A service has no CI, but its external image has upstream versions we can
-          promote to (ADR 0021 follow-up). */}
-      {isService && <ServiceVersions org={org} app={app} current={versionFor('production')} />}
+      {/* Releases isn't a tab (it lives in the top-bar Releases popover) — a
+          contextual link keeps this app's history + cut controls discoverable. */}
+      <Link to="/projects/$org/apps/$app/releases" params={{ org, app }}
+        className="mt-6 flex items-center gap-3 rounded-lg border bg-card px-4 py-3 text-sm transition-colors hover:border-primary/50">
+        <Tag className="size-4 text-muted-foreground" />
+        <span className="font-medium">{a?.service ? 'Versions' : 'Releases'}</span>
+        <span className="text-muted-foreground">{a?.service ? 'running + upstream versions' : 'release history · cut a release · promote'}</span>
+        <ChevronRight className="ml-auto size-4 text-muted-foreground/50" />
+      </Link>
 
       {appEvents.length > 0 && (
         <>
@@ -275,29 +260,91 @@ export function AppDetail() {
         </>
       )}
 
-      {/* ── on-demand drawers ──────────────────────────────────────────────── */}
-      <Sheet open={sheet === 'config'} onOpenChange={(o) => setSheet(o ? 'config' : null)}>
-        <SheetContent>
-          <SheetHeader><SheetTitle>Configuration</SheetTitle>
-            <span className="text-xs text-muted-foreground">base manifest + per-env overlays</span></SheetHeader>
-          <SheetBody>
-            <QueryState isLoading={manifest.isLoading} error={imp && !manifest.data ? undefined : manifest.error}>
-              {manifest.data && <ManifestEditor org={org} app={app} files={manifest.data} />}
-            </QueryState>
-          </SheetBody>
-        </SheetContent>
-      </Sheet>
-
-      <Sheet open={sheet === 'logs'} onOpenChange={(o) => setSheet(o ? 'logs' : null)}>
+      <Sheet open={logsOpen} onOpenChange={setLogsOpen}>
         <SheetContent>
           <SheetHeader><SheetTitle>Logs</SheetTitle><StatusBadge tone="accent">{env}</StatusBadge></SheetHeader>
-          <SheetBody>{sheet === 'logs' && <LogsView org={org} app={app} cls={env} />}</SheetBody>
+          <SheetBody>{logsOpen && <LogsView org={org} app={app} cls={env} />}</SheetBody>
         </SheetContent>
       </Sheet>
-
-      <RenameDialog org={org} app={app} stateful={!!a?.database} open={renameOpen} onOpenChange={setRenameOpen} />
     </>
   )
+}
+
+// The all-environments comparison; clicking a card switches the top-bar selector
+// (writes `?env=`), so the Overview + every section follow it.
+function AllEnvironments({ classes, env, containersFor, versionFor }: {
+  classes: string[]; env: string
+  containersFor: (cls: string) => { image: string }[]
+  versionFor: (cls: string) => string | null
+}) {
+  const navigate = useNavigate()
+  const pick = (c: string) => navigate({ to: '.', search: (prev) => ({ ...prev, env: c }) })
+  return (
+    <>
+      <SectionHead title="All environments" hint="click to switch the environment selector" />
+      <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(${Math.min(classes.length, 4)}, minmax(0, 1fr))` }}>
+        {classes.map((c) => {
+          const ver = versionFor(c) ?? digestShort(containersFor(c)[0]?.image) ?? null
+          const live = containersFor(c).length > 0
+          return (
+            <button key={c} onClick={() => pick(c)}
+              className={`flex flex-col gap-1.5 rounded-lg border p-3.5 text-left transition-colors hover:border-primary/50 ${
+                env === c ? 'border-primary/60 ring-1 ring-primary/40' : ''}`}>
+              <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{c}</span>
+              <span className="font-mono text-base font-semibold">{ver ?? '—'}</span>
+              {live
+                ? <StatusBadge tone="success" dot>healthy</StatusBadge>
+                : <StatusBadge tone="muted">not deployed</StatusBadge>}
+            </button>
+          )
+        })}
+      </div>
+    </>
+  )
+}
+
+/** Configuration section: the manifest editor (base + per-env overlays, inline
+ *  secrets) — was a slide-over drawer, now a first-class section. */
+export function AppConfiguration() {
+  const { org, app } = useParams({ from: '/projects/$org/apps/$app' })
+  const imports = useImports(org)
+  const imp = imports.data?.find((x) => x.app === app)
+  const manifest = useManifest(org, app)
+  return (
+    <>
+      <SectionHead title="Configuration" hint="base manifest + per-env overlays" />
+      <QueryState isLoading={manifest.isLoading} error={imp && !manifest.data ? undefined : manifest.error}>
+        {manifest.data && <ManifestEditor org={org} app={app} files={manifest.data} />}
+      </QueryState>
+    </>
+  )
+}
+
+/** Observability section (ADR 0023): RED + traces + logs for the selected env. */
+export function AppObservability() {
+  const { org, app, a, classes, env, containersFor } = useAppView()
+  if (!a?.otel) {
+    return (
+      <Card><CardContent className="py-12 text-center text-sm text-muted-foreground">
+        This app hasn’t opted into OpenTelemetry. Set <code className="font-mono">otel: true</code> in Configuration to
+        emit traces &amp; logs.
+      </CardContent></Card>
+    )
+  }
+  if (!classes.includes(env)) return null
+  return <Observability org={org} app={app} cls={env} containers={containersFor(env)} />
+}
+
+/** Releases section (its own route, reached from the top-bar Releases popover +
+ *  the Overview link): cut/draft controls + the release history list. A service
+ *  shows its upstream versions instead. */
+export function AppReleases() {
+  const { org, app, a, isService, versionFor } = useAppView()
+  const manifest = useManifest(org, app)
+  const imageOf = (f?: ManifestFile) => (f?.data as { image?: string } | null)?.image
+  const prodImage = imageOf(manifest.data?.['production.yaml']) ?? imageOf(manifest.data?.['base.yaml'])
+  if (isService) return <ServiceVersions org={org} app={app} current={versionFor('production')} />
+  return <Releases org={org} app={app} repo={a?.repo} prodImage={prodImage} />
 }
 
 function SectionHead({ title, hint }: { title: string; hint?: string }) {
