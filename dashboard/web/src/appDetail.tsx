@@ -59,7 +59,7 @@ function nextVersions(versions: string[]): { patch: string; minor: string; major
   return { patch: `v${x}.${y}.${z + 1}`, minor: `v${x}.${y + 1}.0`, major: `v${x + 1}.0.0` }
 }
 
-type Sheeted = null | 'config' | 'logs' | 'secrets'
+type Sheeted = null | 'config' | 'logs'
 
 export function AppDetail() {
   const { org, app } = useParams({ from: '/projects/$org/apps/$app' })
@@ -90,6 +90,10 @@ export function AppDetail() {
   }, [classes, env])
 
   const [sheet, setSheet] = useState<Sheeted>(null)
+  // Which manifest file the Configuration sheet opens on — secrets now live there,
+  // so the env "Secrets" button deep-links to that env's overlay (ADR 0024).
+  const [configFile, setConfigFile] = useState('base.yaml')
+  const openConfig = (file: string) => { setConfigFile(file); setSheet('config') }
   const [renameOpen, setRenameOpen] = useState(false)
 
   const navigate = useNavigate()
@@ -138,7 +142,7 @@ export function AppDetail() {
               <a href={`https://github.com/${org}/${a?.repo ?? app}`} target="_blank" rel="noreferrer">GitHub ↗</a>
             </Button>
           )}
-          <Button variant="outline" size="sm" onClick={() => setSheet('config')}>
+          <Button variant="outline" size="sm" onClick={() => openConfig('base.yaml')}>
             <SlidersHorizontal className="size-4" /> Configuration
           </Button>
           <ConfirmButton variant="outline" size="sm" title={`Roll back ${app}?`}
@@ -213,7 +217,7 @@ export function AppDetail() {
             version={versionFor(env)}
             domains={env === 'production' ? (a?.domains ?? []) : []}
             adminerUrl={env === 'production' ? adminerUrl : null}
-            onLogs={() => setSheet('logs')} onSecrets={() => setSheet('secrets')}
+            onLogs={() => setSheet('logs')} onSecrets={() => openConfig(`${env}.yaml`)}
             restart={() => act.mutate(() => send(urls.restart(org, env, app)))} busy={act.isPending}
           />
         </>
@@ -282,7 +286,7 @@ export function AppDetail() {
             <span className="text-xs text-muted-foreground">base manifest + per-env overlays</span></SheetHeader>
           <SheetBody>
             <QueryState isLoading={manifest.isLoading} error={imp && !manifest.data ? undefined : manifest.error}>
-              {manifest.data && <ManifestEditor org={org} app={app} files={manifest.data} />}
+              {manifest.data && <ManifestEditor org={org} app={app} files={manifest.data} initialFile={configFile} />}
             </QueryState>
           </SheetBody>
         </SheetContent>
@@ -292,13 +296,6 @@ export function AppDetail() {
         <SheetContent>
           <SheetHeader><SheetTitle>Logs</SheetTitle><StatusBadge tone="accent">{env}</StatusBadge></SheetHeader>
           <SheetBody>{sheet === 'logs' && <LogsView org={org} app={app} cls={env} />}</SheetBody>
-        </SheetContent>
-      </Sheet>
-
-      <Sheet open={sheet === 'secrets'} onOpenChange={(o) => setSheet(o ? 'secrets' : null)}>
-        <SheetContent>
-          <SheetHeader><SheetTitle>Secrets</SheetTitle><StatusBadge tone="accent">{env}</StatusBadge></SheetHeader>
-          <SheetBody>{sheet === 'secrets' && <SecretsView org={org} app={app} cls={env} />}</SheetBody>
         </SheetContent>
       </Sheet>
 
@@ -793,11 +790,16 @@ function SecretsView({ org, app, cls }: { org: string; app: string; cls: string 
     ? bulk.trim()
     : rows.filter((r) => r.key.trim()).map((r) => `${r.key.trim()}=${r.value}`).join('\n')
   const setRow = (i: number, patch: Partial<Row>) => setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)))
+  // Removing every row (or clearing the bulk box) when secrets exist is an
+  // explicit "remove all"; empty with nothing existing is a no-op.
+  const existing = Object.keys(q.data ?? {}).length
+  const isClear = !envtext && existing > 0
+  const canSave = !!envtext || isClear
 
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-center">
-        <span className="text-xs text-muted-foreground">Decrypted for you (VPN-only). Saving encrypts each value inline (age) and replaces the whole set for this env.</span>
+        <span className="text-xs text-muted-foreground">Decrypted for you (VPN-only). Saving encrypts each value inline (age) and replaces the whole set. Remove a row with × then Save to delete a secret.</span>
         <div className="ml-auto inline-flex rounded-md border p-0.5">
           <Button size="sm" variant={mode === 'fields' ? 'secondary' : 'ghost'} className="h-7 px-2.5" onClick={() => setMode('fields')}>Fields</Button>
           <Button size="sm" variant={mode === 'bulk' ? 'secondary' : 'ghost'} className="h-7 px-2.5" onClick={() => setMode('bulk')}>Bulk</Button>
@@ -820,12 +822,14 @@ function SecretsView({ org, app, cls }: { org: string; app: string; cls: string 
         )}
       </QueryState>
       <div>
-        <ConfirmButton size="sm" disabled={!envtext || m.isPending}
-          title={`Set ${cls} secrets for ${app}?`}
-          description={cls === 'production' ? 'Encrypts + commits; a render PR gates the deploy.' : 'Encrypts + commits; auto-deploys on render.'}
-          confirmText="Encrypt & save"
-          onConfirm={() => m.mutate(() => send(urls.appSecrets(org, app), { json: { class: cls, env: envtext } }))}>
-          Save secrets
+        <ConfirmButton size="sm" disabled={!canSave || m.isPending}
+          title={isClear ? `Remove all ${cls} secrets for ${app}?` : `Set ${cls} secrets for ${app}?`}
+          description={isClear
+            ? `Deletes all ${existing} secret(s) for ${cls}. ${cls === 'production' ? 'A render PR gates the deploy.' : 'Auto-deploys on render.'}`
+            : (cls === 'production' ? 'Encrypts + commits; a render PR gates the deploy.' : 'Encrypts + commits; auto-deploys on render.')}
+          confirmText={isClear ? 'Remove all' : 'Encrypt & save'}
+          onConfirm={() => m.mutate(() => send(urls.appSecrets(org, app), { json: { class: cls, env: envtext, clear: isClear } }))}>
+          {isClear ? 'Remove all secrets' : 'Save secrets'}
         </ConfirmButton>
       </div>
     </div>
@@ -833,12 +837,16 @@ function SecretsView({ org, app, cls }: { org: string; app: string; cls: string 
 }
 
 // ── manifest editor: file tabs + Form/YAML (inside the Configuration sheet) ────
-function ManifestEditor({ org, app, files }: { org: string; app: string; files: Record<string, ManifestFile> }) {
-  const [file, setFile] = useState('base.yaml')
+function ManifestEditor({ org, app, files, initialFile = 'base.yaml' }: { org: string; app: string; files: Record<string, ManifestFile>; initialFile?: string }) {
+  const [file, setFile] = useState(initialFile)
   const [mode, setMode] = useState<'form' | 'yaml'>('form')
   const [draft, setDraft] = useState<ManifestDraft>(() => fromData(files[file]?.data))
   const [yaml, setYaml] = useState(() => files[file]?.yaml ?? '')
   useEffect(() => { setDraft(fromData(files[file]?.data)); setYaml(files[file]?.yaml ?? '') }, [file, files])
+  // Deep-link: the env "Secrets" button opens this sheet on that env's overlay.
+  useEffect(() => { setFile(initialFile) }, [initialFile])
+  // Secrets are per-class (an overlay), never base.yaml; scope the editor to it.
+  const secretsClass = file !== 'base.yaml' ? file.replace(/\.yaml$/, '') : null
 
   const save = useApiMutation({ invalidate: [['manifest', org, app], ['apps', org], ['deploys', org], ['events']] })
   const onSave = () => {
@@ -867,6 +875,19 @@ function ManifestEditor({ org, app, files }: { org: string; app: string; files: 
       <div className="flex items-center gap-3">
         <Button size="sm" disabled={save.isPending} onClick={onSave}>Save &amp; commit</Button>
         <span className="text-xs text-muted-foreground">Committed to ops main; a render PR follows. production.yaml requires admin.</span>
+      </div>
+
+      {/* Secrets live in the class overlay, encrypted per key (ADR 0024). Edited
+          here (not in the manifest form/YAML above) so values go through the
+          encrypt endpoint and never touch the committed manifest in plaintext. */}
+      <div className="mt-2 border-t pt-4">
+        <div className="mb-2.5 flex items-baseline gap-2">
+          <h3 className="text-sm font-semibold">Secrets</h3>
+          {secretsClass && <StatusBadge tone="accent">{secretsClass}</StatusBadge>}
+        </div>
+        {secretsClass
+          ? <SecretsView org={org} app={app} cls={secretsClass} />
+          : <p className="text-xs text-muted-foreground">Secrets are per-environment — pick an env overlay tab (e.g. <code className="font-mono">production.yaml</code>) to view and edit them.</p>}
       </div>
     </div>
   )

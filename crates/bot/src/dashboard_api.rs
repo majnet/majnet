@@ -101,6 +101,15 @@ pub async fn manifest_put(
         .await
         .map_err(|e| (StatusCode::FORBIDDEN, format!("{e:#}")))?;
 
+    // Secrets are owned exclusively by the encrypt endpoint (`set_app_secrets`),
+    // never the manifest-file PUT — the form carries the `secrets` map opaquely but
+    // the browser can't re-encrypt, so preserve the file's CURRENT `secrets` verbatim
+    // (ADR 0024). This keeps a config edit from reverting or dropping secrets that
+    // were changed via the Secrets editor in the same session.
+    let body = preserve_secrets(&state, &org, &app, &file, body)
+        .await
+        .map_err(bad_gateway)?;
+
     let mut files = app_files(&state, &org, &app).await.map_err(bad_gateway)?;
     files.insert(file.clone(), body.clone());
     validate_app_files(&app, &files).map_err(|e| bad_request(format!("{e:#}")))?;
@@ -117,6 +126,39 @@ pub async fn manifest_put(
     Ok(format!(
         "{path} committed; render PRs will propagate the change"
     ))
+}
+
+/// Force a manifest file's `secrets` to whatever is currently committed (or drop
+/// it if none), so a config-form save can't change secrets — those flow only
+/// through the encrypt endpoint (ADR 0024). `new_body` is YAML in/out.
+async fn preserve_secrets(
+    state: &AppState,
+    org: &str,
+    app: &str,
+    file: &str,
+    new_body: String,
+) -> anyhow::Result<String> {
+    let client = state.github.org_client(org).await?;
+    let repos = client.repos(org, "ops");
+    let path = format!("apps/{app}/{file}");
+    let current_secrets = match crate::promote::read_file(&repos, &path).await? {
+        Some((c, _)) => serde_yaml::from_str::<serde_yaml::Value>(&c)
+            .ok()
+            .and_then(|v| v.get("secrets").cloned()),
+        None => None,
+    };
+    let mut doc: serde_yaml::Value = serde_yaml::from_str(&new_body)?;
+    if let Some(map) = doc.as_mapping_mut() {
+        match current_secrets {
+            Some(s) => {
+                map.insert("secrets".into(), s);
+            }
+            None => {
+                map.remove("secrets");
+            }
+        }
+    }
+    Ok(serde_yaml::to_string(&doc)?)
 }
 
 /// `GET /api/members/{org}` — project.yaml members.
@@ -1236,16 +1278,19 @@ pub(crate) fn scaffold_base(req: &NewApp) -> Result<String> {
 }
 
 /// `POST /api/secrets/{org}/{app}` — set an app's secret values for a class.
-/// The values are SOPS-encrypted (to the ops `.sops.yaml` recipients) and
-/// committed as `apps/{app}/secrets.{class}.yaml`, and the keys are declared in
-/// the class overlay. Production is admin-gated (a render PR then gates deploy);
-/// other classes are developer-gated. This replaces the class's secret set —
-/// the bot can't read existing encrypted values to merge (§14).
+/// Each value is `age`-encrypted to the class recipient and written inline in the
+/// class overlay's `secrets:` map (ADR 0024). Production is admin-gated (a render
+/// PR then gates deploy); other classes are developer-gated. This replaces the
+/// class's whole secret set. An empty `env` with `clear: true` removes them all.
 #[derive(Deserialize)]
 pub struct SetSecrets {
     pub class: String,
     /// dotenv blob: `KEY=VALUE`, one per line.
     pub env: String,
+    /// Explicit "remove all secrets for this class" — required to save an empty
+    /// set (guards against an accidental empty save wiping secrets).
+    #[serde(default)]
+    pub clear: bool,
 }
 
 pub async fn secrets_post(
@@ -1270,21 +1315,32 @@ pub async fn secrets_post(
         .await
         .map_err(|e| (StatusCode::FORBIDDEN, format!("{e:#}")))?;
 
+    // An empty set only removes secrets when the caller explicitly clears — this
+    // stops an accidental empty save from wiping them.
+    if req.env.trim().is_empty() && !req.clear {
+        return Err(bad_request(
+            "no secrets provided (send clear: true to remove all secrets for this env)",
+        ));
+    }
     let n = crate::migrate::set_app_secrets(&state, &org, &app, &req.class, &req.env)
         .await
         .map_err(bad_gateway)?;
-    if n == 0 {
-        return Err(bad_request("no valid secrets provided"));
-    }
-    Ok(format!(
-        "set {n} secret value(s) for {app} ({}); {}",
-        req.class,
-        if req.class == "production" {
-            "review the render PR to deploy"
-        } else {
-            "auto-deploys on render"
-        }
-    ))
+    let deploy_note = if req.class == "production" {
+        "review the render PR to deploy"
+    } else {
+        "auto-deploys on render"
+    };
+    Ok(if n == 0 {
+        format!(
+            "cleared all secrets for {app} ({}); {deploy_note}",
+            req.class
+        )
+    } else {
+        format!(
+            "set {n} secret value(s) for {app} ({}); {deploy_note}",
+            req.class
+        )
+    })
 }
 
 /// `POST /api/secrets/{org}/{app}/migrate` — convert an app's legacy per-class
