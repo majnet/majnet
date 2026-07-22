@@ -795,9 +795,15 @@ mod tests {
         // One row per (project, app, class) — the api row was overwritten, not duplicated.
         assert_eq!(rows.len(), 2);
         let api = rows.iter().find(|r| r.app == "api").unwrap();
-        assert_eq!((api.stage.as_str(), api.status.as_str()), ("health", "active"));
+        assert_eq!(
+            (api.stage.as_str(), api.status.as_str()),
+            ("health", "active")
+        );
         let web = rows.iter().find(|r| r.app == "web").unwrap();
-        assert_eq!((web.stage.as_str(), web.status.as_str()), ("deployed", "done"));
+        assert_eq!(
+            (web.stage.as_str(), web.status.as_str()),
+            ("deployed", "done")
+        );
     }
 
     #[test]
