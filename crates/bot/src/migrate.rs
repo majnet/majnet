@@ -156,29 +156,28 @@ pub(crate) async fn set_app_secrets(
             );
         }
     }
-    if secrets.is_empty() {
-        return Ok(0);
-    }
-
     // Encrypt each value inline to the class recipient (ADR 0024) — one
     // `majnet:<base64(age ciphertext)>` line per secret. The bot holds only the
-    // public recipient, so it can encode but never decode.
-    let recipient = state.config.age_recipient(class).with_context(|| {
-        let var = if class == "production" {
-            "MAJNET_AGE_PRODUCTION_RECIPIENT"
-        } else {
-            "MAJNET_AGE_STABLE_RECIPIENT"
-        };
-        format!("no age recipient configured for class '{class}' — set {var}")
-    })?;
+    // public recipient, so it can encode but never decode. An empty set is a valid
+    // "clear all" (skip encryption; the overlay's `secrets` key is removed).
     let mut inline = BTreeMap::new();
-    for (k, v) in &secrets {
-        inline.insert(
-            k.clone(),
-            age_encrypt_inline(recipient, v)
-                .await
-                .with_context(|| format!("encrypting secret '{k}'"))?,
-        );
+    if !secrets.is_empty() {
+        let recipient = state.config.age_recipient(class).with_context(|| {
+            let var = if class == "production" {
+                "MAJNET_AGE_PRODUCTION_RECIPIENT"
+            } else {
+                "MAJNET_AGE_STABLE_RECIPIENT"
+            };
+            format!("no age recipient configured for class '{class}' — set {var}")
+        })?;
+        for (k, v) in &secrets {
+            inline.insert(
+                k.clone(),
+                age_encrypt_inline(recipient, v)
+                    .await
+                    .with_context(|| format!("encrypting secret '{k}'"))?,
+            );
+        }
     }
 
     // Write the inline `secrets:` map into the class overlay, replacing the class's
@@ -259,21 +258,24 @@ async fn write_inline_secrets_overlay(
         overlay = serde_yaml::Value::Mapping(Default::default());
     }
     let map = overlay.as_mapping_mut().unwrap();
-    let mut secrets = serde_yaml::Mapping::new();
-    for (k, v) in inline {
-        secrets.insert(k.clone().into(), v.clone().into());
+    if inline.is_empty() {
+        // Clearing: drop the key entirely rather than leaving `secrets: {}`.
+        map.remove("secrets");
+    } else {
+        let mut secrets = serde_yaml::Mapping::new();
+        for (k, v) in inline {
+            secrets.insert(k.clone().into(), v.clone().into());
+        }
+        map.insert("secrets".into(), serde_yaml::Value::Mapping(secrets));
     }
-    map.insert("secrets".into(), serde_yaml::Value::Mapping(secrets));
 
     let yaml = serde_yaml::to_string(&overlay)?;
-    crate::dashboard_api::commit_file(
-        state,
-        org,
-        &path,
-        &yaml,
-        &format!("secrets({app}): set {} value(s) in {class}", inline.len()),
-    )
-    .await
+    let msg = if inline.is_empty() {
+        format!("secrets({app}): clear all in {class}")
+    } else {
+        format!("secrets({app}): set {} value(s) in {class}", inline.len())
+    };
+    crate::dashboard_api::commit_file(state, org, &path, &yaml, &msg).await
 }
 
 /// Migrate an app's legacy per-class SOPS files to inline `secrets:` maps (ADR

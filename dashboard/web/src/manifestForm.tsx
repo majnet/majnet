@@ -141,24 +141,6 @@ function Fld({ label, children }: { label: string; children: ReactNode }) {
   return <div className="flex flex-col gap-1.5"><Label className="text-xs">{label}</Label>{children}</div>
 }
 
-// Read-only list of the app's secret key names (from the legacy name list or the
-// inline map's keys). Values are never shown here — the Secrets tab owns editing.
-function SecretsSummary({ secrets }: { secrets: unknown }) {
-  const names = Array.isArray(secrets)
-    ? secrets.map(String)
-    : secrets && typeof secrets === 'object'
-      ? Object.keys(secrets as Record<string, unknown>)
-      : []
-  if (!names.length) return <span className="text-xs text-muted-foreground">No secrets set.</span>
-  return (
-    <div className="flex flex-wrap gap-1.5">
-      {names.map((n) => (
-        <span key={n} className="rounded-md border bg-muted/40 px-2 py-0.5 font-mono text-xs">{n}</span>
-      ))}
-    </div>
-  )
-}
-
 const ENGINES = ['postgres', 'mariadb', 'valkey', 'mongodb']
 
 export function ManifestForm({ file, draft, onChange }: { file: string; draft: ManifestDraft; onChange: (d: ManifestDraft) => void }) {
@@ -210,10 +192,8 @@ export function ManifestForm({ file, draft, onChange }: { file: string; draft: M
       </Section>
 
       <Fld label="Environment variables"><KvEditor pairs={draft.env} onChange={(env) => set('env', env)} /></Fld>
-      <Fld label="Secrets">
-        <SecretsSummary secrets={draft.secrets} />
-        <span className="text-xs text-muted-foreground">Encrypted per key and delivered as tmpfs files. Add or change values in the <b>Secrets</b> tab — this form preserves them untouched.</span>
-      </Fld>
+      {/* Secrets are edited in the dedicated Secrets section below (encrypted per
+          key via the bot); this form preserves them untouched on save. */}
 
       <Fld label="Volumes">
         <KvEditor pairs={draft.volumes} kPlaceholder="name" vPlaceholder="/app/data" onChange={(volumes) => set('volumes', volumes)} />
