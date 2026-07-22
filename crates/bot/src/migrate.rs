@@ -125,15 +125,15 @@ async fn import_secrets(state: &AppState, org: &str, req: &NewApp, env_text: &st
     Ok(())
 }
 
-/// Encrypt a dotenv blob into `apps/<app>/secrets.<class>.yaml` and declare the
-/// keys in the class overlay — the shared path behind both app-import (ADR 0010
-/// phase 2) and the dashboard "set secrets" action. Returns the number of
-/// secrets written.
+/// Encode a dotenv blob into an inline `secrets:` map on the class overlay
+/// `apps/<app>/<class>.yaml` (ADR 0024) — the shared path behind both app-import
+/// (ADR 0010 phase 2) and the dashboard "set secrets" action. Each value is an
+/// `age`-encrypted `majnet:` envelope. Returns the number of secrets written.
 ///
-/// The bot holds only the *public* age recipient (via ops `.sops.yaml`), never
-/// a private key, so it cannot read an existing encrypted file to merge into
-/// it: this **replaces** the class's secret set with exactly what's passed.
-/// Secrets are delivered to apps as tmpfs files, never env vars (§14).
+/// The bot holds only the *public* class recipient, never a private key, so it
+/// cannot read existing values to merge: this **replaces** the class's secret set
+/// with exactly what's passed. Secrets are delivered to apps as tmpfs files, never
+/// env vars (§14).
 pub(crate) async fn set_app_secrets(
     state: &AppState,
     org: &str,
@@ -160,46 +160,90 @@ pub(crate) async fn set_app_secrets(
         return Ok(0);
     }
 
-    let client = state.github.org_client(org).await?;
-    let repos = client.repos(org, "ops");
-    let sops_config = crate::promote::read_file(&repos, ".sops.yaml")
-        .await?
-        .map(|(c, _)| c)
-        .context(".sops.yaml missing in ops — configure secret recipients first")?;
-    let encrypted = sops_encrypt(&sops_config, app, class, &secrets)
-        .await
-        .context("encrypting secrets")?;
+    // Encrypt each value inline to the class recipient (ADR 0024) — one
+    // `majnet:<base64(age ciphertext)>` line per secret. The bot holds only the
+    // public recipient, so it can encode but never decode.
+    let recipient = state.config.age_recipient(class).with_context(|| {
+        let var = if class == "production" {
+            "MAJNET_AGE_PRODUCTION_RECIPIENT"
+        } else {
+            "MAJNET_AGE_STABLE_RECIPIENT"
+        };
+        format!("no age recipient configured for class '{class}' — set {var}")
+    })?;
+    let mut inline = BTreeMap::new();
+    for (k, v) in &secrets {
+        inline.insert(
+            k.clone(),
+            age_encrypt_inline(recipient, v)
+                .await
+                .with_context(|| format!("encrypting secret '{k}'"))?,
+        );
+    }
 
-    // Commit the encrypted file first, then declare the keys in the overlay, so
-    // a render triggered in between never sees a declaration without its file.
-    crate::dashboard_api::commit_file(
-        state,
-        org,
-        &format!("apps/{app}/secrets.{class}.yaml"),
-        &encrypted,
-        &format!("secrets({app}): set {} value(s) in {class}", secrets.len()),
-    )
-    .await?;
-    declare_secrets_in_overlay(state, org, app, class, secrets.keys()).await?;
+    // Write the inline `secrets:` map into the class overlay, replacing the class's
+    // whole set. Inline is authoritative at deploy, so any legacy SOPS file is
+    // ignored (and cleaned up by the phase-3 migration).
+    write_inline_secrets_overlay(state, org, app, class, &inline).await?;
 
     state.store.log_event(
         "app-secrets-set",
         Some(org),
         &format!("{app}: {} secrets → {class}", secrets.len()),
     )?;
-    tracing::info!(org, app, class, count = secrets.len(), "set app secrets");
+    tracing::info!(
+        org,
+        app,
+        class,
+        count = secrets.len(),
+        "set app secrets (inline)"
+    );
     Ok(secrets.len())
 }
 
-/// Add `secrets: [keys…]` to the class overlay (merged with any existing, then
-/// sorted and deduped). Declaring in the overlay — not `base.yaml` — keeps other
-/// classes from being forced to carry a secrets file.
-async fn declare_secrets_in_overlay<'a>(
+/// Encrypt a plaintext secret value to an age `recipient` as a single-line
+/// `majnet:<base64(age ciphertext)>` envelope (ADR 0024). Binary `age` output (no
+/// armor) base64-encoded, so the whole value fits on one YAML line. Only the
+/// public recipient is needed — the bot cannot decrypt.
+async fn age_encrypt_inline(recipient: &str, plaintext: &str) -> Result<String> {
+    use base64::Engine;
+    use tokio::io::AsyncWriteExt;
+    let mut child = tokio::process::Command::new("age")
+        .args(["-r", recipient])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("spawning age (is it installed?)")?;
+    child
+        .stdin
+        .take()
+        .context("no stdin")?
+        .write_all(plaintext.as_bytes())
+        .await?;
+    let out = child.wait_with_output().await?;
+    if !out.status.success() {
+        bail!(
+            "age encrypt failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(format!(
+        "{}{}",
+        majnet_common::manifest::SECRET_ENVELOPE_PREFIX,
+        base64::engine::general_purpose::STANDARD.encode(&out.stdout)
+    ))
+}
+
+/// Replace the class overlay's `secrets:` with the given inline `KEY → majnet:…`
+/// map (ADR 0024), preserving every other overlay key. Writing to the overlay —
+/// not `base.yaml` — keeps other classes from inheriting this class's secrets.
+async fn write_inline_secrets_overlay(
     state: &AppState,
     org: &str,
     app: &str,
     class: &str,
-    keys: impl Iterator<Item = &'a String>,
+    inline: &BTreeMap<String, String>,
 ) -> Result<()> {
     let path = format!("apps/{app}/{class}.yaml");
     let client = state.github.org_client(org).await?;
@@ -215,18 +259,11 @@ async fn declare_secrets_in_overlay<'a>(
         overlay = serde_yaml::Value::Mapping(Default::default());
     }
     let map = overlay.as_mapping_mut().unwrap();
-    let mut names: std::collections::BTreeSet<String> = map
-        .get("secrets")
-        .and_then(|s| s.as_sequence())
-        .map(|seq| {
-            seq.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-    names.extend(keys.cloned());
-    let seq: Vec<serde_yaml::Value> = names.into_iter().map(serde_yaml::Value::from).collect();
-    map.insert("secrets".into(), serde_yaml::Value::Sequence(seq));
+    let mut secrets = serde_yaml::Mapping::new();
+    for (k, v) in inline {
+        secrets.insert(k.clone().into(), v.clone().into());
+    }
+    map.insert("secrets".into(), serde_yaml::Value::Mapping(secrets));
 
     let yaml = serde_yaml::to_string(&overlay)?;
     crate::dashboard_api::commit_file(
@@ -234,50 +271,9 @@ async fn declare_secrets_in_overlay<'a>(
         org,
         &path,
         &yaml,
-        &format!("migrate({app}): declare {class} secrets"),
+        &format!("secrets({app}): set {} value(s) in {class}", inline.len()),
     )
     .await
-}
-
-/// SOPS-encrypt a flat secret map into a `secrets.<class>.yaml` document. Runs
-/// `sops --encrypt` in a temp dir holding the ops `.sops.yaml`, with the file at
-/// its real repo-relative path so `.sops.yaml` `path_regex` rules match.
-async fn sops_encrypt(
-    sops_config: &str,
-    app: &str,
-    class: &str,
-    secrets: &BTreeMap<String, String>,
-) -> Result<String> {
-    let plaintext = serde_yaml::to_string(secrets)?;
-    let root = std::env::temp_dir().join(format!(
-        "majnet-migrate-{app}-{class}-{}",
-        std::process::id()
-    ));
-    let rel = format!("apps/{app}/secrets.{class}.yaml");
-    let file = root.join(&rel);
-    tokio::fs::create_dir_all(file.parent().unwrap()).await?;
-    tokio::fs::write(root.join(".sops.yaml"), sops_config).await?;
-    tokio::fs::write(&file, plaintext).await?;
-
-    let output = tokio::process::Command::new("sops")
-        .arg("--encrypt")
-        .arg("--in-place")
-        .arg(&rel)
-        .current_dir(&root)
-        .output()
-        .await
-        .context("spawning sops (is it installed?)");
-
-    let result = match output {
-        Ok(out) if out.status.success() => Ok(tokio::fs::read_to_string(&file).await?),
-        Ok(out) => bail!(
-            "sops encrypt failed (is .sops.yaml configured with recipients for {class}?): {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ),
-        Err(e) => Err(e),
-    };
-    let _ = tokio::fs::remove_dir_all(&root).await;
-    result
 }
 
 /// Migration target class: the running app is production, so prefer it, then the

@@ -155,7 +155,7 @@ export function NewApp() {
                 <Input type="password" value={importToken} onChange={(e) => setImportToken(e.target.value)} placeholder="ghp_…" />
               </Field>
               <div className="sm:col-span-2">
-                <Field label="Environment variables — optional (KEY=VALUE, one per line)" hint={`Encrypted (SOPS) into secrets.${classes.includes('production') ? 'production' : (classes[0] ?? 'production')}.yaml and delivered as tmpfs files. Never committed in plaintext.`}>
+                <Field label="Environment variables — optional (KEY=VALUE, one per line)" hint="Encrypted per key (age) inline in the manifest and delivered as tmpfs files. Never committed in plaintext.">
                   <Textarea value={importEnv} onChange={(e) => setImportEnv(e.target.value)} className="min-h-24 font-mono text-xs" placeholder={'DATABASE_URL=postgres://…\nSECRET_KEY=…'} />
                 </Field>
               </div>
@@ -245,7 +245,7 @@ export function NewService() {
             </SelectContent>
           </Select>
         </Field>
-        <Field label="Secrets — optional (KEY=VALUE, one per line)" hint="Encrypted (SOPS) and delivered as tmpfs files, never committed in plaintext. Add env/volumes/resources afterward by editing the manifest.">
+        <Field label="Secrets — optional (KEY=VALUE, one per line)" hint="Encrypted per key (age) inline in the manifest and delivered as tmpfs files, never committed in plaintext. Add env/volumes/resources afterward by editing the manifest.">
           <Textarea value={secrets} onChange={(e) => setSecrets(e.target.value)} className="min-h-24 font-mono text-xs" placeholder={'LLM_API_KEY=…'} />
         </Field>
         <div className="flex items-center gap-3">

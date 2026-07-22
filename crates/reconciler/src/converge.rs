@@ -283,18 +283,25 @@ async fn converge_one(
         manifest.name
     );
 
-    let secrets = match snapshot.files.get(&format!("secrets/{app}.yaml")) {
-        Some(encrypted) => {
-            Some(crate::secrets::decrypt(&state.config, ctx.class, encrypted).await?)
-        }
-        None => {
-            anyhow::ensure!(
-                manifest.secrets.is_empty(),
-                "manifest declares secrets but env branch has none"
-            );
-            None
-        }
+    // Secrets delivered as tmpfs files (§14, ADR 0024). The two shapes are
+    // mutually exclusive and inline is authoritative: if the manifest carries an
+    // inline `secrets:` map (majnet: envelopes) it fully defines the set, and any
+    // stale legacy SOPS file is ignored (cleaned up by the phase-3 migration).
+    // Otherwise fall back to the legacy `secrets/<app>.yaml` SOPS file.
+    let delivered = if let Some(inline) = manifest.secrets.inline() {
+        crate::secrets::decrypt_inline(&state.config, ctx.class, inline).await?
+    } else if let Some(names) = manifest.secrets.names() {
+        let encrypted = snapshot
+            .files
+            .get(&format!("secrets/{app}.yaml"))
+            .with_context(|| {
+                format!("manifest declares secret names {names:?} but the env branch has none")
+            })?;
+        crate::secrets::decrypt(&state.config, ctx.class, encrypted).await?
+    } else {
+        BTreeMap::new()
     };
+    let secrets = (!delivered.is_empty()).then_some(delivered);
 
     // Managed database (§15): deploy the engine on this node on first use, then
     // provision the logical DB — both before the app (and its migrations) run.

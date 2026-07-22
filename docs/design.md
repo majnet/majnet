@@ -331,7 +331,7 @@ touches its declared paths.
 
 ## 14. Secrets
 
-SOPS + age per file in each project's `ops` repo. Recipients: platform class key (`age-production` / `age-stable`) + that project's admin keys. Prod secrets cryptographically unreadable to non-admins and to lower classes; cross-project reads impossible. Delivered as tmpfs files, never env vars. Rotation = edit, commit, blue-green roll.
+**Inline per-key encryption (ADR 0024).** Secrets live inline in each app's manifest as a `secrets:` map — one `KEY: majnet:<base64(age ciphertext)>` line per value — encrypted with `age` to the platform class recipient (`age-production` / `age-stable`). Encoding needs only the public recipient (anyone can add a secret); **only the reconciler decrypts** (it holds the private class key), at deploy time. Prod secrets are unreadable to non-admins and to lower classes; cross-project reads impossible. Delivered as tmpfs files at `/run/secrets/<KEY>`, never env vars. Admins view/edit through the dashboard (VPN, admin-gated) — the reconciler is the only decryptor, so there are no per-admin recipients (tighter than the original SOPS-file model, which also encrypted to admin keys). Rotation = re-encrypt (reconciler sweep), commit, blue-green roll. Legacy `secrets.<class>.yaml` SOPS files are read for compatibility until migrated inline.
 
 ## 15. Databases & Backups
 

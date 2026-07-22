@@ -797,7 +797,7 @@ function SecretsView({ org, app, cls }: { org: string; app: string; cls: string 
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-center">
-        <span className="text-xs text-muted-foreground">Decrypted from SOPS (VPN-only). Saving replaces the whole set for this env.</span>
+        <span className="text-xs text-muted-foreground">Decrypted for you (VPN-only). Saving encrypts each value inline (age) and replaces the whole set for this env.</span>
         <div className="ml-auto inline-flex rounded-md border p-0.5">
           <Button size="sm" variant={mode === 'fields' ? 'secondary' : 'ghost'} className="h-7 px-2.5" onClick={() => setMode('fields')}>Fields</Button>
           <Button size="sm" variant={mode === 'bulk' ? 'secondary' : 'ghost'} className="h-7 px-2.5" onClick={() => setMode('bulk')}>Bulk</Button>

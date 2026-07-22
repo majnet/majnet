@@ -166,7 +166,9 @@ fn render_class(
         let manifest = AppManifest::parse(&yaml)
             .with_context(|| format!("{app}: rendered manifest invalid"))?;
 
-        // Secrets pass through encrypted, and every declared secret must exist.
+        // Secrets pass through encrypted, rendering never decrypts. Inline secrets
+        // (ADR 0024) travel inside the manifest itself (majnet: envelopes) — no
+        // sidecar file. Only the legacy bare-name list still requires its SOPS file.
         let secrets_path = format!("apps/{app}/secrets.{}.yaml", class.as_str());
         match sources.get(&secrets_path) {
             Some(bytes) => {
@@ -176,8 +178,8 @@ fn render_class(
                 );
             }
             None => ensure!(
-                manifest.secrets.is_empty(),
-                "{app}: declares secrets but {secrets_path} is missing"
+                manifest.secrets.names().is_none(),
+                "{app}: declares secret names but {secrets_path} is missing"
             ),
         }
         rendered.insert(format!("{app}.yaml"), yaml);
