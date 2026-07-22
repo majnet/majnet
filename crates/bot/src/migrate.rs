@@ -191,7 +191,13 @@ pub(crate) async fn set_app_secrets(
         Some(org),
         &format!("{app}: {} secrets → {class}", secrets.len()),
     )?;
-    tracing::info!(org, app, class, count = secrets.len(), "set app secrets (inline)");
+    tracing::info!(
+        org,
+        app,
+        class,
+        count = secrets.len(),
+        "set app secrets (inline)"
+    );
     Ok(secrets.len())
 }
 

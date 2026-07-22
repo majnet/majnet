@@ -579,8 +579,12 @@ mod tests {
     #[test]
     fn parses_legacy_name_list_secrets() {
         // Pre-ADR-0024 shape: a bare allowlist (values live in the SOPS file).
-        let m = AppManifest::parse(&format!("{}secrets: [DATABASE_URL, API_KEY]\n", valid())).unwrap();
-        assert_eq!(m.secrets.names(), Some(&["DATABASE_URL".into(), "API_KEY".into()][..]));
+        let m =
+            AppManifest::parse(&format!("{}secrets: [DATABASE_URL, API_KEY]\n", valid())).unwrap();
+        assert_eq!(
+            m.secrets.names(),
+            Some(&["DATABASE_URL".into(), "API_KEY".into()][..])
+        );
         assert!(m.secrets.inline().is_none());
     }
 
@@ -592,14 +596,20 @@ mod tests {
         );
         let m = AppManifest::parse(&yaml).unwrap();
         let inline = m.secrets.inline().expect("inline map");
-        assert_eq!(inline.get("DATABASE_URL").map(String::as_str), Some("majnet:AgV1aGVsbG8="));
+        assert_eq!(
+            inline.get("DATABASE_URL").map(String::as_str),
+            Some("majnet:AgV1aGVsbG8=")
+        );
         assert!(m.secrets.names().is_none());
     }
 
     #[test]
     fn rejects_inline_secret_without_envelope() {
         // A plaintext value (no `majnet:` prefix) must be refused.
-        let yaml = format!("{}secrets:\n  DATABASE_URL: postgres://plaintext\n", valid());
+        let yaml = format!(
+            "{}secrets:\n  DATABASE_URL: postgres://plaintext\n",
+            valid()
+        );
         assert!(AppManifest::parse(&yaml).is_err());
         // A bad base64 body is refused too.
         let bad = format!("{}secrets:\n  API_KEY: majnet:not base64!\n", valid());
