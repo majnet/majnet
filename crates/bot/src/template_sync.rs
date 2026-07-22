@@ -32,7 +32,13 @@ use majnet_common::project::{AppDecl, Role};
 
 /// Repo-relative template files that are platform-managed (kept in sync). Only
 /// the release contract for now — `build.yaml` and scaffolds are app-owned.
-const MANAGED_FILES: &[&str] = &[".github/workflows/release.yaml"];
+const MANAGED_FILES: &[&str] = &[
+    ".github/workflows/release.yaml",
+    // Conventional-commit PR-title lint — feeds the release automation's bump +
+    // changelog derivation (ADR 0020). Enforced as a required check by org_sync
+    // once the repo has this file (self-healing; see protect_app_main).
+    ".github/workflows/commit-lint.yaml",
+];
 const SYNC_BRANCH: &str = "template-sync";
 
 /// A monorepo (ADR 0018) is bring-your-own CI, so it ships no scaffolded

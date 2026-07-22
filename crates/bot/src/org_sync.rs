@@ -446,11 +446,20 @@ pub(crate) async fn protect_app_main(
     org: &str,
     app: &str,
 ) -> Result<()> {
+    // `commit-lint` (conventional-commit PR-title check) becomes a *required*
+    // check — but only once the repo actually has the workflow. A required check
+    // that never runs would wedge every PR at "expected", so we gate on the file
+    // existing: template-sync adds it, the next org_sync flips it to required
+    // (self-healing rollout — warn-visible until adopted, then enforced).
+    let mut contexts = vec!["test"];
+    if has_workflow(client, org, app, "commit-lint.yaml").await {
+        contexts.push("commit-lint");
+    }
     match client
         .put(
             format!("/repos/{org}/{app}/branches/main/protection"),
             Some(&json!({
-                "required_status_checks": { "strict": false, "contexts": ["test"] },
+                "required_status_checks": { "strict": false, "contexts": contexts },
                 "enforce_admins": false,
                 "required_pull_request_reviews": null,
                 "restrictions": null,
@@ -475,6 +484,17 @@ pub(crate) async fn protect_app_main(
         Err(e) => return Err(e).with_context(|| format!("protecting {app}@main")),
     }
     Ok(())
+}
+
+/// Whether `.github/workflows/{file}` exists on an app repo's default branch.
+/// Errors (404 included) → `false`: never *require* a check we can't confirm is
+/// present, or a transient failure would wedge the repo's PRs.
+async fn has_workflow(client: &octocrab::Octocrab, org: &str, app: &str, file: &str) -> bool {
+    let path = format!("/repos/{org}/{app}/contents/.github/workflows/{file}");
+    client
+        .get::<serde_json::Value, _, _>(path, None::<&()>)
+        .await
+        .is_ok()
 }
 
 /// Teams `admins` + `developers` per org, membership from project.yaml.

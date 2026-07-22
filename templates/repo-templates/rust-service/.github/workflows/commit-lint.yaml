@@ -1,0 +1,32 @@
+# MajNet commit-lint: the PR title must be a Conventional Commit, so the release
+# automation (ADR 0020: classify_bump / generate_changelog) can derive the right
+# semver bump + a clean changelog. Squash-merge makes the PR title the commit
+# subject, so linting the title is sufficient. Platform-managed (template-sync) —
+# do not edit by hand; changes land via a template-sync PR.
+name: commit-lint
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  commit-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: PR title is a Conventional Commit
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          echo "PR title: $TITLE"
+          # type(optional scope)(optional !): summary  — types match the release
+          # automation's default bump rules (feat→minor, fix→patch, others→none).
+          if printf '%s' "$TITLE" | grep -qE '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9._/-]+\))?!?: .+'; then
+            echo "✓ conventional commit"
+          else
+            echo "::error::PR title must be a Conventional Commit, e.g. 'feat(scope): add X' or 'fix: handle Y'."
+            echo "Allowed types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert."
+            exit 1
+          fi
