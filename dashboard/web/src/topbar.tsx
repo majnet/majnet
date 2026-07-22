@@ -1,10 +1,14 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import { Link } from '@tanstack/react-router'
+import { Link, useNavigate, useParams, useSearch } from '@tanstack/react-router'
 import { useQueries } from '@tanstack/react-query'
 import { Bell, GitPullRequest, Loader2, Tag } from 'lucide-react'
-import { getJSON, parseAt, urls, useEvents, useProjects, useReleaseDrafts, type DeployPr, type Event } from './api'
+import { getJSON, parseAt, urls, useApps, useEvents, useProjects, useReleaseDrafts, type DeployPr, type Event } from './api'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+
+// Order the env selector presents an app's classes in.
+const ENV_ORDER = ['production', 'stable', 'testing', 'ephemeral']
 
 function Count({ children }: { children: ReactNode }) {
   return (
@@ -249,7 +253,7 @@ function Releases() {
               // its name. Avoids the redundant "<project> <repo>" (== same word).
               const leaf = c.app.startsWith(`${c.repo}-`) ? c.app.slice(c.repo.length + 1) : c.app
               return (
-              <Link key={`${c.org}-${c.app}`} to="/projects/$org/apps/$app" params={{ org: c.org, app: c.app }} onClick={() => setOpen(false)}
+              <Link key={`${c.org}-${c.app}`} to="/projects/$org/apps/$app/releases" params={{ org: c.org, app: c.app }} onClick={() => setOpen(false)}
                 className="block rounded-md px-2 py-1.5 hover:bg-accent">
                 <div className="flex items-center gap-1.5 text-[13px]">
                   <span className="font-medium">{nameOf(c.org)}</span>
@@ -273,10 +277,36 @@ function Releases() {
   )
 }
 
+// Context environment selector — on an app-detail route it picks the environment
+// every section follows, stored in `?env=` (one source of truth). Renders nothing
+// on other routes. Lives in the global top bar, alongside Releases & Deployments.
+function EnvSelector() {
+  const { org, app } = useParams({ strict: false }) as { org?: string; app?: string }
+  const { env } = useSearch({ strict: false }) as { env?: string }
+  const navigate = useNavigate()
+  const apps = useApps(org ?? '')
+  const a = apps.data?.find((x) => x.name === app)
+  if (!org || !app || !a) return null
+  const classes = ENV_ORDER.filter((c) => a.classes.includes(c))
+  if (classes.length === 0) return null
+  const current = env && classes.includes(env) ? env : classes[0]!
+  return (
+    <Select value={current} onValueChange={(v) => navigate({ to: '.', search: (prev) => ({ ...prev, env: v }) })}>
+      <SelectTrigger className="h-8 w-[152px] gap-1.5 text-[13px]" aria-label="Environment">
+        <span className="text-muted-foreground">env</span><SelectValue />
+      </SelectTrigger>
+      <SelectContent align="end">
+        {classes.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}
+      </SelectContent>
+    </Select>
+  )
+}
+
 export function TopBar() {
   return (
-    <header className="sticky top-0 z-20 flex h-12 items-center gap-1 border-b bg-background/80 px-4 backdrop-blur md:px-6">
+    <header className="sticky top-0 z-20 flex h-12 items-center gap-1.5 border-b bg-background/80 px-4 backdrop-blur md:px-6">
       <div className="flex-1" />
+      <EnvSelector />
       <Releases />
       <Deployments />
       <Notifications />
