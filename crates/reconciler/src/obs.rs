@@ -24,15 +24,52 @@ use serde_json::Value;
 
 use crate::AppState;
 
-/// How many traces / log lines a single query pulls back. RED over the window is
-/// approximate when a busy app exceeds this (flagged via `capped`).
+/// Default page size for traces / log lines; callers may request more (for
+/// "load more") up to `MAX_LIMIT`. RED over the window is approximate when a busy
+/// app exceeds the RED sample (flagged via `capped`).
 const QUERY_LIMIT: usize = 200;
+const MAX_LIMIT: usize = 500;
 const DEFAULT_WINDOW_MIN: u64 = 15;
 
+fn clamp_limit(limit: Option<usize>) -> usize {
+    limit.unwrap_or(QUERY_LIMIT).clamp(1, MAX_LIMIT)
+}
+fn clamp_window(window_min: Option<u64>) -> u64 {
+    window_min.unwrap_or(DEFAULT_WINDOW_MIN).clamp(1, 1440)
+}
+
+/// Query params for the RED overview — just the look-back window.
 #[derive(Deserialize)]
 pub struct WindowQuery {
-    /// Look-back window in minutes (default 15).
     window_min: Option<u64>,
+}
+
+/// Query params for the paginated + filtered trace list.
+#[derive(Deserialize)]
+pub struct TracesQuery {
+    window_min: Option<u64>,
+    limit: Option<usize>,
+    /// "all" (default) | "error" | "ok".
+    status: Option<String>,
+    /// Free-text matched case-insensitively against span/operation names.
+    q: Option<String>,
+    /// Pagination cursor: only traces that started before this (unix nanos).
+    before: Option<u64>,
+}
+
+/// Query params for the paginated + filtered log list.
+#[derive(Deserialize)]
+pub struct LogsQuery {
+    window_min: Option<u64>,
+    limit: Option<usize>,
+    /// Minimum level: "all" (default) | "warn" | "error".
+    level: Option<String>,
+    /// Free-text line filter (case-insensitive).
+    q: Option<String>,
+    /// Only logs correlated to this trace_id.
+    trace_id: Option<String>,
+    /// Pagination cursor: only logs older than this (unix nanos).
+    before: Option<u64>,
 }
 
 /// A single trace in the recent-traces list.
@@ -57,12 +94,6 @@ pub struct Red {
     sampled: usize,
     /// The sample hit `QUERY_LIMIT` — rate/error are lower bounds for this window.
     capped: bool,
-}
-
-#[derive(Serialize)]
-pub struct Overview {
-    red: Red,
-    traces: Vec<TraceRow>,
 }
 
 /// One span in a trace waterfall (offset + depth precomputed for rendering).
@@ -127,14 +158,35 @@ async fn authz(
 
 // ---- Tempo -----------------------------------------------------------------
 
-/// `GET /api/obs/{org}/{project}/{class}/{app}/overview` — RED tiles + recent
-/// traces for the app over the window.
+/// TraceQL matchers scoping to one app in one environment, with optional
+/// status + free-text (operation-name) filters folded in.
+fn traceql(app: &str, class: &str, status: &str, q: Option<&str>) -> String {
+    let mut m =
+        format!("resource.service.name=\"{app}\" && resource.deployment.environment=\"{class}\"");
+    match status {
+        "error" => m.push_str(" && status=error"),
+        "ok" => m.push_str(" && status!=error"),
+        _ => {}
+    }
+    if let Some(text) = q.map(str::trim).filter(|t| !t.is_empty()) {
+        let esc = regex_escape(&text.replace('"', ""));
+        if !esc.is_empty() {
+            m.push_str(&format!(" && name=~\"(?i).*{esc}.*\""));
+        }
+    }
+    format!("{{{m}}}")
+}
+
+/// `GET /api/obs/{org}/{project}/{class}/{app}/overview` — RED golden-signal
+/// tiles for the app over the window (unfiltered; the trace/log lists carry
+/// their own filters). Kept separate so the tiles stay stable while the list is
+/// filtered/paginated.
 pub async fn overview(
     State(state): State<Arc<AppState>>,
     Path((project, class, app)): Path<(String, String, String)>,
     Query(q): Query<WindowQuery>,
     headers: HeaderMap,
-) -> Result<Json<Overview>, (StatusCode, String)> {
+) -> Result<Json<Red>, (StatusCode, String)> {
     authz(&state, &headers, &project, &class).await?;
     let Some(tempo) = state.config.tempo_endpoint.clone() else {
         return Err((
@@ -142,45 +194,136 @@ pub async fn overview(
             "Tempo endpoint not configured".into(),
         ));
     };
-    let window_min = q.window_min.unwrap_or(DEFAULT_WINDOW_MIN).clamp(1, 1440);
-    overview_inner(&state, &tempo, &app, &class, window_min)
+    let window_min = clamp_window(q.window_min);
+    red_inner(&state, &tempo, &app, &class, window_min)
         .await
         .map(Json)
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))
 }
 
-async fn overview_inner(
+async fn red_inner(
     state: &AppState,
     tempo: &str,
     app: &str,
     class: &str,
     window_min: u64,
-) -> Result<Overview> {
+) -> Result<Red> {
     let end = now_secs();
     let start = end.saturating_sub(window_min * 60);
-
-    // Traces the app served in this environment, over the window. Scope by the
-    // injected `deployment.environment` resource attr so the tab matches the
-    // selected class.
-    let sel =
-        format!("resource.service.name=\"{app}\" && resource.deployment.environment=\"{class}\"");
-    let all = tempo_search(state, tempo, &format!("{{{sel}}}"), start, end).await?;
-    // Error traces (their IDs) so we can flag rows + compute the error rate.
+    let all = tempo_search(
+        state,
+        tempo,
+        &traceql(app, class, "all", None),
+        start,
+        end,
+        QUERY_LIMIT,
+    )
+    .await?;
     let errs = tempo_search(
         state,
         tempo,
-        &format!("{{{sel} && status=error}}"),
+        &traceql(app, class, "error", None),
         start,
         end,
+        QUERY_LIMIT,
     )
     .await
     .unwrap_or_default();
-    let err_ids: std::collections::HashSet<&str> = errs
-        .iter()
-        .filter_map(|t| t.get("traceID").and_then(Value::as_str))
-        .collect();
 
-    let mut durations: Vec<u64> = Vec::with_capacity(all.len());
+    let mut durations: Vec<u64> = all
+        .iter()
+        .map(|t| t.get("durationMs").and_then(Value::as_u64).unwrap_or(0))
+        .collect();
+    let sampled = all.len();
+    let capped = sampled >= QUERY_LIMIT;
+    let error_pct = if sampled == 0 {
+        0.0
+    } else {
+        errs.len() as f64 / sampled as f64 * 100.0
+    };
+    Ok(Red {
+        rate_per_min: sampled as f64 / window_min as f64,
+        error_pct: (error_pct * 10.0).round() / 10.0,
+        p95_ms: percentile(&mut durations, 95.0),
+        window_min,
+        sampled,
+        capped,
+    })
+}
+
+/// `GET /api/obs/{org}/{project}/{class}/{app}/traces` — the filtered, paginated
+/// recent-traces list. `before` (unix nanos) walks older pages; the caller
+/// infers "has more" from a full-page result.
+pub async fn traces(
+    State(state): State<Arc<AppState>>,
+    Path((project, class, app)): Path<(String, String, String)>,
+    Query(q): Query<TracesQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<TraceRow>>, (StatusCode, String)> {
+    authz(&state, &headers, &project, &class).await?;
+    let Some(tempo) = state.config.tempo_endpoint.clone() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Tempo endpoint not configured".into(),
+        ));
+    };
+    traces_inner(&state, &tempo, &app, &class, q)
+        .await
+        .map(Json)
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))
+}
+
+async fn traces_inner(
+    state: &AppState,
+    tempo: &str,
+    app: &str,
+    class: &str,
+    q: TracesQuery,
+) -> Result<Vec<TraceRow>> {
+    let window_min = clamp_window(q.window_min);
+    let limit = clamp_limit(q.limit);
+    let status = q.status.as_deref().unwrap_or("all");
+    // `before` is the cursor; Tempo's `end` is in seconds, so a trace exactly on
+    // the boundary can repeat — the caller dedupes by trace_id.
+    let end = q
+        .before
+        .map(|ns| ns / 1_000_000_000)
+        .unwrap_or_else(now_secs);
+    let start = now_secs().saturating_sub(window_min * 60);
+    if end <= start {
+        return Ok(vec![]);
+    }
+
+    let all = tempo_search(
+        state,
+        tempo,
+        &traceql(app, class, status, q.q.as_deref()),
+        start,
+        end,
+        limit,
+    )
+    .await?;
+
+    // For an "all" list we still need to know which rows errored; a status-scoped
+    // list already knows (all error / all ok), saving a query.
+    let err_ids: std::collections::HashSet<String> = if status == "all" {
+        tempo_search(
+            state,
+            tempo,
+            &traceql(app, class, "error", q.q.as_deref()),
+            start,
+            end,
+            limit,
+        )
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|t| t.get("traceID").and_then(Value::as_str).map(str::to_string))
+        .collect()
+    } else {
+        Default::default()
+    };
+
     let mut traces: Vec<TraceRow> = Vec::with_capacity(all.len());
     for t in &all {
         let trace_id = t
@@ -191,9 +334,11 @@ async fn overview_inner(
         if trace_id.is_empty() {
             continue;
         }
-        let duration_ms = t.get("durationMs").and_then(Value::as_u64).unwrap_or(0);
-        durations.push(duration_ms);
-        let error = err_ids.contains(trace_id.as_str());
+        let error = match status {
+            "error" => true,
+            "ok" => false,
+            _ => err_ids.contains(&trace_id),
+        };
         traces.push(TraceRow {
             error,
             root_service: t
@@ -206,7 +351,7 @@ async fn overview_inner(
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string(),
-            duration_ms,
+            duration_ms: t.get("durationMs").and_then(Value::as_u64).unwrap_or(0),
             start_unix_nano: t
                 .get("startTimeUnixNano")
                 .and_then(Value::as_str)
@@ -217,23 +362,7 @@ async fn overview_inner(
     }
     // Most-recent first.
     traces.sort_by_key(|t| std::cmp::Reverse(t.start_unix_nano));
-
-    let sampled = all.len();
-    let capped = sampled >= QUERY_LIMIT;
-    let error_pct = if sampled == 0 {
-        0.0
-    } else {
-        err_ids.len() as f64 / sampled as f64 * 100.0
-    };
-    let red = Red {
-        rate_per_min: sampled as f64 / window_min as f64,
-        error_pct: (error_pct * 10.0).round() / 10.0,
-        p95_ms: percentile(&mut durations, 95.0),
-        window_min,
-        sampled,
-        capped,
-    };
-    Ok(Overview { red, traces })
+    Ok(traces)
 }
 
 /// `GET /api/obs/{org}/trace/{trace_id}` — the span waterfall for one trace.
@@ -389,6 +518,7 @@ async fn tempo_search(
     q: &str,
     start: u64,
     end: u64,
+    limit: usize,
 ) -> Result<Vec<Value>> {
     let url = format!("{tempo}/api/search");
     let body: Value = state
@@ -396,7 +526,7 @@ async fn tempo_search(
         .get(&url)
         .query(&[
             ("q", q),
-            ("limit", &QUERY_LIMIT.to_string()),
+            ("limit", &limit.to_string()),
             ("start", &start.to_string()),
             ("end", &end.to_string()),
         ])
@@ -422,7 +552,7 @@ async fn tempo_search(
 pub async fn logs(
     State(state): State<Arc<AppState>>,
     Path((project, class, app)): Path<(String, String, String)>,
-    Query(q): Query<WindowQuery>,
+    Query(q): Query<LogsQuery>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<LogRow>>, (StatusCode, String)> {
     authz(&state, &headers, &project, &class).await?;
@@ -432,11 +562,41 @@ pub async fn logs(
             "Loki endpoint not configured".into(),
         ));
     };
-    let window_min = q.window_min.unwrap_or(DEFAULT_WINDOW_MIN).clamp(1, 1440);
-    logs_inner(&state, &loki, &app, &class, window_min)
+    logs_inner(&state, &loki, &app, &class, q)
         .await
         .map(Json)
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))
+}
+
+/// A LogQL query scoping to one app in one environment, folding in an optional
+/// trace_id label match, a minimum-level filter (tolerant of either the
+/// `severity_text` or Loki's `detected_level` label), and a free-text line match.
+fn logql(app: &str, class: &str, level: &str, q: Option<&str>, trace_id: Option<&str>) -> String {
+    let mut sel = format!("service_name=\"{app}\", deployment_environment=\"{class}\"");
+    if let Some(tid) = trace_id.map(str::trim).filter(|t| !t.is_empty()) {
+        let hex: String = tid.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+        if !hex.is_empty() {
+            sel.push_str(&format!(", trace_id=\"{hex}\""));
+        }
+    }
+    let mut query = format!("{{{sel}}}");
+    let lvl_re = match level {
+        "error" => Some("(?i)(err|fatal|crit|emerg|alert|panic)"),
+        "warn" => Some("(?i)(warn|err|fatal|crit|emerg|alert|panic)"),
+        _ => None,
+    };
+    if let Some(re) = lvl_re {
+        query.push_str(&format!(
+            " | severity_text=~\"{re}\" or detected_level=~\"{re}\""
+        ));
+    }
+    if let Some(text) = q.map(str::trim).filter(|t| !t.is_empty()) {
+        let esc = regex_escape(&text.replace('"', ""));
+        if !esc.is_empty() {
+            query.push_str(&format!(" |~ \"(?i){esc}\""));
+        }
+    }
+    query
 }
 
 async fn logs_inner(
@@ -444,21 +604,35 @@ async fn logs_inner(
     loki: &str,
     app: &str,
     class: &str,
-    window_min: u64,
+    q: LogsQuery,
 ) -> Result<Vec<LogRow>> {
-    let end_ns = SystemTime::now()
+    let window_min = clamp_window(q.window_min);
+    let limit = clamp_limit(q.limit);
+    let now_ns = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let start_ns = end_ns.saturating_sub(window_min as u128 * 60 * 1_000_000_000);
+    // `before` (unix nanos) is the pagination cursor; Loki's `end` is exclusive,
+    // so passing the oldest shown timestamp returns strictly older lines.
+    let end_ns = q.before.map(u128::from).unwrap_or(now_ns);
+    let start_ns = now_ns.saturating_sub(window_min as u128 * 60 * 1_000_000_000);
+    if end_ns <= start_ns {
+        return Ok(vec![]);
+    }
     let url = format!("{loki}/loki/api/v1/query_range");
-    let selector = format!("{{service_name=\"{app}\", deployment_environment=\"{class}\"}}");
+    let selector = logql(
+        app,
+        class,
+        q.level.as_deref().unwrap_or("all"),
+        q.q.as_deref(),
+        q.trace_id.as_deref(),
+    );
     let body: Value = state
         .http
         .get(&url)
         .query(&[
             ("query", selector.as_str()),
-            ("limit", &QUERY_LIMIT.to_string()),
+            ("limit", &limit.to_string()),
             ("start", &start_ns.to_string()),
             ("end", &end_ns.to_string()),
             ("direction", "backward"),
@@ -522,7 +696,7 @@ async fn logs_inner(
         }
     }
     rows.sort_by_key(|r| std::cmp::Reverse(r.ts_unix_nano));
-    rows.truncate(QUERY_LIMIT);
+    rows.truncate(limit);
     Ok(rows)
 }
 
@@ -539,6 +713,19 @@ fn attr_str(attrs: Option<&Value>, key: &str) -> Option<String> {
             })
             .flatten()
     })
+}
+
+/// Escape regex metacharacters so user free-text is matched literally inside a
+/// TraceQL / LogQL regex.
+fn regex_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if "\\.+*?()|[]{}^$".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 fn str_u64(v: &Value) -> Option<u64> {
@@ -586,6 +773,41 @@ mod tests {
         // "XWfc0HLIVjM=" → the bytes rendered as hex.
         assert_eq!(b64_to_hex("XWfc0HLIVjM="), "5d67dcd072c85633");
         assert_eq!(b64_to_hex("not-base64!!!"), "not-base64!!!");
+    }
+
+    #[test]
+    fn traceql_folds_status_and_text_filters() {
+        assert_eq!(
+            traceql("app", "production", "all", None),
+            "{resource.service.name=\"app\" && resource.deployment.environment=\"production\"}"
+        );
+        assert!(traceql("app", "stable", "error", None).ends_with(" && status=error}"));
+        assert!(traceql("app", "stable", "ok", None).ends_with(" && status!=error}"));
+        // Free-text is regex-escaped and wrapped case-insensitively; quotes stripped.
+        assert!(traceql("app", "stable", "all", Some("GET /a.b"))
+            .contains(" && name=~\"(?i).*GET /a\\.b.*\"}"));
+        // A blank / quote-only filter adds nothing.
+        assert!(!traceql("app", "stable", "all", Some("  ")).contains("name=~"));
+    }
+
+    #[test]
+    fn logql_folds_trace_level_and_text_filters() {
+        assert_eq!(
+            logql("app", "production", "all", None, None),
+            "{service_name=\"app\", deployment_environment=\"production\"}"
+        );
+        // trace_id is sanitized to hex and matched as a label.
+        assert!(
+            logql("app", "stable", "all", None, Some("abc123XZ")).starts_with(
+                "{service_name=\"app\", deployment_environment=\"stable\", trace_id=\"abc123\"}"
+            )
+        );
+        // Level filter tolerates either level label.
+        let warn = logql("app", "stable", "warn", None, None);
+        assert!(warn.contains(" | severity_text=~\"(?i)(warn|err"));
+        assert!(warn.contains("or detected_level=~"));
+        // Free-text becomes a case-insensitive, escaped line filter.
+        assert!(logql("app", "stable", "all", Some("panic!"), None).ends_with(" |~ \"(?i)panic!\""));
     }
 
     #[test]

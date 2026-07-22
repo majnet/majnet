@@ -59,7 +59,10 @@ export interface ObsTrace {
   trace_id: string; root_service: string; root_name: string
   duration_ms: number; start_unix_nano: number; error: boolean
 }
-export interface ObsOverview { red: ObsRed; traces: ObsTrace[] }
+/** Filters for the paginated trace list (server-side). */
+export interface TraceFilters { windowMin: number; status: 'all' | 'error' | 'ok'; q?: string; limit?: number }
+/** Filters for the paginated log list (server-side). */
+export interface LogFilters { windowMin: number; level: 'all' | 'warn' | 'error'; q?: string; traceId?: string; limit?: number }
 export interface ObsSpan {
   span_id: string; parent_id: string; service: string; name: string
   start_offset_ms: number; duration_ms: number; depth: number; error: boolean
@@ -211,6 +214,15 @@ export async function enrollNode(
   return JSON.parse(text) as EnrollResult
 }
 
+/** Build a query string, dropping undefined / empty-string values. */
+function obsQs(params: Record<string, string | number | undefined>): string {
+  const qs = new URLSearchParams()
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== '') qs.set(k, String(v))
+  }
+  return qs.toString()
+}
+
 // ── query keys + endpoint URLs ───────────────────────────────────────────────
 export const urls = {
   whoami: `${BOT}/whoami`,
@@ -233,8 +245,14 @@ export const urls = {
     `${RECON}/info/${encodeURIComponent(org)}/${encodeURIComponent(app)}`,
   obsOverview: (org: string, cls: string, app: string, windowMin = 15) =>
     `${RECON}/obs/${encodeURIComponent(org)}/${encodeURIComponent(cls)}/${encodeURIComponent(app)}/overview?window_min=${windowMin}`,
-  obsLogs: (org: string, cls: string, app: string, windowMin = 15) =>
-    `${RECON}/obs/${encodeURIComponent(org)}/${encodeURIComponent(cls)}/${encodeURIComponent(app)}/logs?window_min=${windowMin}`,
+  obsTraces: (org: string, cls: string, app: string, f: TraceFilters, before?: number) =>
+    `${RECON}/obs/${encodeURIComponent(org)}/${encodeURIComponent(cls)}/${encodeURIComponent(app)}/traces?${obsQs({
+      window_min: f.windowMin, limit: f.limit, status: f.status, q: f.q, before,
+    })}`,
+  obsLogs: (org: string, cls: string, app: string, f: LogFilters, before?: number) =>
+    `${RECON}/obs/${encodeURIComponent(org)}/${encodeURIComponent(cls)}/${encodeURIComponent(app)}/logs?${obsQs({
+      window_min: f.windowMin, limit: f.limit, level: f.level, q: f.q, trace_id: f.traceId, before,
+    })}`,
   obsTrace: (traceId: string) => `${RECON}/obs/trace/${encodeURIComponent(traceId)}`,
   events: (limit = 300) => `${RECON}/events?limit=${limit}`,
   botEvents: `${BOT}/events`,
@@ -340,18 +358,10 @@ export const useAppLogs = (org: string, cls: string, app: string, enabled: boole
 export interface AppContainer { name: string; image: string; state: string; status: string; created: number }
 export const useAppContainers = (org: string, cls: string, app: string, enabled = true) =>
   useQuery({ queryKey: ['containers', org, cls, app], queryFn: () => getJSON<AppContainer[]>(urls.appContainers(org, cls, app)), enabled, refetchInterval: 30000 })
-export const useObsOverview = (org: string, cls: string, app: string, enabled: boolean) =>
+export const useObsOverview = (org: string, cls: string, app: string, windowMin: number, enabled: boolean) =>
   useQuery({
-    queryKey: ['obs-overview', org, cls, app],
-    queryFn: () => getJSON<ObsOverview>(urls.obsOverview(org, cls, app)),
-    enabled,
-    refetchInterval: 15000,
-    retry: false,
-  })
-export const useObsLogs = (org: string, cls: string, app: string, enabled: boolean) =>
-  useQuery({
-    queryKey: ['obs-logs', org, cls, app],
-    queryFn: () => getJSON<ObsLog[]>(urls.obsLogs(org, cls, app)),
+    queryKey: ['obs-overview', org, cls, app, windowMin],
+    queryFn: () => getJSON<ObsRed>(urls.obsOverview(org, cls, app, windowMin)),
     enabled,
     refetchInterval: 15000,
     retry: false,

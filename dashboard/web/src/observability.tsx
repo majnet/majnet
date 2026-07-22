@@ -1,16 +1,113 @@
-import { useState } from 'react'
-import { Activity, AlertTriangle, Clock, MemoryStick, ListTree, ScrollText, ChevronRight } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { Activity, AlertTriangle, Clock, MemoryStick, ListTree, ScrollText, ChevronRight, Search } from 'lucide-react'
 import {
-  useObsOverview, useObsLogs, useObsTrace,
-  type AppSummary, type ContainerMetric, type ObsSpan, type ObsTrace,
+  useObsOverview, useObsTrace, getJSON, urls,
+  type AppSummary, type ContainerMetric, type ObsLog, type ObsSpan, type ObsTrace,
+  type TraceFilters, type LogFilters,
 } from './api'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 
 // Environment order for class pickers; filtered to the classes an app declares.
 const ENV_ORDER = ['production', 'stable', 'testing', 'ephemeral']
 const orderClasses = (classes: string[]) => ENV_ORDER.filter((c) => classes.includes(c))
+
+// Look-back windows for the RED tiles + trace/log lists. Page size for the lists
+// (kept below the reconciler's MAX_LIMIT); a full page implies "load more".
+const WINDOWS: { label: string; min: number }[] = [
+  { label: '5m', min: 5 }, { label: '15m', min: 15 }, { label: '1h', min: 60 },
+  { label: '6h', min: 360 }, { label: '24h', min: 1440 },
+]
+const PAGE = 100
+
+/** Debounce a value so text filters don't refetch on every keystroke. */
+function useDebounced<T>(value: T, ms = 400): T {
+  const [v, setV] = useState(value)
+  useEffect(() => {
+    const id = setTimeout(() => setV(value), ms)
+    return () => clearTimeout(id)
+  }, [value, ms])
+  return v
+}
+
+/** A cursor-paginated, live-refreshing list backed by a `before`-cursor endpoint.
+ *  Page 1 auto-refreshes every 15 s until the user loads an older page (then it
+ *  pauses so the appended pages aren't clobbered); changing `depsKey` (the filter
+ *  identity) resets to a fresh page 1. */
+function usePagedObs<T>(
+  makeUrl: (before?: number) => string,
+  keyOf: (r: T) => string,
+  cursorOf: (r: T) => number,
+  depsKey: string,
+) {
+  const [rows, setRows] = useState<T[]>([])
+  const [loading, setLoading] = useState(true)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [error, setError] = useState<unknown>(null)
+  const [hasMore, setHasMore] = useState(false)
+  const [paged, setPaged] = useState(false)
+  const urlRef = useRef(makeUrl)
+  urlRef.current = makeUrl
+  const rowsRef = useRef<T[]>([])
+  rowsRef.current = rows
+
+  // Fresh page 1 whenever the filters change.
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    setPaged(false)
+    getJSON<T[]>(urlRef.current(undefined))
+      .then((d) => { if (!cancelled) { setRows(d); setHasMore(d.length >= PAGE) } })
+      .catch((e) => { if (!cancelled) setError(e) })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [depsKey])
+
+  // Live refresh of page 1, paused once the user has paged deeper.
+  useEffect(() => {
+    if (paged) return
+    const id = setInterval(() => {
+      getJSON<T[]>(urlRef.current(undefined))
+        .then((d) => { setRows(d); setHasMore(d.length >= PAGE); setError(null) })
+        .catch(() => {})
+    }, 15000)
+    return () => clearInterval(id)
+  }, [depsKey, paged])
+
+  const loadMore = () => {
+    const last = rowsRef.current[rowsRef.current.length - 1]
+    if (!last || loadingMore) return
+    setLoadingMore(true)
+    setPaged(true)
+    getJSON<T[]>(urlRef.current(cursorOf(last)))
+      .then((more) => {
+        setRows((prev) => {
+          const seen = new Set(prev.map(keyOf))
+          return [...prev, ...more.filter((r) => !seen.has(keyOf(r)))]
+        })
+        setHasMore(more.length >= PAGE)
+      })
+      .catch(setError)
+      .finally(() => setLoadingMore(false))
+  }
+
+  return { rows, loading, loadingMore, error, hasMore, loadMore, live: !paged }
+}
+
+/** Compact "Load more" / end-of-list footer shared by both panels. */
+function LoadMore({ hasMore, loading, onMore }: { hasMore: boolean; loading: boolean; onMore: () => void }) {
+  if (!hasMore) return null
+  return (
+    <div className="flex justify-center py-2">
+      <Button variant="outline" size="sm" onClick={onMore} disabled={loading}>
+        {loading ? 'Loading…' : 'Load more'}
+      </Button>
+    </div>
+  )
+}
 
 // Grafana lives on the tailnet as an internal service in the majnet project
 // (ADR 0023). The public/tailnet host is fixed, like the Adminer deep-link.
@@ -58,26 +155,35 @@ export function Observability({ org, app, cls, containers, control }: {
   control?: React.ReactNode
 }) {
   const [tab, setTab] = useState<'traces' | 'logs'>('traces')
-  const ov = useObsOverview(org, cls, app, true)
-  const logs = useObsLogs(org, cls, app, tab === 'logs')
+  const [windowMin, setWindowMin] = useState(15)
+  const ov = useObsOverview(org, cls, app, windowMin, true)
 
   const mem = containers.reduce((s, c) => s + c.mem_used, 0)
   const memLimit = containers[0]?.mem_limit ?? 0
-  const red = ov.data?.red
+  const red = ov.data
 
   // The reconciler returns 503 when Tempo/Loki aren't configured yet.
   const unconfigured = (ov.error as { status?: number } | null)?.status === 503
     || (ov.error && String(ov.error).includes('503'))
+  const winLabel = WINDOWS.find((w) => w.min === windowMin)?.label ?? `${windowMin}m`
 
   return (
     <>
-      <div className="mb-3 mt-8 flex items-baseline gap-2.5">
+      <div className="mb-3 mt-8 flex flex-wrap items-center gap-2.5">
         <h2 className="text-sm font-semibold">Observability</h2>
-        <span className="text-xs text-muted-foreground">{cls} · last 15 min · traces &amp; logs from OpenTelemetry</span>
-        {control && <div className="ml-auto">{control}</div>}
-        <Button asChild variant="outline" size="sm" className={control ? '' : 'ml-auto'}>
-          <a href={GRAFANA} target="_blank" rel="noreferrer">Open in Grafana ↗</a>
-        </Button>
+        <span className="text-xs text-muted-foreground">{cls} · traces &amp; logs from OpenTelemetry</span>
+        <div className="ml-auto flex items-center gap-2.5">
+          <Select value={String(windowMin)} onValueChange={(v) => setWindowMin(Number(v))}>
+            <SelectTrigger className="h-8 w-24 text-[13px]"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              {WINDOWS.map((w) => <SelectItem key={w.min} value={String(w.min)}>last {w.label}</SelectItem>)}
+            </SelectContent>
+          </Select>
+          {control}
+          <Button asChild variant="outline" size="sm">
+            <a href={GRAFANA} target="_blank" rel="noreferrer">Open in Grafana ↗</a>
+          </Button>
+        </div>
       </div>
 
       {unconfigured ? (
@@ -89,12 +195,12 @@ export function Observability({ org, app, cls, containers, control }: {
           {/* golden signals */}
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <Tile icon={<Activity className="size-3.5" />} label="Request rate"
-              value={red ? red.rate_per_min.toFixed(1) : '—'} unit="req/min" source="from traces" />
+              value={red ? red.rate_per_min.toFixed(1) : '—'} unit="req/min" source={`last ${winLabel} · traces`} />
             <Tile icon={<AlertTriangle className="size-3.5" />} label="Error rate"
-              value={red ? red.error_pct.toFixed(1) : '—'} unit="%" source="from traces"
+              value={red ? red.error_pct.toFixed(1) : '—'} unit="%" source={`last ${winLabel} · traces`}
               tone={red && red.error_pct > 0 ? 'err' : undefined} />
             <Tile icon={<Clock className="size-3.5" />} label="p95 latency"
-              value={red ? String(red.p95_ms) : '—'} unit="ms" source="from traces" />
+              value={red ? String(red.p95_ms) : '—'} unit="ms" source={`last ${winLabel} · traces`} />
             <Tile icon={<MemoryStick className="size-3.5" />} label="Memory"
               value={containers.length ? Math.round(mem / 1e6).toString() : '—'}
               unit={memLimit ? `/ ${Math.round(memLimit / 1e6)} MiB` : 'MiB'} source="native · reconciler" />
@@ -113,13 +219,13 @@ export function Observability({ org, app, cls, containers, control }: {
                   <ScrollText className="size-3.5" /> Logs
                 </button>
               </div>
-              {red?.capped && <span className="text-[11px] text-muted-foreground">sampled {red.sampled} — rate is a lower bound</span>}
+              {tab === 'traces' && red?.capped && (
+                <span className="text-[11px] text-muted-foreground">RED sampled {red.sampled} — rate is a lower bound</span>
+              )}
             </div>
-            <CardContent className="p-2">
-              {tab === 'traces'
-                ? <TracesPanel traces={ov.data?.traces ?? []} loading={ov.isLoading} error={!!ov.error && !unconfigured} />
-                : <LogsPanel org={org} app={app} cls={cls} logs={logs} />}
-            </CardContent>
+            {tab === 'traces'
+              ? <TracesPanel org={org} app={app} cls={cls} windowMin={windowMin} />
+              : <LogsPanel org={org} app={app} cls={cls} windowMin={windowMin} />}
           </Card>
         </>
       )}
@@ -171,30 +277,62 @@ export function ProjectObservability({ org, apps, containersFor }: {
   )
 }
 
-function TracesPanel({ traces, loading, error }: { traces: ObsTrace[]; loading: boolean; error: boolean }) {
+function TracesPanel({ org, app, cls, windowMin }: {
+  org: string; app: string; cls: string; windowMin: number
+}) {
   const [open, setOpen] = useState<string | null>(null)
-  if (loading && !traces.length) return <Empty>Loading traces…</Empty>
-  if (error) return <Empty>Couldn’t reach Tempo.</Empty>
-  if (!traces.length) return <Empty>No traces in the last 15 minutes.</Empty>
-  const max = Math.max(1, ...traces.map((t) => t.duration_ms))
+  const [status, setStatus] = useState<'all' | 'error' | 'ok'>('all')
+  const [text, setText] = useState('')
+  const q = useDebounced(text)
+  const filters: TraceFilters = { windowMin, status, q: q || undefined, limit: PAGE }
+  const depsKey = `${org}|${cls}|${app}|${windowMin}|${status}|${q}`
+  const { rows, loading, loadingMore, error, hasMore, loadMore } = usePagedObs<ObsTrace>(
+    (before) => urls.obsTraces(org, cls, app, filters, before),
+    (t) => t.trace_id,
+    (t) => t.start_unix_nano,
+    depsKey,
+  )
+
+  const max = Math.max(1, ...rows.map((t) => t.duration_ms))
   return (
-    <div className="flex flex-col">
-      {traces.map((t) => (
-        <div key={t.trace_id}>
-          <button onClick={() => setOpen(open === t.trace_id ? null : t.trace_id)}
-            className="grid w-full grid-cols-[16px_1fr_120px_72px_64px] items-center gap-3 rounded-md px-2 py-2 text-left text-[13px] hover:bg-muted/60">
-            <ChevronRight className={`size-4 text-muted-foreground transition-transform ${open === t.trace_id ? 'rotate-90' : ''}`} />
-            <span className="truncate font-medium">{t.root_name || '(root)'}</span>
-            <span className="h-1.5 overflow-hidden rounded bg-muted">
-              <span className="block h-full rounded" style={{ width: `${(t.duration_ms / max) * 100}%`, background: t.error ? 'var(--destructive)' : svcColor(t.root_service) }} />
-            </span>
-            <span className={`text-right font-mono tabular-nums ${t.error ? 'text-destructive' : ''}`}>{fmtMs(t.duration_ms)}</span>
-            <span className="text-right text-xs text-muted-foreground tabular-nums">{fmtWhen(t.start_unix_nano)}</span>
-          </button>
-          {open === t.trace_id && <Waterfall traceId={t.trace_id} />}
-        </div>
-      ))}
-    </div>
+    <>
+      <div className="flex flex-wrap items-center gap-2 border-b px-3 py-2">
+        <Select value={status} onValueChange={(v) => setStatus(v as typeof status)}>
+          <SelectTrigger className="h-8 w-32 text-[13px]"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All statuses</SelectItem>
+            <SelectItem value="error">Errors only</SelectItem>
+            <SelectItem value="ok">Success only</SelectItem>
+          </SelectContent>
+        </Select>
+        <SearchInput value={text} onChange={setText} placeholder="Filter by operation…" />
+      </div>
+      <CardContent className="p-2">
+        {loading && !rows.length ? <Empty>Loading traces…</Empty>
+          : error ? <Empty>Couldn’t reach Tempo.</Empty>
+          : !rows.length ? <Empty>No matching traces in this window.</Empty>
+          : (
+            <div className="flex flex-col">
+              {rows.map((t) => (
+                <div key={t.trace_id}>
+                  <button onClick={() => setOpen(open === t.trace_id ? null : t.trace_id)}
+                    className="grid w-full grid-cols-[16px_1fr_120px_72px_64px] items-center gap-3 rounded-md px-2 py-2 text-left text-[13px] hover:bg-muted/60">
+                    <ChevronRight className={`size-4 text-muted-foreground transition-transform ${open === t.trace_id ? 'rotate-90' : ''}`} />
+                    <span className="truncate font-medium">{t.root_name || '(root)'}</span>
+                    <span className="h-1.5 overflow-hidden rounded bg-muted">
+                      <span className="block h-full rounded" style={{ width: `${(t.duration_ms / max) * 100}%`, background: t.error ? 'var(--destructive)' : svcColor(t.root_service) }} />
+                    </span>
+                    <span className={`text-right font-mono tabular-nums ${t.error ? 'text-destructive' : ''}`}>{fmtMs(t.duration_ms)}</span>
+                    <span className="text-right text-xs text-muted-foreground tabular-nums">{fmtWhen(t.start_unix_nano)}</span>
+                  </button>
+                  {open === t.trace_id && <Waterfall traceId={t.trace_id} />}
+                </div>
+              ))}
+              <LoadMore hasMore={hasMore} loading={loadingMore} onMore={loadMore} />
+            </div>
+          )}
+      </CardContent>
+    </>
   )
 }
 
@@ -228,27 +366,73 @@ function Waterfall({ traceId }: { traceId: string }) {
   )
 }
 
-function LogsPanel({ logs }: {
-  org: string; app: string; cls: string
-  logs: ReturnType<typeof useObsLogs>
+function LogsPanel({ org, app, cls, windowMin }: {
+  org: string; app: string; cls: string; windowMin: number
 }) {
-  if (logs.isLoading && !logs.data) return <Empty>Loading logs…</Empty>
-  if (logs.error) return <Empty>Couldn’t reach Loki.</Empty>
-  if (!logs.data?.length) return <Empty>No logs in the last 15 minutes.</Empty>
+  const [level, setLevel] = useState<'all' | 'warn' | 'error'>('all')
+  const [text, setText] = useState('')
+  const [trace, setTrace] = useState('')
+  const q = useDebounced(text)
+  const traceId = useDebounced(trace)
+  const filters: LogFilters = { windowMin, level, q: q || undefined, traceId: traceId || undefined, limit: PAGE }
+  const depsKey = `${org}|${cls}|${app}|${windowMin}|${level}|${q}|${traceId}`
+  const { rows, loading, loadingMore, error, hasMore, loadMore } = usePagedObs<ObsLog>(
+    (before) => urls.obsLogs(org, cls, app, filters, before),
+    (r) => `${r.ts_unix_nano}|${r.msg}`,
+    (r) => r.ts_unix_nano,
+    depsKey,
+  )
+
   const lvlColor = (l: string) =>
     l.startsWith('err') ? 'text-destructive' : l.startsWith('warn') ? 'text-amber-600 dark:text-amber-500' : 'text-muted-foreground'
   return (
-    <div className="max-h-[420px] overflow-y-auto font-mono text-xs">
-      {logs.data.map((r, i) => (
-        <div key={i} className="grid grid-cols-[64px_48px_1fr_auto] items-baseline gap-2.5 rounded px-2 py-0.5 hover:bg-muted/60">
-          <span className="text-muted-foreground/70 tabular-nums">{new Date(r.ts_unix_nano / 1e6).toLocaleTimeString()}</span>
-          <span className={`font-semibold uppercase ${lvlColor(r.level)}`}>{r.level.slice(0, 4)}</span>
-          <span className="truncate" title={r.msg}>{r.msg}</span>
-          {r.trace_id
-            ? <span className="text-[11px] text-primary/80" title={r.trace_id}>trace {r.trace_id.slice(0, 6)}…</span>
-            : <span />}
-        </div>
-      ))}
+    <>
+      <div className="flex flex-wrap items-center gap-2 border-b px-3 py-2">
+        <Select value={level} onValueChange={(v) => setLevel(v as typeof level)}>
+          <SelectTrigger className="h-8 w-28 text-[13px]"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All levels</SelectItem>
+            <SelectItem value="warn">Warn+</SelectItem>
+            <SelectItem value="error">Errors</SelectItem>
+          </SelectContent>
+        </Select>
+        <SearchInput value={text} onChange={setText} placeholder="Filter message…" />
+        <Input value={trace} onChange={(e) => setTrace(e.target.value)} placeholder="trace_id"
+          className="h-8 w-40 font-mono text-[13px]" />
+      </div>
+      <CardContent className="p-2">
+        {loading && !rows.length ? <Empty>Loading logs…</Empty>
+          : error ? <Empty>Couldn’t reach Loki.</Empty>
+          : !rows.length ? <Empty>No matching logs in this window.</Empty>
+          : (
+            <div className="max-h-[460px] overflow-y-auto font-mono text-xs">
+              {rows.map((r, i) => (
+                <div key={i} className="grid grid-cols-[64px_48px_1fr_auto] items-baseline gap-2.5 rounded px-2 py-0.5 hover:bg-muted/60">
+                  <span className="text-muted-foreground/70 tabular-nums">{new Date(r.ts_unix_nano / 1e6).toLocaleTimeString()}</span>
+                  <span className={`font-semibold uppercase ${lvlColor(r.level)}`}>{r.level.slice(0, 4)}</span>
+                  <span className="truncate" title={r.msg}>{r.msg}</span>
+                  {r.trace_id
+                    ? <button onClick={() => setTrace(r.trace_id)} className="text-[11px] text-primary/80 hover:underline" title={`Filter to ${r.trace_id}`}>trace {r.trace_id.slice(0, 6)}…</button>
+                    : <span />}
+                </div>
+              ))}
+              <LoadMore hasMore={hasMore} loading={loadingMore} onMore={loadMore} />
+            </div>
+          )}
+      </CardContent>
+    </>
+  )
+}
+
+/** Small search input with a leading icon, shared by both filter bars. */
+function SearchInput({ value, onChange, placeholder }: {
+  value: string; onChange: (v: string) => void; placeholder: string
+}) {
+  return (
+    <div className="relative">
+      <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+      <Input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder}
+        className="h-8 w-52 pl-8 text-[13px]" />
     </div>
   )
 }
