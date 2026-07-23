@@ -87,6 +87,19 @@ function useAppView() {
 
 const digestShort = (img?: string) => img?.split('@sha256:')[1]?.slice(0, 7) ?? null
 
+/** The public hostnames the manifest declares for `env` — the class overlay's
+ *  ingress host + domains, falling back to base's (overlay wins; the domains
+ *  sequence replaces). Auto-assigned non-prod tailnet hosts aren't in the
+ *  authored manifest, so they don't appear here. */
+function envHosts(files: Record<string, ManifestFile> | undefined, env: string): string[] {
+  const ing = (f?: ManifestFile) => (f?.data as { ingress?: { host?: string; domains?: string[] } } | null)?.ingress
+  const base = ing(files?.['base.yaml'])
+  const ov = ing(files?.[`${env}.yaml`])
+  const host = ov?.host ?? base?.host
+  const domains = ov?.domains ?? base?.domains ?? []
+  return [host, ...domains].filter((x): x is string => !!x)
+}
+
 // The app-detail sections, as a tab bar over nested routes. Releases lives in the
 // top-bar Releases popover (+ an Overview link), Deployments in the top-bar
 // Deployments popover — so neither is a tab here.
@@ -210,6 +223,7 @@ export function AppDetail() {
  *  all environments + this app's recent deploys. */
 export function AppOverview() {
   const { org, app, a, project, isAdmin, classes, env, containersFor, versionFor } = useAppView()
+  const manifest = useManifest(org, app)
   const [logsOpen, setLogsOpen] = useState(false)
   const act = useApiMutation({ invalidate: [['events']] })
   const adminerUrl =
@@ -224,7 +238,7 @@ export function AppOverview() {
           app={app} env={env} org={org} isAdmin={isAdmin}
           containers={containersFor(env)}
           version={versionFor(env)}
-          domains={env === 'production' ? (a?.domains ?? []) : []}
+          domains={envHosts(manifest.data, env)}
           adminerUrl={env === 'production' ? adminerUrl : null}
           onLogs={() => setLogsOpen(true)}
           restart={() => act.mutate(() => send(urls.restart(org, env, app)))} busy={act.isPending}
