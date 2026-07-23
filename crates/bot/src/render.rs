@@ -144,18 +144,26 @@ fn render_class(
                     "{app}: manifest name '{existing}' does not match app directory"
                 ),
             }
-            // ADR 0013: non-production classes get an auto-assigned ingress host
-            // (`{app}.{project}.{base_domain}`); the app declares only the port,
-            // and any custom host/domains it carried are ignored here. Production
-            // keeps its custom host/domains (Cloudflare + edge, ADR 0007).
+            // Ingress host assignment (ADR 0013, revised 2026-07-23):
+            //  - testing + ephemeral → ALWAYS an auto-assigned host
+            //    (`{app}.{project}.{base_domain}`); throwaway/preview envs, the
+            //    app declares only the port and any custom host/domains are ignored.
+            //  - stable → honors a declared custom host + domains (like
+            //    production, so it can serve a real custom domain e.g. a dev env),
+            //    falling back to the auto host when the overlay declares only a port.
+            //  - production → keeps its custom host/domains (Cloudflare + edge).
             if class != EnvClass::Production {
                 if let Some(ingress) = map
                     .get_mut(serde_yaml::Value::from("ingress"))
                     .and_then(|i| i.as_mapping_mut())
                 {
-                    let host = format!("{app}.{project}.{base_domain}");
-                    ingress.insert("host".into(), host.into());
-                    ingress.remove(serde_yaml::Value::from("domains"));
+                    let has_custom_host = ingress.contains_key(serde_yaml::Value::from("host"));
+                    let auto = class != EnvClass::Stable || !has_custom_host;
+                    if auto {
+                        let host = format!("{app}.{project}.{base_domain}");
+                        ingress.insert("host".into(), host.into());
+                        ingress.remove(serde_yaml::Value::from("domains"));
+                    }
                 }
             }
         } else {
@@ -520,6 +528,35 @@ mod tests {
     }
 
     #[test]
+    fn stable_honors_custom_ingress_host_testing_auto_assigns() {
+        let src = sources(&[
+            (
+                "apps/api/base.yaml",
+                "ingress:\n  host: dev.sideline.cz\n  port: 80\n",
+            ),
+            (
+                "apps/api/stable.yaml",
+                &format!("image: ghcr.io/o/api@{DIGEST}\n"),
+            ),
+            (
+                "apps/api/testing.yaml",
+                &format!("image: ghcr.io/o/api@{DIGEST}\n"),
+            ),
+        ]);
+        // Stable keeps the declared custom host.
+        let stable = render_class(&src, EnvClass::Stable, "sideline-cz", "majksa.net")
+            .unwrap()
+            .unwrap();
+        assert!(stable["api.yaml"].contains("dev.sideline.cz"));
+        // Testing ignores it and auto-assigns `{app}.{project}.{base_domain}`.
+        let testing = render_class(&src, EnvClass::Testing, "sideline-cz", "majksa.net")
+            .unwrap()
+            .unwrap();
+        assert!(testing["api.yaml"].contains("api.sideline-cz.majksa.net"));
+        assert!(!testing["api.yaml"].contains("dev.sideline.cz"));
+    }
+
+    #[test]
     fn vpn_ingress_hosts_empty_for_production_only_project() {
         // A project whose apps render only for production has no tailnet ingress.
         let src = sources(&[
@@ -539,19 +576,20 @@ mod tests {
 
     #[test]
     fn non_production_gets_an_auto_assigned_host() {
-        // The app declares only a port; base carries a stray host + domains that
-        // must be ignored for non-production (ADR 0013).
+        // testing/ephemeral always auto-assign: a stray host + domains (here in
+        // base) are ignored (ADR 0013). (Stable now honors a custom host — see
+        // `stable_honors_custom_ingress_host_testing_auto_assigns`.)
         let src = sources(&[
             (
                 "apps/api/base.yaml",
                 "ingress:\n  host: leftover.example.com\n  port: 8080\n  domains:\n    - www.example.com\n",
             ),
             (
-                "apps/api/stable.yaml",
+                "apps/api/testing.yaml",
                 &format!("image: ghcr.io/o/api@{DIGEST}\n"),
             ),
         ]);
-        let rendered = render_class(&src, EnvClass::Stable, "zpevnik", "majksa.net")
+        let rendered = render_class(&src, EnvClass::Testing, "zpevnik", "majksa.net")
             .unwrap()
             .unwrap();
         let m = AppManifest::parse(&rendered["api.yaml"]).unwrap();
