@@ -154,6 +154,11 @@ pub async fn ensure_ingress(
             // Only this project's containers — cross-project isolation even if
             // a manifest lies about its host.
             format!("--providers.docker.constraints=Label(`{LABEL_PROJECT}`,`{project}`)"),
+            // Apps are multi-homed since ADR 0027 (per-class net + the shared net);
+            // pin the backend network to the shared net — the one this Traefik (via
+            // the sidecar netns) shares with every class's apps — so it routes to a
+            // reachable IP rather than an arbitrary per-class one.
+            format!("--providers.docker.network={}", network_name(project)),
             "--entrypoints.web.address=:80".to_string(),
             "--entrypoints.websecure.address=:443".to_string(),
         ];
@@ -311,7 +316,8 @@ fn ingress_hash(cert: Option<&BTreeMap<String, Vec<u8>>>) -> String {
     h.update(TRAEFIK_IMAGE.as_bytes());
     // Bump when the Traefik container spec changes (env/cmd/mounts) so existing
     // ingresses recreate. v2: pin DOCKER_API_VERSION for Docker 29 daemons.
-    h.update(b"spec-v2");
+    // v3: pin the docker provider network to the shared net (ADR 0027).
+    h.update(b"spec-v3");
     if let Some(files) = cert {
         for (name, content) in files {
             h.update(name.as_bytes());

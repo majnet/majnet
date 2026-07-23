@@ -122,7 +122,7 @@ async fn converge_project_class(
         .with_context(|| format!("no node with role '{}' in nodes.yaml", class.node_role()))?;
     let docker = state.nodes(nodes).client_for(node).await?;
 
-    ensure_network(&docker, project, state.config.dry_run).await?;
+    ensure_network(&docker, project, class, state.config.dry_run).await?;
 
     // Rendered env branch layout (§9): `<app>.yaml` at root, `secrets/<app>.yaml`.
     let manifests: BTreeMap<&str, &Vec<u8>> = snapshot
@@ -391,17 +391,36 @@ async fn converge_one(
     Ok(summary)
 }
 
-async fn ensure_network(docker: &bollard::Docker, project: &str, dry_run: bool) -> Result<()> {
-    let name = deploy::network_name(project);
+/// Ensure both the shared per-project infra network and the per-class app network
+/// exist (ADR 0027). Called once per project+class; the shared net is idempotent.
+async fn ensure_network(
+    docker: &bollard::Docker,
+    project: &str,
+    class: EnvClass,
+    dry_run: bool,
+) -> Result<()> {
+    ensure_named_network(docker, &deploy::network_name(project), project, dry_run).await?;
+    ensure_named_network(
+        docker,
+        &deploy::class_network_name(project, class),
+        project,
+        dry_run,
+    )
+    .await
+}
+
+async fn ensure_named_network(
+    docker: &bollard::Docker,
+    name: &str,
+    project: &str,
+    dry_run: bool,
+) -> Result<()> {
     let existing = docker
         .list_networks(Some(qp::ListNetworksOptions {
-            filters: Some([("name".to_string(), vec![name.clone()])].into()),
+            filters: Some([("name".to_string(), vec![name.to_string()])].into()),
         }))
         .await?;
-    if existing
-        .iter()
-        .any(|n| n.name.as_deref() == Some(name.as_str()))
-    {
+    if existing.iter().any(|n| n.name.as_deref() == Some(name)) {
         return Ok(());
     }
     if dry_run {
@@ -410,7 +429,7 @@ async fn ensure_network(docker: &bollard::Docker, project: &str, dry_run: bool) 
     }
     docker
         .create_network(bollard::models::NetworkCreateRequest {
-            name: name.clone(),
+            name: name.to_string(),
             labels: Some([(deploy::LABEL_PROJECT.to_string(), project.to_string())].into()),
             ..Default::default()
         })

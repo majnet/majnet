@@ -50,10 +50,25 @@ pub const LABEL_CONFIG: &str = "majnet.config-hash";
 /// blue-green rollout instead of silently keeping a stale one.
 /// History: "2" — added the Traefik LB healthcheck labels.
 ///          "3" — added the stable intra-project network alias (ADR 0019).
-const SPEC_VERSION: &str = "3";
+///          "4" — moved the intra-project alias onto a per-class network so
+///                classes sharing a node don't collide (ADR 0027).
+const SPEC_VERSION: &str = "4";
 
+/// The shared per-project network. The project's ingress Traefik sidecar and the
+/// managed DB engine live here, and every app + migration joins it for ingress
+/// routing and DB reachability (by container name). App-to-app **aliases** do NOT
+/// live here (see [`class_network_name`]) — so multiple classes on one node don't
+/// collide on the shared bare name.
 pub fn network_name(project: &str) -> String {
     format!("proj-{project}")
+}
+
+/// The per-class app network (ADR 0027). An app's *primary* network
+/// (`network_mode`), carrying its `manifest.name` DNS alias so siblings resolve
+/// each other **within their own class only** — isolating stable/testing/ephemeral
+/// that share the private node.
+pub fn class_network_name(project: &str, class: EnvClass) -> String {
+    format!("proj-{project}-{}", class.as_str())
 }
 
 /// The Docker named volume backing a manifest volume on the app's node.
@@ -235,6 +250,29 @@ pub async fn converge_app(
             .start_container(name, None::<qp::StartContainerOptions>)
             .await
             .context("starting container")?;
+
+        // Every app also joins the shared per-project network (ADR 0027): the
+        // project's ingress Traefik + the DB engine both live there and reach the
+        // app over it, while the app's primary (network_mode) net is its per-class
+        // net that carries the alias. Best-effort — the net is ensured before app
+        // convergence, and a re-attach on an existing endpoint is harmless.
+        if let Err(e) = ctx
+            .docker
+            .connect_network(
+                &network_name(ctx.project),
+                bollard::models::NetworkConnectRequest {
+                    container: name.clone(),
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            tracing::warn!(
+                app = manifest.name,
+                error = format!("{e:#}"),
+                "could not attach app to the shared project network"
+            );
+        }
 
         // Production apps with an ingress also join the shared `edge` network so
         // edge-main (Traefik) can route to (and load-balance across) them
@@ -485,12 +523,14 @@ fn container_spec(
         })
         .unwrap_or((None, None));
 
-    // Stable intra-project DNS alias (ADR 0019): sibling apps on the same
-    // project network resolve this app by its manifest name (e.g. an app's own
-    // reverse proxy → `sideline-server`), independent of the volatile
-    // `<project>-<app>-<class>-<hash>` container name that blue-green churns.
-    // The alias key must match `network_mode` for Docker to accept both.
-    let net = network_name(ctx.project);
+    // Intra-project DNS alias (ADR 0019, per-class since ADR 0027): sibling apps
+    // resolve this app by its manifest name (e.g. a reverse proxy → `sideline-server`),
+    // independent of the volatile `<project>-<app>-<class>-<hash>` container name that
+    // blue-green churns. The alias lives on the app's **per-class** network so the
+    // same name in another class doesn't collide. The alias key must match
+    // `network_mode` for Docker to accept both. (The shared per-project network — for
+    // ingress + DB reachability — is joined separately, after start.)
+    let net = class_network_name(ctx.project, ctx.class);
     let networking_config = NetworkingConfig {
         endpoints_config: Some(HashMap::from([(
             net.clone(),
@@ -806,8 +846,16 @@ pub(crate) async fn remove_container_if_exists(docker: &Docker, name: &str) -> R
 /// reached by the whole-project purge (§2 escape), after every container on it
 /// has been removed.
 pub async fn remove_network(docker: &Docker, project: &str) -> Result<()> {
-    let name = network_name(project);
-    match docker.remove_network(&name).await {
+    // The shared per-project net + every per-class app net (ADR 0027).
+    remove_network_named(docker, &network_name(project)).await?;
+    for class in EnvClass::ALL {
+        remove_network_named(docker, &class_network_name(project, class)).await?;
+    }
+    Ok(())
+}
+
+async fn remove_network_named(docker: &Docker, name: &str) -> Result<()> {
+    match docker.remove_network(name).await {
         Ok(()) => Ok(()),
         Err(bollard::errors::Error::DockerResponseServerError {
             status_code: 404, ..
@@ -841,6 +889,24 @@ mod tests {
             "a".repeat(64)
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn networks_are_shared_infra_plus_per_class() {
+        assert_eq!(network_name("sideline"), "proj-sideline");
+        assert_eq!(
+            class_network_name("sideline", EnvClass::Stable),
+            "proj-sideline-stable"
+        );
+        assert_eq!(
+            class_network_name("sideline", EnvClass::Testing),
+            "proj-sideline-testing"
+        );
+        // Distinct per class → no cross-class alias collision on the shared net.
+        assert_ne!(
+            class_network_name("sideline", EnvClass::Stable),
+            class_network_name("sideline", EnvClass::Testing)
+        );
     }
 
     #[test]
