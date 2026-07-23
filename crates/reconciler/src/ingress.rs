@@ -35,9 +35,10 @@ use crate::AppState;
 
 const TAILSCALE_IMAGE: &str = "tailscale/tailscale:stable";
 const TRAEFIK_IMAGE: &str = "traefik:v3.5";
-// Floating channel, like TAILSCALE_IMAGE's `:stable`. Pin to a dated tag/digest
-// if reproducibility matters.
-const CLOUDFLARED_IMAGE: &str = "cloudflare/cloudflared:latest";
+// Pinned by digest (the `:latest` snapshot in use as of 2026-07-23) so previews
+// don't silently drift on an upstream push — bump deliberately.
+const CLOUDFLARED_IMAGE: &str =
+    "cloudflare/cloudflared@sha256:e39ee8da81ad5e05d77f38d2f51c60ca51bf2a8450ac3abab50c17fdb91d91bf";
 /// Per-project host dir holding the wildcard cert + Traefik dynamic config.
 const INGRESS_STATE_DIR: &str = "/etc/majnet/ingress";
 
