@@ -2,10 +2,10 @@
 # End-to-end smoke test of the reconciler against the LOCAL Docker daemon.
 #
 # Exercises the §12 loop without GitHub or any server:
-#   fixture env branch → converge → healthy container with decrypted SOPS
+#   fixture env branch → converge → healthy container with a decrypted inline
 #   secret on tmpfs → blue-green on config change → GC when config is gone.
 #
-# Requires: docker, sops, age-keygen, cargo (all in the nix dev shell).
+# Requires: docker, age, age-keygen, cargo (all in the nix dev shell).
 # Usage: scripts/smoke-test.sh   (from the repo root; direnv or nix develop)
 
 set -euo pipefail
@@ -58,20 +58,20 @@ app_single() { [[ $(app_container | wc -l | tr -d ' ') == 1 ]]; }
 
 step "preflight"
 docker info >/dev/null || { red "docker daemon not reachable"; exit 1; }
-{ command -v sops && command -v age-keygen; } >/dev/null || { red "need sops + age-keygen (nix dev shell)"; exit 1; }
+{ command -v age && command -v age-keygen; } >/dev/null || { red "need age + age-keygen (nix dev shell)"; exit 1; }
 
 step "building fixture in $WORK"
 SNAP="$WORK/snapshots"
 # The project's env-branch dirs are created here (git tracks no empty dirs).
-mkdir -p "$SNAP" "$WORK/age" "$SNAP/$PROJECT/ops/env/stable/secrets"
+mkdir -p "$SNAP" "$WORK/age" "$SNAP/$PROJECT/ops/env/stable"
 cp -R scripts/smoke/fixture/* "$SNAP/"
 
-# Class age key + one SOPS-encrypted secret, exactly as the bot would pass it through.
+# Class age key + one inline-encrypted secret (ADR 0024): the manifest carries a
+# `majnet:<base64(age ciphertext)>` envelope the reconciler decrypts with the
+# class key — exactly what the bot's encrypt endpoint embeds. SOPS was retired.
 age-keygen -o "$WORK/age/age-stable.key" 2>/dev/null
 AGE_PUB=$(age-keygen -y "$WORK/age/age-stable.key")
-printf 'greeting: hello-from-sops\n' > "$WORK/secret.yaml"
-sops encrypt --age "$AGE_PUB" --input-type yaml --output-type yaml "$WORK/secret.yaml" \
-  > "$SNAP/$PROJECT/ops/env/stable/secrets/$APP.yaml"
+SECRET_ENVELOPE="majnet:$(printf 'hello-from-sops' | age -r "$AGE_PUB" | base64 | tr -d '\n')"
 
 # Digest-pinned image, like a rendered manifest.
 docker pull -q "$IMAGE" >/dev/null
@@ -82,7 +82,8 @@ name: $APP
 image: $DIGEST
 env:
   REV: "$1"
-secrets: [greeting]
+secrets:
+  greeting: $SECRET_ENVELOPE
 health:
   path: /
   port: 80
@@ -108,7 +109,7 @@ wait_for 10 "reconciler is up" curl -fs "http://$LISTEN/healthz"
 step "1) initial converge: container healthy, secret decrypted onto tmpfs"
 wait_for 90 "app container healthy" app_is_healthy
 if docker exec "$(app_container)" sh -c 'test "$(cat /run/secrets/greeting)" = hello-from-sops'; then
-  green "SOPS secret decrypted and mounted at /run/secrets/greeting"
+  green "inline secret decrypted and mounted at /run/secrets/greeting"
 else
   fail "secret file wrong or missing"
 fi
@@ -124,7 +125,7 @@ wait_for 30 "exactly one container remains" app_single
 app_is_healthy && green "replacement is healthy"
 
 step "3) GC: manifest removed from git → container removed"
-rm "$SNAP/$PROJECT/ops/env/stable/$APP.yaml" "$SNAP/$PROJECT/ops/env/stable/secrets/$APP.yaml"
+rm "$SNAP/$PROJECT/ops/env/stable/$APP.yaml"
 curl -fs -X POST "http://$LISTEN/notify" -H 'content-type: application/json' -d '{}' >/dev/null
 wait_for 60 "app container gone" app_gone
 
