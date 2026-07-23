@@ -3,7 +3,7 @@ import { Shell } from './shell'
 import { Activity, Nodes, ProjectDetail, ProjectApps, ProjectObservabilityTab, Projects } from './views'
 import { Overview } from './overview'
 import { NewApp, NewProject, NewService } from './forms'
-import { AppDetail, AppOverview, AppConfiguration, AppObservability, AppReleases } from './appDetail'
+import { AppDetail, AppOverview, AppConfiguration, AppObservability, AppReleases, AppDeployments } from './appDetail'
 import { Members } from './members'
 import { Deploys } from './deploys'
 import { AllReleases, AllDeploys } from './fleet'
@@ -63,7 +63,8 @@ const appOverviewRoute = createRoute({ getParentRoute: () => appRoute, path: '/'
 const appConfigRoute = createRoute({ getParentRoute: () => appRoute, path: 'config', component: AppConfiguration })
 const appObsRoute = createRoute({ getParentRoute: () => appRoute, path: 'observability', component: AppObservability })
 const appReleasesRoute = createRoute({ getParentRoute: () => appRoute, path: 'releases', component: AppReleases })
-const appRouteTree = appRoute.addChildren([appOverviewRoute, appConfigRoute, appObsRoute, appReleasesRoute])
+const appDeploysRoute = createRoute({ getParentRoute: () => appRoute, path: 'deploys', component: AppDeployments })
+const appRouteTree = appRoute.addChildren([appOverviewRoute, appConfigRoute, appObsRoute, appReleasesRoute, appDeploysRoute])
 
 const routeTree = rootRoute.addChildren([
   indexRoute, projectsRoute, newProjectRoute, activityRoute, settingsRoute, nodesRoute, controlPlaneRoute, terminalRoute,

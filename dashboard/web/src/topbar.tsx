@@ -50,12 +50,13 @@ function Deployments() {
   const pending = onboarded.flatMap((p, i) => (results[i]?.data ?? []).map((pr) => ({ p, pr })))
   const events = useEvents()
   const progress = useDeployProgress()
-  // The live rollout stage for a deploying (project, app), if the reconciler is
-  // reporting one — turns "converging" into e.g. "Health-gating".
-  const stageOf = (project: string, app: string): string | null => {
-    const d = (progress.data ?? []).find((x) => x.project === project && x.app === app && x.status === 'active')
-    return d ? (DEPLOY_STAGES.find((s) => s.key === d.stage)?.label ?? d.stage) : null
-  }
+  // The live rollout row for a deploying (project, app), if the reconciler is
+  // reporting one — carries the stage (→ e.g. "Health-gating") and the class (so
+  // the row can deep-link to that env's deploy detail).
+  const dpFor = (project: string, app: string) =>
+    (progress.data ?? []).find((x) => x.project === project && x.app === app && x.status === 'active')
+  const stageLabel = (stage: string) => DEPLOY_STAGES.find((s) => s.key === stage)?.label ?? stage
+  const orgOf = (name: string) => (projects.data ?? []).find((p) => p.name === name)?.org
   // Tick a re-render every 10s so the 90s "deploying" window ages out even when
   // the polled events are unchanged — TanStack structural sharing skips
   // re-renders on identical data, which would otherwise freeze `now` here and
@@ -105,8 +106,10 @@ function Deployments() {
             {deploying.map((e, i) => {
               const app = e.action.replace(/^converge /, '')
               const ver = verOf(e.result)
-              return (
-                <div key={i} className="rounded-md px-2 py-1.5">
+              const dp = dpFor(e.project, app)
+              const org = orgOf(e.project)
+              const inner = (
+                <>
                   <div className="flex items-center gap-1.5 text-[13px]">
                     <span className="font-medium">{e.project}</span>
                     <span className="font-mono text-muted-foreground">{app}</span>
@@ -115,9 +118,18 @@ function Deployments() {
                   <div className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground">
                     {ver && <span>→ <span className="font-mono text-foreground">{ver}</span></span>}
                     {e.node && <span className="font-mono">{e.node}</span>}
-                    <span className={`ml-auto bg-warning/15 text-warning ${stateChip}`}><Loader2 className="size-3 animate-spin" /> {stageOf(e.project, app) ?? 'converging'}</span>
+                    <span className={`ml-auto bg-warning/15 text-warning ${stateChip}`}><Loader2 className="size-3 animate-spin" /> {dp ? stageLabel(dp.stage) : 'converging'}</span>
                   </div>
-                </div>
+                </>
+              )
+              // Click through to the app's Deployments tab (the live stepper) at
+              // the deploying env, when we can resolve the org (+ class).
+              return org ? (
+                <Link key={i} to="/projects/$org/apps/$app/deploys" params={{ org, app }}
+                  search={dp ? { env: dp.class } : {}} onClick={() => setOpen(false)}
+                  className="block rounded-md px-2 py-1.5 hover:bg-accent">{inner}</Link>
+              ) : (
+                <div key={i} className="rounded-md px-2 py-1.5">{inner}</div>
               )
             })}
           </div>

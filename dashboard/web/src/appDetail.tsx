@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, Outlet, useNavigate, useParams, useSearch } from '@tanstack/react-router'
 import {
   RotateCw, ScrollText, SlidersHorizontal, ArrowUpFromLine, MoreVertical, TerminalSquare,
-  LayoutGrid, Activity as ActivityIcon, Tag, ChevronRight,
+  LayoutGrid, Activity as ActivityIcon, Tag, Rocket,
 } from 'lucide-react'
 import {
   send, urls, useApps, useAppContainers, useAppInfo, useAppLogs, useAppSecrets, useDeployProgress, useEvents, useImports,
@@ -93,6 +93,8 @@ const digestShort = (img?: string) => img?.split('@sha256:')[1]?.slice(0, 7) ?? 
 const TABS = [
   { to: '/projects/$org/apps/$app', label: 'Overview', icon: LayoutGrid, exact: true },
   { to: '/projects/$org/apps/$app/config', label: 'Configuration', icon: SlidersHorizontal, exact: false },
+  { to: '/projects/$org/apps/$app/deploys', label: 'Deployments', icon: Rocket, exact: false },
+  { to: '/projects/$org/apps/$app/releases', label: 'Releases', icon: Tag, exact: false },
   { to: '/projects/$org/apps/$app/observability', label: 'Observability', icon: ActivityIcon, exact: false },
 ] as const
 
@@ -207,16 +209,9 @@ export function AppDetail() {
 /** Overview section: the selected environment's live status + a comparison of
  *  all environments + this app's recent deploys. */
 export function AppOverview() {
-  const { org, app, a, project, isAdmin, classes, env, containersFor, versionFor, info } = useAppView()
+  const { org, app, a, project, isAdmin, classes, env, containersFor, versionFor } = useAppView()
   const [logsOpen, setLogsOpen] = useState(false)
   const act = useApiMutation({ invalidate: [['events']] })
-  const events = useEvents()
-  // Live rollout stage for the selected env — show while active, and briefly
-  // after it finishes/fails so the outcome is visible (deploy trackability).
-  const progress = useDeployProgress()
-  const dp = (progress.data ?? []).find((d) => d.project === project && d.app === app && d.class === env)
-  const showDeploy = dp && (dp.status === 'active' || Date.now() / 1000 - dp.updated_at < 120)
-  const appEvents = (events.data ?? []).filter((e) => e.action.trim().split(/\s+/).pop() === app)
   const adminerUrl =
     project && a?.database && a.classes.includes('production')
       ? `https://adminer.prod.majksa.net/?pgsql=majnet-postgres&db=${`${project}_${app}_production`.replace(/-/g, '_')}`
@@ -224,19 +219,6 @@ export function AppOverview() {
 
   return (
     <>
-      {showDeploy && dp && (
-        <Card className="mb-4 border-primary/40"><CardContent className="pt-6">
-          <div className="mb-3 flex items-center gap-2">
-            <h2 className="text-sm font-semibold">
-              {dp.status === 'failed' ? 'Deploy failed' : dp.status === 'done' ? 'Deployed' : 'Deploying…'}
-            </h2>
-            <StatusBadge tone="accent">{env}</StatusBadge>
-            {dp.detail && <span className="truncate font-mono text-xs text-muted-foreground">{dp.detail}</span>}
-          </div>
-          <DeploySteps p={dp} />
-        </CardContent></Card>
-      )}
-
       {classes.length > 0 && (
         <EnvironmentZone
           app={app} env={env} org={org} isAdmin={isAdmin}
@@ -251,42 +233,64 @@ export function AppOverview() {
 
       {classes.length > 1 && <AllEnvironments classes={classes} env={env} containersFor={containersFor} versionFor={versionFor} />}
 
-      {/* Releases isn't a tab (it lives in the top-bar Releases popover) — a
-          contextual link keeps this app's history + cut controls discoverable. */}
-      <Link to="/projects/$org/apps/$app/releases" params={{ org, app }}
-        className="mt-6 flex items-center gap-3 rounded-lg border bg-card px-4 py-3 text-sm transition-colors hover:border-primary/50">
-        <Tag className="size-4 text-muted-foreground" />
-        <span className="font-medium">{a?.service ? 'Versions' : 'Releases'}</span>
-        <span className="text-muted-foreground">{a?.service ? 'running + upstream versions' : 'release history · cut a release · promote'}</span>
-        <ChevronRight className="ml-auto size-4 text-muted-foreground/50" />
-      </Link>
-
-      {appEvents.length > 0 && (
-        <>
-          <SectionHead title="Recent deploys" />
-          <Card><CardContent className="pt-6">
-            <Table>
-              <TableHeader><TableRow><TableHead>time</TableHead><TableHead>node</TableHead><TableHead>action</TableHead><TableHead>result</TableHead><TableHead>commit</TableHead></TableRow></TableHeader>
-              <TableBody className="font-mono text-xs">
-                {appEvents.slice(0, 8).map((e, i) => (
-                  <TableRow key={i}>
-                    <TableCell>{e.at}</TableCell><TableCell>{e.node}</TableCell><TableCell>{e.action}</TableCell>
-                    <TableCell className={e.result.startsWith('FAILED') ? 'text-destructive' : ''}>{resultVersioned(e.result, info.data)}</TableCell>
-                    <TableCell>{e.commit.slice(0, 12)}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </CardContent></Card>
-        </>
-      )}
-
       <Sheet open={logsOpen} onOpenChange={setLogsOpen}>
         <SheetContent>
           <SheetHeader><SheetTitle>Logs</SheetTitle><StatusBadge tone="accent">{env}</StatusBadge></SheetHeader>
           <SheetBody>{logsOpen && <LogsView org={org} app={app} cls={env} />}</SheetBody>
         </SheetContent>
       </Sheet>
+    </>
+  )
+}
+
+/** Deployments section: the live rollout stepper for the selected env (deploy
+ *  trackability) + this app's recent deploy events. */
+export function AppDeployments() {
+  const { app, project, env, info } = useAppView()
+  const events = useEvents()
+  const appEvents = (events.data ?? []).filter((e) => e.action.trim().split(/\s+/).pop() === app)
+  const progress = useDeployProgress()
+  const dp = (progress.data ?? []).find((d) => d.project === project && d.app === app && d.class === env)
+  const showDeploy = dp && (dp.status === 'active' || Date.now() / 1000 - dp.updated_at < 120)
+
+  return (
+    <>
+      {showDeploy && dp ? (
+        <Card className="mb-4 border-primary/40"><CardContent className="pt-6">
+          <div className="mb-3 flex items-center gap-2">
+            <h2 className="text-sm font-semibold">
+              {dp.status === 'failed' ? 'Deploy failed' : dp.status === 'done' ? 'Deployed' : 'Deploying…'}
+            </h2>
+            <StatusBadge tone="accent">{env}</StatusBadge>
+            {dp.detail && <span className="truncate font-mono text-xs text-muted-foreground">{dp.detail}</span>}
+          </div>
+          <DeploySteps p={dp} />
+        </CardContent></Card>
+      ) : (
+        <Card className="mb-4"><CardContent className="py-6 text-sm text-muted-foreground">
+          No deploy in progress for <StatusBadge tone="accent">{env}</StatusBadge>. A rollout appears here live while it runs.
+        </CardContent></Card>
+      )}
+
+      <SectionHead title="Recent deploys" />
+      {appEvents.length === 0 ? (
+        <Card><CardContent className="py-6 text-sm text-muted-foreground">No deploys recorded yet.</CardContent></Card>
+      ) : (
+        <Card><CardContent className="pt-6">
+          <Table>
+            <TableHeader><TableRow><TableHead>time</TableHead><TableHead>node</TableHead><TableHead>action</TableHead><TableHead>result</TableHead><TableHead>commit</TableHead></TableRow></TableHeader>
+            <TableBody className="font-mono text-xs">
+              {appEvents.slice(0, 12).map((e, i) => (
+                <TableRow key={i}>
+                  <TableCell>{e.at}</TableCell><TableCell>{e.node}</TableCell><TableCell>{e.action}</TableCell>
+                  <TableCell className={e.result.startsWith('FAILED') ? 'text-destructive' : ''}>{resultVersioned(e.result, info.data)}</TableCell>
+                  <TableCell>{e.commit.slice(0, 12)}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </CardContent></Card>
+      )}
     </>
   )
 }
