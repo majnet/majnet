@@ -10,6 +10,9 @@ import type { ReactNode } from 'react'
 // stay sparse (only enabled/non-empty fields are emitted).
 export interface ManifestDraft {
   image: string
+  /** Split image pin (ADR: image = bare repo in base, digest/tag per class). */
+  digest: string
+  tag: string
   ingress: { on: boolean; host: string; port: string; domains: string[] }
   health: { on: boolean; path: string; port: string; retries: string }
   database: { on: boolean; engine: string }
@@ -33,6 +36,8 @@ export function fromData(data: unknown): ManifestDraft {
   const ing = asRec(d.ingress), hl = asRec(d.health), db = asRec(d.database), mig = asRec(d.migration), env = asRec(d.env), res = asRec(d.resources)
   return {
     image: str(d.image),
+    digest: str(d.digest),
+    tag: str(d.tag),
     ingress: { on: !!d.ingress, host: str(ing.host), port: str(ing.port), domains: Array.isArray(ing.domains) ? ing.domains.map(String) : [] },
     health: { on: !!d.health, path: str(hl.path, '/healthz'), port: str(hl.port), retries: str(hl.retries, '5') },
     database: { on: !!d.database, engine: str(db.engine, 'postgres') },
@@ -53,6 +58,10 @@ export function toManifest(d: ManifestDraft, file: string, app: string): Rec {
   const out: Rec = {}
   if (file === 'base.yaml') out.name = app // identity = directory
   if (d.image.trim()) out.image = d.image.trim()
+  // Split pin (env-specific): the bare-repo `image` lives in base, the digest/tag
+  // in each class overlay. Preserve verbatim so a form edit never drops the pin.
+  if (d.digest.trim()) out.digest = d.digest.trim()
+  if (d.tag.trim()) out.tag = d.tag.trim()
   if (d.ingress.on) {
     // A host is a production custom domain (ADR 0013); non-production classes
     // get an auto-assigned host at render, so omit it when blank.
@@ -147,10 +156,16 @@ export function ManifestForm({ file, draft, onChange }: { file: string; draft: M
   const set = <K extends keyof ManifestDraft>(k: K, v: ManifestDraft[K]) => onChange({ ...draft, [k]: v })
   return (
     <div className="flex flex-col gap-3.5">
-      <Fld label="Image">
-        <Input value={draft.image} placeholder="ghcr.io/org/app@sha256:…" onChange={(e) => set('image', e.target.value)} />
-        <span className="text-xs text-muted-foreground">{file === 'base.yaml' ? 'Digest-pinned (required in base.yaml); tags are rejected.' : 'Optional per-class image override (production digests come from Promote).'}</span>
+      <Fld label={file === 'base.yaml' ? 'Image repository' : 'Image'}>
+        <Input value={draft.image} placeholder="ghcr.io/org/app" onChange={(e) => set('image', e.target.value)} />
+        <span className="text-xs text-muted-foreground">{file === 'base.yaml'
+          ? 'Env-unspecific repository (or a full digest-pinned ref). Each class overlay supplies its own digest below.'
+          : 'Optional per-class repository override — usually blank (inherits base); this env’s pin goes in Digest.'}</span>
       </Fld>
+      <div className="grid gap-2.5 sm:grid-cols-2">
+        <Fld label="Digest — this env’s pin"><Input value={draft.digest} placeholder="sha256:…" onChange={(e) => set('digest', e.target.value)} /></Fld>
+        <Fld label="Tag — optional (digest preferred, §5)"><Input value={draft.tag} placeholder="v1.2.3" onChange={(e) => set('tag', e.target.value)} /></Fld>
+      </div>
 
       <Section label="Ingress" on={draft.ingress.on} onToggle={(on) => set('ingress', { ...draft.ingress, on })}>
         <div className="grid gap-2.5 sm:grid-cols-2">

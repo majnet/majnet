@@ -1221,7 +1221,9 @@ fn summarize_app(
     let manifest = AppManifest::parse(&serde_yaml::to_string(&merged)?)?;
     Ok(AppSummary {
         name: name.to_string(),
-        image: manifest.image,
+        // The effective reference (repo@digest), so a split `image` + `digest`
+        // manifest still surfaces the full pinned image (incl. digest) to the FE.
+        image: manifest.image_ref(),
         classes,
         host: manifest.ingress.as_ref().and_then(|i| i.host.clone()),
         domains: manifest
