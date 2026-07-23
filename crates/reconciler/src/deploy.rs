@@ -71,6 +71,58 @@ pub fn class_network_name(project: &str, class: EnvClass) -> String {
     format!("proj-{project}-{}", class.as_str())
 }
 
+/// Split an ephemeral preview app name `<app>-pr<N>` into (`<app>`, `pr<N>`).
+/// The bot renames each preview app per PR, so this recovers the bare app name +
+/// the PR token. `None` for a non-preview name.
+fn preview_split(name: &str) -> Option<(&str, &str)> {
+    let (bare, digits) = name.rsplit_once("-pr")?;
+    (!bare.is_empty() && !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+        .then_some((bare, &name[bare.len() + 1..]))
+}
+
+/// The network an app's container attaches to (`network_mode`) — it carries the
+/// app's DNS alias. Non-ephemeral: the per-class net. Ephemeral: a **per-PR** net
+/// `proj-<project>-ephemeral-pr<N>`, so each PR's apps use *bare* aliases in
+/// isolation — multi-app previews resolve siblings by `<app>` and concurrent PRs
+/// don't collide (ADR 0027, extended per-PR).
+pub fn app_network(project: &str, class: EnvClass, name: &str) -> String {
+    if class == EnvClass::Ephemeral {
+        if let Some((_, pr)) = preview_split(name) {
+            return format!("{}-{}", class_network_name(project, class), pr);
+        }
+    }
+    class_network_name(project, class)
+}
+
+/// The intra-project DNS alias for an app: its manifest name — except ephemeral
+/// preview apps advertise the **bare** app name (siblings reference `<app>`, not
+/// `<app>-pr<N>`); the per-PR network keeps bare aliases from colliding.
+fn app_alias(class: EnvClass, name: &str) -> String {
+    match (class, preview_split(name)) {
+        (EnvClass::Ephemeral, Some((bare, _))) => bare.to_string(),
+        _ => name.to_string(),
+    }
+}
+
+/// Create a network if it doesn't exist (idempotent; 409 = already there). Used
+/// for per-PR ephemeral nets, which aren't pre-ensured per class.
+async fn ensure_network_exists(docker: &Docker, name: &str, project: &str) -> Result<()> {
+    match docker
+        .create_network(bollard::models::NetworkCreateRequest {
+            name: name.to_string(),
+            labels: Some([(LABEL_PROJECT.to_string(), project.to_string())].into()),
+            ..Default::default()
+        })
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(bollard::errors::Error::DockerResponseServerError {
+            status_code: 409, ..
+        }) => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("ensuring network {name}")),
+    }
+}
+
 /// The Docker named volume backing a manifest volume on the app's node.
 /// Deterministic per (project, app, class, name) so blue-green redeploys reuse
 /// the same volume — data persists.
@@ -216,6 +268,15 @@ pub async fn converge_app(
         .await?;
     }
 
+    // The app's primary network must exist before create. Per-class nets are
+    // pre-ensured in converge; ephemeral apps get their per-PR net created here.
+    ensure_network_exists(
+        ctx.docker,
+        &app_network(ctx.project, ctx.class, &manifest.name),
+        ctx.project,
+    )
+    .await?;
+
     tracker.stage(
         "starting",
         &format!("{replicas} replica{}", if replicas == 1 { "" } else { "s" }),
@@ -355,6 +416,13 @@ pub async fn remove_app(ctx: &DeployCtx<'_>, app: &str) -> Result<()> {
         if let Some(name) = container_name(&container) {
             remove_container_if_exists(ctx.docker, &name).await?;
         }
+    }
+    // Ephemeral previews live on a per-PR network; drop it once its last app is
+    // gone. Best-effort — errors (has active endpoints) while sibling apps of the
+    // same PR remain, then succeeds on the last removal.
+    if ctx.class == EnvClass::Ephemeral && preview_split(app).is_some() {
+        let net = app_network(ctx.project, ctx.class, app);
+        let _ = ctx.docker.remove_network(&net).await;
     }
     Ok(())
 }
@@ -526,16 +594,16 @@ fn container_spec(
     // Intra-project DNS alias (ADR 0019, per-class since ADR 0027): sibling apps
     // resolve this app by its manifest name (e.g. a reverse proxy → `sideline-server`),
     // independent of the volatile `<project>-<app>-<class>-<hash>` container name that
-    // blue-green churns. The alias lives on the app's **per-class** network so the
-    // same name in another class doesn't collide. The alias key must match
-    // `network_mode` for Docker to accept both. (The shared per-project network — for
-    // ingress + DB reachability — is joined separately, after start.)
-    let net = class_network_name(ctx.project, ctx.class);
+    // blue-green churns. The alias lives on the app's primary network — per-class,
+    // or per-PR for ephemeral previews (which advertise the *bare* app name). The
+    // alias key must match `network_mode` for Docker to accept both. (The shared
+    // per-project network — for ingress + DB reachability — is joined after start.)
+    let net = app_network(ctx.project, ctx.class, &manifest.name);
     let networking_config = NetworkingConfig {
         endpoints_config: Some(HashMap::from([(
             net.clone(),
             EndpointSettings {
-                aliases: Some(vec![manifest.name.clone()]),
+                aliases: Some(vec![app_alias(ctx.class, &manifest.name)]),
                 ..Default::default()
             },
         )])),
@@ -907,6 +975,32 @@ mod tests {
             class_network_name("sideline", EnvClass::Stable),
             class_network_name("sideline", EnvClass::Testing)
         );
+    }
+
+    #[test]
+    fn ephemeral_gets_per_pr_net_and_bare_alias() {
+        // Non-ephemeral: per-class net + full-name alias (unchanged).
+        assert_eq!(
+            app_network("side", EnvClass::Stable, "side-server"),
+            "proj-side-stable"
+        );
+        assert_eq!(app_alias(EnvClass::Stable, "side-server"), "side-server");
+        // Ephemeral preview: per-PR net + BARE alias so siblings resolve `<app>`.
+        assert_eq!(
+            app_network("side", EnvClass::Ephemeral, "sideline-server-pr548"),
+            "proj-side-ephemeral-pr548"
+        );
+        assert_eq!(
+            app_alias(EnvClass::Ephemeral, "sideline-server-pr548"),
+            "sideline-server"
+        );
+        // Defensive: an ephemeral name without a `-pr<N>` suffix falls back.
+        assert_eq!(
+            app_network("side", EnvClass::Ephemeral, "weird"),
+            "proj-side-ephemeral"
+        );
+        assert_eq!(preview_split("a-b-pr12"), Some(("a-b", "pr12")));
+        assert!(preview_split("app-prfoo").is_none());
     }
 
     #[test]

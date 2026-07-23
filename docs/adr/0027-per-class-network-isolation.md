@@ -63,6 +63,18 @@ join are untouched**.
 - Migration containers can't resolve sibling aliases (they're only on the shared net) — accepted;
   migrations target the DB, not siblings.
 
+## Ephemeral: per-PR networks
+
+Ephemeral (PR preview) apps go one step finer: since several PRs share the private
+node and each is renamed `<app>-pr<N>`, they'd collide on one `proj-<project>-ephemeral`
+net (or route wrongly if aliased by the suffixed name). So each PR gets its own
+`proj-<project>-ephemeral-pr<N>` net and its apps advertise the **bare** app name
+(`sideline-server`), letting a preview's sibling references (`SERVER_HOST: sideline-server`)
+resolve within the PR while concurrent PRs stay isolated. The net is created on
+deploy and dropped when the PR's last app is removed. (Relatedly, the bot serializes
+the per-app preview commits to `env/ephemeral` — the apps' `pr-<N>` images build
+concurrently, and unserialized read-modify-write commits raced and dropped an app.)
+
 ## Alternatives rejected
 
 - **Move everything (ingress sidecar + shared DB engine) to per-class nets:** would force

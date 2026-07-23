@@ -14,8 +14,20 @@
 use anyhow::{Context, Result};
 use majnet_common::{manifest::AppManifest, merge::merge, EnvClass};
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
+use tokio::sync::Mutex;
 
 use crate::AppState;
+
+/// Serializes commits to `env/ephemeral`. A PR builds all its apps' `pr-<N>`
+/// images near-simultaneously, so the per-app `registry_package` webhooks would
+/// otherwise race the branch's read-modify-write commit — losing an app (the
+/// force-update clobbers a concurrent one). One in-process lock makes the
+/// commits sequential; they're infrequent and quick.
+fn ephemeral_commit_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 /// A `pr-<N>` image landed in GHCR: render + deploy the preview.
 pub async fn on_pr_build(
@@ -164,6 +176,9 @@ async fn commit_to_ephemeral(
     changes: BTreeMap<String, Option<String>>,
     message: &str,
 ) -> Result<()> {
+    // Serialize concurrent per-app preview commits onto the one branch (see lock).
+    let _guard = ephemeral_commit_lock().lock().await;
+
     let client = state.github.org_client(org).await?;
     let repo = format!("/repos/{org}/ops");
     let branch = EnvClass::Ephemeral.env_branch();
