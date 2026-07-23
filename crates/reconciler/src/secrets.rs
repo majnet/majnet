@@ -34,9 +34,12 @@ pub async fn decrypt_inline(
     inline: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>> {
     use base64::Engine;
+    // Non-prod classes share the platform `stable` recipient (ADR 0024), so their
+    // inline secrets decrypt with `age-stable.key` — there is no per-class
+    // `age-testing.key`/`age-ephemeral.key`. Resolve by the recipient class.
     let key_file = config
         .age_key_dir
-        .join(format!("age-{}.key", class.as_str()));
+        .join(format!("age-{}.key", class.secret_key_class()));
     ensure!(
         key_file.exists(),
         "missing class age key {}",

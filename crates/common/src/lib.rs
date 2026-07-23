@@ -58,6 +58,19 @@ impl EnvClass {
         format!("env/{}", self.as_str())
     }
 
+    /// The platform secret recipient/key class (§14, ADR 0024). Inline secrets are
+    /// encrypted to just **two** platform recipients — `production` and `stable` —
+    /// with every non-production class sharing the `stable` recipient. So the
+    /// decrypt key is `age-<secret_key_class>.key`, NOT `age-<class>.key` (there is
+    /// no `age-testing.key`/`age-ephemeral.key`). Must match the bot's
+    /// `Config::age_recipient`.
+    pub fn secret_key_class(self) -> &'static str {
+        match self {
+            EnvClass::Production => "production",
+            EnvClass::Stable | EnvClass::Testing | EnvClass::Ephemeral => "stable",
+        }
+    }
+
     /// Render PRs for testing/stable/ephemeral auto-merge; production waits for
     /// an admin review of the final diff — that review IS the production gate.
     pub fn auto_merges(self) -> bool {
