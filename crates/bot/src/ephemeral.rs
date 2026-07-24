@@ -101,7 +101,12 @@ pub async fn on_pr_closed(state: &AppState, org: &str, repo: &str, pr: u64) -> R
         .map(|a| a.name.clone())
         .collect();
     if apps.is_empty() {
-        tracing::info!(org, repo, pr, "no apps declared for repo — nothing to tear down");
+        tracing::info!(
+            org,
+            repo,
+            pr,
+            "no apps declared for repo — nothing to tear down"
+        );
         return Ok(());
     }
 
@@ -123,7 +128,11 @@ pub async fn on_pr_closed(state: &AppState, org: &str, repo: &str, pr: u64) -> R
             state.store.log_event(
                 "ephemeral-remove",
                 Some(org),
-                &format!("{repo} pr-{pr} ({} app{})", apps.len(), if apps.len() == 1 { "" } else { "s" }),
+                &format!(
+                    "{repo} pr-{pr} ({} app{})",
+                    apps.len(),
+                    if apps.len() == 1 { "" } else { "s" }
+                ),
             )?;
             Ok(())
         }
