@@ -302,24 +302,78 @@ async fn collect(
 /// On plain Docker (no lxcfs) `/proc/stat` and `/proc/meminfo` reflect the host,
 /// so this needs no host shell, agent, or privileges — just the Docker API.
 /// Returns (cpu_pct, mem_total_bytes, mem_used_bytes).
+///
+/// Best-effort with a hard internal deadline: the node already answered
+/// `info()`, so a slow host probe must NOT hang `collect()` (its outer timeout
+/// would then falsely mark the node unreachable). On a small/loaded node the
+/// probe can outlive that outer timeout, which cancels this future mid-flight
+/// and skips the helper's removal below — so we also `auto_remove` the helper
+/// and sweep any orphans up front, making the probe self-healing rather than
+/// leaking a container every slow tick.
 async fn host_probe(docker: &bollard::Docker) -> Option<(f64, i64, i64)> {
+    sweep_helpers(docker).await;
+    tokio::time::timeout(Duration::from_secs(8), host_probe_inner(docker))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Remove helper containers orphaned by a previous tick whose `host_probe` was
+/// cancelled by the outer `collect()` timeout before it could remove them
+/// (`auto_remove` covers started helpers; a `Created`-but-never-started one only
+/// this sweep catches). Cheap and best-effort — filter by our label in-process.
+async fn sweep_helpers(docker: &bollard::Docker) {
+    use bollard::query_parameters as qp;
+    let orphans = docker
+        .list_containers(Some(qp::ListContainersOptions {
+            all: true,
+            ..Default::default()
+        }))
+        .await
+        .unwrap_or_default();
+    for c in orphans {
+        let is_helper = c
+            .labels
+            .as_ref()
+            .is_some_and(|l| l.contains_key("majnet.helper"));
+        if is_helper {
+            if let Some(id) = &c.id {
+                let _ = docker
+                    .remove_container(
+                        id,
+                        Some(qp::RemoveContainerOptions {
+                            force: true,
+                            ..Default::default()
+                        }),
+                    )
+                    .await;
+            }
+        }
+    }
+}
+
+async fn host_probe_inner(docker: &bollard::Docker) -> Option<(f64, i64, i64)> {
     use bollard::query_parameters as qp;
     if docker
         .inspect_image(crate::secrets::HELPER_IMAGE)
         .await
         .is_err()
     {
-        let _ = docker
-            .create_image(
-                Some(qp::CreateImageOptions {
-                    from_image: Some(crate::secrets::HELPER_IMAGE.into()),
-                    ..Default::default()
-                }),
-                None,
-                None,
-            )
-            .collect::<Vec<_>>()
-            .await;
+        // Bounded: a hung registry pull must not consume the probe deadline.
+        let _ = tokio::time::timeout(Duration::from_secs(6), async {
+            docker
+                .create_image(
+                    Some(qp::CreateImageOptions {
+                        from_image: Some(crate::secrets::HELPER_IMAGE.into()),
+                        ..Default::default()
+                    }),
+                    None,
+                    None,
+                )
+                .collect::<Vec<_>>()
+                .await
+        })
+        .await;
     }
     let script = "grep -E '^MemTotal|^MemAvailable' /proc/meminfo; echo ---; \
                   grep '^cpu ' /proc/stat; sleep 1; grep '^cpu ' /proc/stat";
@@ -330,6 +384,12 @@ async fn host_probe(docker: &bollard::Docker) -> Option<(f64, i64, i64)> {
                 image: Some(crate::secrets::HELPER_IMAGE.into()),
                 cmd: Some(vec!["sh".into(), "-c".into(), script.into()]),
                 labels: Some([("majnet.helper".to_string(), "metrics".to_string())].into()),
+                // Docker removes the container on exit even if the explicit
+                // remove below is skipped (outer timeout cancels this future).
+                host_config: Some(bollard::models::HostConfig {
+                    auto_remove: Some(true),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
         )
@@ -358,6 +418,8 @@ async fn host_probe(docker: &bollard::Docker) -> Option<(f64, i64, i64)> {
     }
     .await;
 
+    // Redundant with auto_remove on the happy path, but removes it promptly
+    // instead of waiting on the exit event. Ignored if already gone.
     let _ = docker
         .remove_container(
             &helper.id,
