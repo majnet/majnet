@@ -229,9 +229,16 @@ async fn collect(
         .unwrap_or_default()
         .to_string();
 
-    if let Ok(df) = docker
-        .df(None::<bollard::query_parameters::DataUsageOptions>)
-        .await
+    // `df` walks every image layer/volume to sum sizes — slow on a node with a
+    // lot of image history (measured ~17 s on the small main node). It's a
+    // supplementary disk metric, so bound it: a slow df must never push
+    // `collect()` past its timeout and falsely mark the node unreachable (info()
+    // already proved Docker answers). On timeout `disk_images` stays 0.
+    if let Ok(Ok(df)) = tokio::time::timeout(
+        Duration::from_secs(6),
+        docker.df(None::<bollard::query_parameters::DataUsageOptions>),
+    )
+    .await
     {
         let dv = serde_json::to_value(&df).unwrap_or_default();
         m.disk_images = dv["LayersSize"].as_i64().unwrap_or(0);
