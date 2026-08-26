@@ -15,9 +15,10 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates crates
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release -p majnet-bot -p majnet-reconciler -p majnet-setup \
+    cargo build --release -p majnet-bot -p majnet-reconciler -p majnet-setup -p majnet-cli \
     && mkdir -p /out \
-    && cp target/release/majnet-bot target/release/majnet-reconciler target/release/majnet-setup /out/
+    && cp target/release/majnet-bot target/release/majnet-reconciler target/release/majnet-setup \
+          target/release/majnet /out/
 
 FROM debian:bookworm-slim
 ARG SOPS_VERSION=3.11.0
@@ -36,7 +37,14 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 # bot + reconciler run as containers; setup rides along so majnet-update can
 # extract it to the host (it drives systemctl/wireguard, so it stays native).
-COPY --from=builder /out/majnet-bot /out/majnet-reconciler /out/majnet-setup /usr/local/bin/
+#
+# `majnet` (the CLI) rides along for a different reason: the internal API is
+# bound to the WireGuard IP, and this image runs with `network_mode: host`, so a
+# shell in either container can already reach it. Since ADR 0008 removed cargo
+# from the nodes, shipping the binary here is the only way to run it on a node —
+# `docker exec majnet-bot majnet events --failed` needs no WG peer and no
+# toolchain.
+COPY --from=builder /out/majnet-bot /out/majnet-reconciler /out/majnet-setup /out/majnet /usr/local/bin/
 # Build metadata (CI-injected) so the bot can report what's running at /info —
 # the control plane's own version signal, mirroring apps (design §16). bot and
 # reconciler share this image, so one commit describes both.
