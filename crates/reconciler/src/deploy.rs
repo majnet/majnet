@@ -8,6 +8,14 @@
 //! container starts with its labels in place, takes traffic exactly when it
 //! turns healthy, and the old one is stopped afterwards. A failed health
 //! check tears the new container down and leaves the old serving.
+//!
+//! **One exception, and it is not zero-downtime:** an app publishing fixed host
+//! ports (`wg_ports`, ADR 0023) cannot overlap generations, because two
+//! containers cannot bind the same host port. Those drain the old generation
+//! *before* creating the new one — see [`publishes_host_ports`] — so there is a
+//! short gap, and no old container to fall back on if the new one fails health.
+//! Overlapping instead does not work at all: the create fails with "port is
+//! already allocated" and the app can never update.
 
 use anyhow::{bail, Context, Result};
 use bollard::models::{
@@ -276,6 +284,36 @@ pub async fn converge_app(
         ctx.project,
     )
     .await?;
+
+    // An app publishing fixed host ports (`wg_ports`, ADR 0023) cannot roll
+    // blue-green: the container name carries the config hash, so a new
+    // generation is a *new* container, and it cannot bind a host port the
+    // previous generation still holds. Docker rejects the create with
+    // "Bind for <wg-ip>:<port> failed: port is already allocated", the rollout
+    // fails, and the app can never update again.
+    //
+    // Observed live: `loki` (10.88.0.3:3100) and `otel-collector`
+    // (10.88.0.3:4317) failed this way on every pass for as far back as the
+    // events table went.
+    //
+    // So for these apps, drain the previous generation FIRST and accept a short
+    // gap. That deliberately gives up the blue-green safety net — if the new
+    // container then fails its health check there is no old one still serving —
+    // in exchange for being able to deploy at all. Zero-downtime is unreachable
+    // for a fixed host port either way, so the net was illusory here.
+    if publishes_host_ports(&manifest.wg_ports, ctx.wireguard_ip) {
+        tracker.stage(
+            "draining",
+            "previous generation holds this app's host ports",
+        );
+        for old in &existing {
+            if let Some(old_name) = container_name(old) {
+                if !desired_set.contains(old_name.as_str()) {
+                    remove_container_if_exists(ctx.docker, &old_name).await?;
+                }
+            }
+        }
+    }
 
     tracker.stage(
         "starting",
@@ -642,6 +680,18 @@ fn container_spec(
 /// on the node's WireGuard IP (`<wg_ip>:<port>` → `<port>/tcp`). Returns
 /// `(None, None)` when there are no ports or no WG IP, so non-mesh apps and
 /// local smoke tests publish nothing.
+/// True when this app publishes fixed host ports, which makes a blue-green
+/// overlap impossible: two containers cannot bind the same host port.
+///
+/// `wg_port_bindings` **delegates to this** rather than re-testing the condition,
+/// which is what keeps the drain decision and the actual port publishing from
+/// drifting. Keep it that way: if the two ever hold separate copies of the
+/// condition, a rollout can overlap on a port that cannot be shared and the app
+/// stops being deployable forever ("port is already allocated").
+fn publishes_host_ports(wg_ports: &[u16], wireguard_ip: &str) -> bool {
+    !wg_ports.is_empty() && !wireguard_ip.is_empty()
+}
+
 #[allow(clippy::type_complexity)]
 fn wg_port_bindings(
     wg_ports: &[u16],
@@ -650,7 +700,7 @@ fn wg_port_bindings(
     Option<Vec<String>>,
     Option<HashMap<String, Option<Vec<PortBinding>>>>,
 ) {
-    if wg_ports.is_empty() || wireguard_ip.is_empty() {
+    if !publishes_host_ports(wg_ports, wireguard_ip) {
         return (None, None);
     }
     let exposed = wg_ports.iter().map(|p| format!("{p}/tcp")).collect();
@@ -1023,6 +1073,22 @@ mod tests {
         assert!(wg_port_bindings(&[4317], "").1.is_none());
         // No ports → nothing published.
         assert!(wg_port_bindings(&[], "10.88.0.3").0.is_none());
+    }
+
+    /// Both of these assert behaviour rather than internal agreement. An
+    /// "assert `publishes_host_ports` agrees with `wg_port_bindings`" test was
+    /// written first and deleted: since `wg_port_bindings` *delegates* to
+    /// `publishes_host_ports`, there is only one implementation, so the
+    /// comparison is tautological and passes even when the shared condition is
+    /// wrong. Verified by breaking the condition — the behavioural tests below
+    /// failed, that one did not.
+    #[test]
+    fn publishes_host_ports_only_with_both_ports_and_a_wg_ip() {
+        assert!(publishes_host_ports(&[3100], "10.88.0.3"));
+        // Local smoke tests have no WG IP, so nothing is published and the
+        // ordinary blue-green overlap is still correct.
+        assert!(!publishes_host_ports(&[3100], ""));
+        assert!(!publishes_host_ports(&[], "10.88.0.3"));
     }
 
     #[test]
