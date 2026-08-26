@@ -123,6 +123,18 @@ natively today. (UX prototyped as a mock, 2026-07-21; pending sign-off.)
   DATABASE_URL and Adminer-network patterns).
 - Reuses the entire service-app pipeline for the backend — no bespoke
   observability deploy path.
+- ⚠️ **`wg_ports` costs an app its zero-downtime rollout, and this was missed
+  here.** A published host port cannot be held by two containers, so the
+  blue-green overlap (new container created while the old still serves) fails at
+  create with `Bind for <wg-ip>:<port> failed: port is already allocated` — and
+  since a rollout that cannot create cannot proceed, the app becomes
+  **permanently undeployable**. Observed live on `loki` (`10.88.0.3:3100`) and
+  `otel-collector` (`10.88.0.3:4317`), which failed every reconcile pass for as
+  far back as the events table went; both kept serving from their old containers,
+  so nothing looked broken from outside. `deploy.rs` now drains the previous
+  generation *before* creating, for apps publishing host ports only — a short gap
+  instead of a rollout that never lands. Anything gaining `wg_ports` inherits
+  that trade-off.
 
 ## Phasing
 
