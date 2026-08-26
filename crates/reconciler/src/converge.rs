@@ -160,6 +160,58 @@ pub async fn converge_all(state: &AppState) -> Result<()> {
     Ok(())
 }
 
+/// The PR token (`pr<N>`) of an ephemeral preview app name `<app>-pr<N>`, or
+/// `None` for any other name. One definition used for the requested set, the
+/// running set and the per-app skip, so the cap cannot disagree with itself.
+fn preview_pr(app: &str) -> Option<String> {
+    let (bare, digits) = app.rsplit_once("-pr")?;
+    (!bare.is_empty() && !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| format!("pr{digits}"))
+}
+
+/// Which PR previews to **defer** under the concurrency cap (ADR 0027 per-PR
+/// previews, `Config::max_ephemeral_previews`).
+///
+/// A preview is per-PR but costs one container per app in the project, so an
+/// unbounded open-PR count is an unbounded container count on one node. Live
+/// consequence: 20 open sideline PRs put ~100 containers on a 4-CPU box and took
+/// its load average to 515 — dockerd timed out, health checks failed, and
+/// nothing could deploy, including apps that were already running.
+///
+/// Policy is **defer, never evict**. A PR that already has containers keeps its
+/// slot; only PRs that are not yet running get held back once the cap is
+/// reached. Evicting a live preview to admit a newer one would thrash the node
+/// and surprise whoever was using it — and freeing capacity is a human decision
+/// (close the PR), not something to do behind their back.
+///
+/// `cap == 0` means unlimited (escape hatch).
+fn previews_to_defer(
+    requested: &BTreeSet<String>,
+    running: &BTreeSet<String>,
+    cap: usize,
+) -> BTreeSet<String> {
+    if cap == 0 {
+        return BTreeSet::new();
+    }
+    // Already-running previews hold their slots, even if that alone exceeds the
+    // cap (e.g. the cap was lowered) — we defer new arrivals rather than evict.
+    let mut admitted: BTreeSet<&str> = running.iter().map(String::as_str).collect();
+    let mut defer = BTreeSet::new();
+    // `requested` is a BTreeSet, so iteration is sorted and the decision is
+    // stable across passes instead of flapping between PRs.
+    for pr in requested {
+        if admitted.contains(pr.as_str()) {
+            continue;
+        }
+        if admitted.len() >= cap {
+            defer.insert(pr.clone());
+        } else {
+            admitted.insert(pr.as_str());
+        }
+    }
+    defer
+}
+
 /// Rendered env-branch layout (§9): `<app>.yaml` at the root, `secrets/<app>.yaml`.
 fn root_manifests(snapshot: &crate::snapshot::Snapshot) -> BTreeMap<&str, &Vec<u8>> {
     snapshot
@@ -280,8 +332,55 @@ async fn converge_project_class(
     // old and new names until the data migration completes (see `rename`).
     let frozen = state.store.renames_pending(project, class.as_str())?;
 
+    // Preview concurrency cap: previews are per-PR but cost a container per app,
+    // so an unbounded open-PR count is an unbounded container count on one node.
+    // Computed once per pass; `deferred` is empty for every non-ephemeral class
+    // and whenever the cap is 0 (unlimited).
+    let deferred_previews: BTreeSet<String> = if class == EnvClass::Ephemeral {
+        let requested: BTreeSet<String> = manifests.keys().filter_map(|a| preview_pr(a)).collect();
+        // Derived from `list_class_apps` — the SAME function `ephemeral_gc` uses
+        // to decide what has containers. That is load-bearing: a preview wrongly
+        // treated as not-running would be deferred, then marked missing by GC and
+        // removed after its 48 h grace — a silent eviction two days later, which
+        // is exactly what this policy promises never to do. Sharing one source of
+        // truth makes the two incapable of disagreeing.
+        match deploy::list_class_apps(&ctx).await {
+            Ok(apps) => {
+                let running: BTreeSet<String> = apps.iter().filter_map(|a| preview_pr(a)).collect();
+                previews_to_defer(&requested, &running, state.config.max_ephemeral_previews)
+            }
+            Err(e) => {
+                // Cannot see what is running → admit everything rather than defer
+                // on a guess, for the same reason.
+                tracing::warn!(
+                    project,
+                    error = format!("{e:#}"),
+                    "cannot list running previews — skipping the preview cap this pass"
+                );
+                BTreeSet::new()
+            }
+        }
+    } else {
+        BTreeSet::new()
+    };
+
     let mut converged_apps = Vec::new();
     for (app, content) in &manifests {
+        // Over the preview cap and not already running: skip deploying. Not added
+        // to `converged_apps`, which is safe precisely because a deferred preview
+        // has no containers — so GC finds nothing to mark missing (see above).
+        if let Some(pr) = preview_pr(app) {
+            if deferred_previews.contains(&pr) {
+                tracing::info!(
+                    project,
+                    app,
+                    pr,
+                    cap = state.config.max_ephemeral_previews,
+                    "preview deferred — project is at its concurrent-preview cap"
+                );
+                continue;
+            }
+        }
         // Don't create the new stack until its data has been migrated.
         if frozen.iter().any(|(_, n)| n.as_str() == *app) {
             tracing::info!(
@@ -672,6 +771,55 @@ mod tests {
         ]);
         let names: Vec<&str> = root_manifests(&s).into_keys().collect();
         assert_eq!(names, vec!["sideline-proxy"]);
+    }
+
+    fn prs(list: &[&str]) -> BTreeSet<String> {
+        list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn preview_pr_extracts_only_real_preview_suffixes() {
+        assert_eq!(preview_pr("sideline-proxy-pr546").as_deref(), Some("pr546"));
+        // Not previews: no suffix, empty base, non-numeric.
+        assert_eq!(preview_pr("sideline-proxy"), None);
+        assert_eq!(preview_pr("-pr546"), None);
+        assert_eq!(preview_pr("sideline-proxy-prabc"), None);
+        assert_eq!(preview_pr("sideline-proxy-pr"), None);
+    }
+
+    /// The load incident this cap exists for: 20 open PRs × ~5 apps put ~100
+    /// containers on a 4-CPU node and took its load average to 515, at which
+    /// point nothing could deploy at all.
+    #[test]
+    fn previews_over_the_cap_are_deferred() {
+        let requested = prs(&["pr1", "pr2", "pr3", "pr4", "pr5"]);
+        let deferred = previews_to_defer(&requested, &BTreeSet::new(), 3);
+        assert_eq!(deferred.len(), 2);
+        // Sorted iteration admits the first three, so the decision is stable
+        // across passes instead of flapping between PRs.
+        assert!(deferred.contains("pr4") && deferred.contains("pr5"));
+    }
+
+    /// The core promise: defer, never evict. A preview that already has
+    /// containers keeps its slot — even when that alone exceeds the cap, e.g.
+    /// after the cap is lowered. Breaking this would let GC mark a running
+    /// preview missing and delete it 48 h later.
+    #[test]
+    fn running_previews_are_never_deferred() {
+        let requested = prs(&["pr1", "pr2", "pr3", "pr4"]);
+        let running = prs(&["pr1", "pr2", "pr3", "pr4"]);
+        assert!(previews_to_defer(&requested, &running, 2).is_empty());
+
+        // Running ones hold their slots and only the newcomer waits.
+        let requested = prs(&["pr1", "pr2", "pr9"]);
+        let running = prs(&["pr1", "pr2"]);
+        assert_eq!(previews_to_defer(&requested, &running, 2), prs(&["pr9"]));
+    }
+
+    #[test]
+    fn cap_of_zero_means_unlimited() {
+        let requested = prs(&["pr1", "pr2", "pr3"]);
+        assert!(previews_to_defer(&requested, &BTreeSet::new(), 0).is_empty());
     }
 
     #[test]
