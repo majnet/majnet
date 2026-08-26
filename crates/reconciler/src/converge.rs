@@ -18,7 +18,7 @@ use bollard::query_parameters as qp;
 use majnet_common::manifest::{AppManifest, DbEngine};
 use majnet_common::platform::{NodesFile, ProjectsFile};
 use majnet_common::EnvClass;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::deploy::{self, DeployCtx};
 use crate::AppState;
@@ -65,14 +65,72 @@ pub async fn converge_all(state: &AppState) -> Result<()> {
     let mut adminer_creds: BTreeMap<String, (String, String)> = BTreeMap::new();
 
     for project in &projects.projects {
+        // Fetch each class's rendered branch once. The project's ingress has to
+        // see every class before it can decide the tunnel's host set, and
+        // re-fetching per consumer would double the tarball traffic — an
+        // ephemeral branch carries a manifest per app per open PR.
+        let mut rendered: Vec<(EnvClass, crate::snapshot::Snapshot)> = Vec::new();
+        // Whether any non-prod class's branch could not be read this pass. The
+        // tunnel's host set is a union over those classes, so a class we cannot
+        // see can only *shrink* it — and a shrunken set reads as "public is off".
+        let mut nonprod_incomplete = false;
         for class in CLASSES {
+            match crate::snapshot::fetch(
+                &state.http,
+                &state.config,
+                &project.org,
+                "ops",
+                &class.env_branch(),
+            )
+            .await
+            {
+                Ok(Some(snapshot)) => rendered.push((class, snapshot)),
+                Ok(None) => {} // class not rendered yet for this project
+                Err(e) => {
+                    if class.node_role() == "private" {
+                        nonprod_incomplete = true;
+                    }
+                    tracing::error!(
+                        project = project.name,
+                        class = class.as_str(),
+                        error = format!("{e:#}"),
+                        "snapshot fetch failed"
+                    );
+                }
+            }
+        }
+
+        // The ingress stack is project-scoped (ADR 0026), so it converges once
+        // per project — before the classes that route through it.
+        //
+        // Never decide the tunnel from a partial picture: if a non-prod branch was
+        // unreadable, the union is missing hosts it should contain, and acting on
+        // it would tear down a live tunnel. Skipping a pass is harmless (the stack
+        // is already up and this is idempotent); tearing it down is not.
+        if nonprod_incomplete {
+            tracing::warn!(
+                project = project.name,
+                "skipping ingress converge — a non-prod class snapshot was unavailable"
+            );
+        } else if let Err(e) =
+            converge_project_ingress(state, &nodes, &platform, &project.name, &rendered).await
+        {
+            // Ingress trouble must not block app convergence — apps still
+            // deploy; access returns when the ingress recovers.
+            tracing::error!(
+                project = project.name,
+                error = format!("{e:#}"),
+                "ingress ensure failed"
+            );
+        }
+
+        for (class, snapshot) in &rendered {
             if let Err(e) = converge_project_class(
                 state,
                 &nodes,
-                &platform,
                 &project.name,
-                &project.org,
-                class,
+                *class,
+                snapshot,
                 &mut adminer_creds,
             )
             .await
@@ -102,30 +160,9 @@ pub async fn converge_all(state: &AppState) -> Result<()> {
     Ok(())
 }
 
-async fn converge_project_class(
-    state: &AppState,
-    nodes: &NodesFile,
-    platform: &crate::snapshot::Snapshot,
-    project: &str,
-    org: &str,
-    class: EnvClass,
-    adminer_creds: &mut BTreeMap<String, (String, String)>,
-) -> Result<()> {
-    let Some(snapshot) =
-        crate::snapshot::fetch(&state.http, &state.config, org, "ops", &class.env_branch()).await?
-    else {
-        return Ok(()); // class not rendered yet for this project
-    };
-
-    let node = nodes
-        .by_role(class.node_role())
-        .with_context(|| format!("no node with role '{}' in nodes.yaml", class.node_role()))?;
-    let docker = state.nodes(nodes).client_for(node).await?;
-
-    ensure_network(&docker, project, class, state.config.dry_run).await?;
-
-    // Rendered env branch layout (§9): `<app>.yaml` at root, `secrets/<app>.yaml`.
-    let manifests: BTreeMap<&str, &Vec<u8>> = snapshot
+/// Rendered env-branch layout (§9): `<app>.yaml` at the root, `secrets/<app>.yaml`.
+fn root_manifests(snapshot: &crate::snapshot::Snapshot) -> BTreeMap<&str, &Vec<u8>> {
+    snapshot
         .files
         .iter()
         .filter_map(|(path, content)| {
@@ -134,27 +171,99 @@ async fn converge_project_class(
                 content,
             ))
         })
-        .collect();
+        .collect()
+}
 
+/// The per-project ingress stack on the private node: the tailnet sidecar, the
+/// project Traefik, and the optional Cloudflare Tunnel (ADR 0026).
+///
+/// Every piece of it is **project-scoped**, not class-scoped — one tunnel serves
+/// all of a project's public hosts. So it converges once per project, with the
+/// public host set **unioned across every rendered non-prod class**.
+///
+/// This used to run inside the per-class loop, which was correct only while a
+/// project had a single non-prod class. ADR 0027 removed that constraint, and the
+/// bug it left behind was severe: a class with no public hosts computes an empty
+/// set, and an empty set means "public turned off", so `ensure_ingress` tore down
+/// the tunnel. With `CLASSES` ordered `[testing, stable, production, ephemeral]`,
+/// `stable` created sideline's `dev.sideline.cz` tunnel and `ephemeral` deleted it
+/// again later in the same pass — leaving the host flapping between HTTP 200 and
+/// Cloudflare 1033 (no connector) on every loop.
+async fn converge_project_ingress(
+    state: &AppState,
+    nodes: &NodesFile,
+    platform: &crate::snapshot::Snapshot,
+    project: &str,
+    rendered: &[(EnvClass, crate::snapshot::Snapshot)],
+) -> Result<()> {
     // VPN-only classes are served through the project's tailnet ingress (§7).
     // Local smoke tests have no tailnet — skip.
-    if class.node_role() == "private" && !state.config.docker_local {
-        // Apps opting into public exposure via a Cloudflare Tunnel (ADR 0026):
-        // their public hostnames drive the ingress's cloudflared sidecar.
-        let public_hosts: Vec<String> = manifests
-            .values()
-            .filter_map(|c| std::str::from_utf8(c).ok())
-            .filter_map(|s| AppManifest::parse(s).ok())
-            .filter_map(|m| m.ingress.filter(|i| i.public).and_then(|i| i.host))
-            .collect();
-        if let Err(e) =
-            crate::ingress::ensure_ingress(state, &docker, project, platform, &public_hosts).await
-        {
-            // Ingress trouble must not block app convergence — apps still
-            // deploy; access returns when the ingress recovers.
-            tracing::error!(project, error = format!("{e:#}"), "ingress ensure failed");
-        }
+    if state.config.docker_local {
+        return Ok(());
     }
+    // Only non-prod classes route through this stack; production has its own
+    // public edge (`edge-main`). No non-prod class rendered → nothing to converge,
+    // and in particular nothing to tear down.
+    let private: Vec<&crate::snapshot::Snapshot> = rendered
+        .iter()
+        .filter(|(class, _)| class.node_role() == "private")
+        .map(|(_, snapshot)| snapshot)
+        .collect();
+    if private.is_empty() {
+        return Ok(());
+    }
+
+    let node = nodes
+        .by_role("private")
+        .context("no node with role 'private' in nodes.yaml")?;
+    let docker = state.nodes(nodes).client_for(node).await?;
+
+    let public_hosts = public_hosts_union(&private);
+
+    crate::ingress::ensure_ingress(state, &docker, project, platform, &public_hosts).await
+}
+
+/// Every `ingress.public` host across the given classes' manifests (ADR 0026).
+///
+/// The union is the whole point: the cloudflared sidecar is project-scoped, and
+/// `ensure_ingress` reads an empty host set as "public is off" and tears the
+/// tunnel down. Computing this from one class at a time therefore deletes the
+/// tunnel that another class's public host depends on.
+///
+/// A `BTreeSet` both de-duplicates a host declared in two classes and keeps the
+/// order stable for the caller.
+fn public_hosts_union(snapshots: &[&crate::snapshot::Snapshot]) -> Vec<String> {
+    snapshots
+        .iter()
+        .flat_map(|snapshot| root_manifests(snapshot).into_values())
+        .filter_map(|c| std::str::from_utf8(c).ok())
+        .filter_map(|s| AppManifest::parse(s).ok())
+        .filter_map(|m| m.ingress.filter(|i| i.public).and_then(|i| i.host))
+        .collect::<BTreeSet<String>>()
+        .into_iter()
+        .collect()
+}
+
+async fn converge_project_class(
+    state: &AppState,
+    nodes: &NodesFile,
+    project: &str,
+    class: EnvClass,
+    snapshot: &crate::snapshot::Snapshot,
+    adminer_creds: &mut BTreeMap<String, (String, String)>,
+) -> Result<()> {
+    let node = nodes
+        .by_role(class.node_role())
+        .with_context(|| format!("no node with role '{}' in nodes.yaml", class.node_role()))?;
+    let docker = state.nodes(nodes).client_for(node).await?;
+
+    ensure_network(&docker, project, class, state.config.dry_run).await?;
+
+    let manifests = root_manifests(snapshot);
+
+    // The project's ingress stack (including the Cloudflare Tunnel) is converged
+    // once per project in `converge_project_ingress`, not here — it is
+    // project-scoped, and deciding it per class tore down other classes' tunnels.
 
     let ctx = DeployCtx {
         docker: &docker,
@@ -469,6 +578,101 @@ fn otel_env(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A rendered env-branch snapshot: `<app>.yaml` at the root (§9).
+    fn snapshot(files: &[(&str, &str)]) -> crate::snapshot::Snapshot {
+        crate::snapshot::Snapshot {
+            commit: "deadbeef".into(),
+            files: files
+                .iter()
+                .map(|(p, c)| ((*p).to_string(), c.as_bytes().to_vec()))
+                .collect(),
+        }
+    }
+
+    fn app(name: &str, ingress: &str) -> String {
+        format!(
+            "name: {name}\n\
+             image: ghcr.io/sideline-cz/sideline/proxy\n\
+             digest: sha256:7a0b081e24748b9d26599d2d0a6cffdabfdac87f5f57306642a4d51ca76d51f6\n\
+             {ingress}"
+        )
+    }
+
+    const PUBLIC: &str = "ingress:\n  host: dev.sideline.cz\n  port: 80\n  public: true\n";
+    const VPN_ONLY: &str = "ingress:\n  host: sideline-proxy.sideline.majksa.net\n  port: 80\n";
+
+    /// Regression: sideline's `dev.sideline.cz` flapped between 200 and Cloudflare
+    /// 1033 because the tunnel's host set was computed per class. `stable` declares
+    /// the only public host; `testing` and `ephemeral` declare none, so each of
+    /// them alone yields an empty set — which `ensure_ingress` reads as "public is
+    /// off" and tears the project's tunnel down. Only the union is correct.
+    ///
+    /// What this does and does not guard: it locks the union *semantics*, but the
+    /// original defect was the *call site's scope* (a per-class function driving a
+    /// project-scoped resource), which needs `AppState` + Docker to exercise. That
+    /// side is held structurally instead — `ensure_ingress` requires
+    /// `platform: &Snapshot`, and `converge_project_class` no longer receives one,
+    /// so it cannot reach the ingress without a visible signature change.
+    #[test]
+    fn public_hosts_union_keeps_a_host_declared_by_only_one_class() {
+        let stable = snapshot(&[
+            ("sideline-proxy.yaml", &app("sideline-proxy", PUBLIC)),
+            ("sideline-web.yaml", &app("sideline-web", VPN_ONLY)),
+        ]);
+        let testing = snapshot(&[("sideline-proxy.yaml", &app("sideline-proxy", VPN_ONLY))]);
+        let ephemeral = snapshot(&[(
+            "sideline-proxy-pr546.yaml",
+            &app("sideline-proxy-pr546", VPN_ONLY),
+        )]);
+
+        // Each non-declaring class on its own looks like "no public hosts" —
+        // this is exactly what used to delete the tunnel.
+        assert!(public_hosts_union(&[&testing]).is_empty());
+        assert!(public_hosts_union(&[&ephemeral]).is_empty());
+
+        // Unioned across the classes as they are actually converged, the host
+        // survives regardless of which class is processed last.
+        assert_eq!(
+            public_hosts_union(&[&testing, &stable, &ephemeral]),
+            vec!["dev.sideline.cz".to_string()]
+        );
+        assert_eq!(
+            public_hosts_union(&[&ephemeral, &stable, &testing]),
+            vec!["dev.sideline.cz".to_string()]
+        );
+    }
+
+    #[test]
+    fn public_hosts_union_dedupes_and_ignores_non_public_and_hostless() {
+        let a = snapshot(&[("proxy.yaml", &app("proxy", PUBLIC))]);
+        let b = snapshot(&[("other.yaml", &app("other", PUBLIC))]);
+        // The same host declared by two classes yields one entry.
+        assert_eq!(
+            public_hosts_union(&[&a, &b]),
+            vec!["dev.sideline.cz".to_string()]
+        );
+
+        // `public` without a host cannot be tunneled; no ingress at all is fine.
+        let hostless = snapshot(&[(
+            "x.yaml",
+            &app("x", "ingress:\n  port: 80\n  public: true\n"),
+        )]);
+        let none = snapshot(&[("y.yaml", &app("y", ""))]);
+        assert!(public_hosts_union(&[&hostless, &none]).is_empty());
+    }
+
+    /// Only files at the root are manifests — `secrets/<app>.yaml` must not be
+    /// parsed as one, or a secrets blob could contribute phantom hosts.
+    #[test]
+    fn root_manifests_ignores_nested_paths() {
+        let s = snapshot(&[
+            ("sideline-proxy.yaml", &app("sideline-proxy", PUBLIC)),
+            ("secrets/sideline-proxy.yaml", "KEY: majnet:ciphertext\n"),
+        ]);
+        let names: Vec<&str> = root_manifests(&s).into_keys().collect();
+        assert_eq!(names, vec!["sideline-proxy"]);
+    }
 
     #[test]
     fn otel_env_is_inert_unless_opted_in_and_endpoint_set() {

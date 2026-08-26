@@ -45,9 +45,21 @@ holds Cloudflare API credentials.
 - **Reconciler:** `crates/reconciler/src/ingress.rs` runs a `proj-{project}-tunnel`
   cloudflared container (`network_mode: container:proj-{project}-tailscale` → reaches Traefik
   on loopback; `TUNNEL_TOKEN` env; token-only run). `converge.rs` collects the public hosts
-  from the class's manifests and passes them in; an empty set (or `public` turned off) tears
+  **unioned across every rendered non-prod class** (`converge_project_ingress` +
+  `public_hosts_union`) and passes them in; an empty set (or `public` turned off) tears
   the sidecar down. Config-hash includes the sorted host set, so host changes recreate + re-
   provision. `purge.rs` tears the tunnel down with the rest of the ingress stack.
+
+  > ⚠️ **The union is load-bearing, and this originally shipped wrong.** The tunnel is
+  > project-scoped, but the host set was first computed **per class**, inside the per-class
+  > convergence. That was only correct while a project had a single non-prod class — the
+  > constraint [0027](0027-per-class-network-isolation.md) then removed. With `CLASSES` ordered
+  > `[testing, stable, production, ephemeral]`, sideline's `stable` created the
+  > `dev.sideline.cz` tunnel and `ephemeral` (no public hosts → empty set → "public is off")
+  > deleted it later in the same pass. `dev.sideline.cz` flapped between HTTP 200 and
+  > Cloudflare **1033** on every loop for roughly a month, unnoticed because releases were
+  > paused and nothing routinely probed the host. Ingress is now converged **once per
+  > project**, before the classes that route through it.
 - **TLS:** Cloudflare terminates real TLS at the edge; the loopback hop to Traefik uses the
   wildcard default cert (SNI won't match the custom host, hence `noTLSVerify`), and Traefik
   routes on the HTTP `Host` header.

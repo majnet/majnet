@@ -391,7 +391,7 @@ async fn copy_volume(docker: &Docker, from: &str, to: &str) -> Result<()> {
                 cmd: Some(vec![
                     "sh".into(),
                     "-c".into(),
-                    format!("cp -a /from/. /to/ 2>/dev/null; true"),
+                    "cp -a /from/. /to/ 2>/dev/null; true".to_string(),
                 ]),
                 host_config: Some(bollard::models::HostConfig {
                     binds: Some(vec![format!("{from}:/from:ro"), format!("{to}:/to")]),
