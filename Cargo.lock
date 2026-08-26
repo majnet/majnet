@@ -1002,6 +1002,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "majnet-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "majnet-common"
 version = "0.1.0"
 dependencies = [
