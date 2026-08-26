@@ -70,6 +70,10 @@ pub async fn converge_all(state: &AppState) -> Result<()> {
         // re-fetching per consumer would double the tarball traffic — an
         // ephemeral branch carries a manifest per app per open PR.
         let mut rendered: Vec<(EnvClass, crate::snapshot::Snapshot)> = Vec::new();
+        // Whether any non-prod class's branch could not be read this pass. The
+        // tunnel's host set is a union over those classes, so a class we cannot
+        // see can only *shrink* it — and a shrunken set reads as "public is off".
+        let mut nonprod_incomplete = false;
         for class in CLASSES {
             match crate::snapshot::fetch(
                 &state.http,
@@ -82,18 +86,33 @@ pub async fn converge_all(state: &AppState) -> Result<()> {
             {
                 Ok(Some(snapshot)) => rendered.push((class, snapshot)),
                 Ok(None) => {} // class not rendered yet for this project
-                Err(e) => tracing::error!(
-                    project = project.name,
-                    class = class.as_str(),
-                    error = format!("{e:#}"),
-                    "snapshot fetch failed"
-                ),
+                Err(e) => {
+                    if class.node_role() == "private" {
+                        nonprod_incomplete = true;
+                    }
+                    tracing::error!(
+                        project = project.name,
+                        class = class.as_str(),
+                        error = format!("{e:#}"),
+                        "snapshot fetch failed"
+                    );
+                }
             }
         }
 
         // The ingress stack is project-scoped (ADR 0026), so it converges once
         // per project — before the classes that route through it.
-        if let Err(e) =
+        //
+        // Never decide the tunnel from a partial picture: if a non-prod branch was
+        // unreadable, the union is missing hosts it should contain, and acting on
+        // it would tear down a live tunnel. Skipping a pass is harmless (the stack
+        // is already up and this is idempotent); tearing it down is not.
+        if nonprod_incomplete {
+            tracing::warn!(
+                project = project.name,
+                "skipping ingress converge — a non-prod class snapshot was unavailable"
+            );
+        } else if let Err(e) =
             converge_project_ingress(state, &nodes, &platform, &project.name, &rendered).await
         {
             // Ingress trouble must not block app convergence — apps still
