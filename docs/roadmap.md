@@ -10,6 +10,7 @@ Tooling ✅ / infra provisioning ⏳:
 - [x] Firewall tooling: nftables per role, prod 80/443 from Cloudflare ranges w/ weekly refresh (`bootstrap/steps/40`)
 - [x] `edge-main` Traefik + hello-world manifests (`platform-seed/platform/`)
 - [x] Platform repo seed: nodes.yaml, people.yaml, projects.yaml, ACL template (`platform-seed/`)
+- [x] `majnet` CLI (`crates/cli`): read-only access to the internal API — `events`, `nodes`, `projects`, `apps`, `releases`, `control-plane`, `whoami`. Makes the fleet diagnosable without a browser. Refuses non-JSON responses, because the dashboard's `/api` serves its SPA shell (HTTP 200 `text/html`) when Tailscale identity is unresolved rather than 401-ing — a fallthrough that has already made a probe look successful when it wasn't. Reaches the WG-internal listener, so it runs on the main node or a WG peer
 - [ ] Provision the 3 Debian nodes + run bootstrap (needs servers, WG pubkey exchange, Docker PKI distribution)
 - [ ] Tailscale org + paste rendered base ACL
 - [x] Create root org `majksa-platform` on GitHub (done 2026-07-07, id 300856753 — the one manual §2 step; the wizard's seed step pushes `platform-seed/` as the `platform` repo)
