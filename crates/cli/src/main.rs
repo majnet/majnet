@@ -1,356 +1,337 @@
-//! `majnet` — a read-only CLI for the control plane's internal API.
+//! `majnet` — the command-line client for a MajNet control plane.
 //!
-//! # Why this exists
+//! # What this is
 //!
-//! Diagnosing the fleet previously meant opening the dashboard in a browser,
-//! because the internal API is bound to the main node's **WireGuard IP** and the
-//! dashboard's `/api` is only reachable through Caddy, which injects a
-//! `Tailscale-User-Login` header it derives from `/tsauth`. Neither path is
-//! scriptable, so incidents got diagnosed by screenshot.
+//! Everything the dashboard can do, from a laptop, in a form a script (or an
+//! agent) can drive: fleet status, logs, deploys, releases, a shell in a
+//! container, and SQL against an app's managed database.
 //!
-//! # The trap this is built to avoid
+//! # How you are authenticated
 //!
-//! Requests to the dashboard's `/api/...` **do not 401 when identity is
-//! missing** — they fall through to the SPA and return `200 text/html`. A naive
-//! script therefore "succeeds" and hands back an HTML shell, which is very easy
-//! to mistake for an empty result. During one incident that fallthrough made a
-//! probe look like it had worked when it had not.
+//! There is no token. Your identity is your **Tailscale device**: the control
+//! plane sits behind a front door (`tailscale serve`, or the Caddy edge) that
+//! resolves the calling tailnet IP to a login and injects it as a header the
+//! backends trust (§16, ADR 0016). `people.yaml` maps that login to a GitHub
+//! user and the platform-admin flag; each project's `project.yaml` carries the
+//! per-project role. Both are edited in the dashboard — so permissions granted
+//! in the UI are exactly the permissions you have here, with nothing to issue,
+//! copy or revoke.
 //!
-//! So every response here must be JSON or the command **fails loudly**
-//! (`ApiError::NotJson`). A confusing error beats a plausible wrong answer.
+//! The corollary is the failure mode this CLI works hardest to make obvious:
+//! a request that arrives *without* a resolved identity is not refused, it is
+//! answered as `infra` (the WG-mesh break-glass, §12.1) or falls through to the
+//! dashboard's SPA with a 200. Both look like success. `majnet whoami` says
+//! which of the three you are, and `client.rs` turns the SPA fallthrough into a
+//! loud error instead of an empty list.
 //!
-//! # Reachability
+//! # Two ways in
 //!
-//! The default base URL is the WG-internal listener, which is bind-address
-//! trusted (§12.1) and needs no credentials — but is only routable from a
-//! WireGuard peer. Run this on the main node, or from a machine enrolled as a
-//! peer. `--base-url` points it elsewhere (e.g. an SSH tunnel).
+//! - **through the dashboard** (default) — `--url http://<main-node>`; your
+//!   identity is resolved, your project roles apply.
+//! - **`--direct`** — straight at the WireGuard-internal listeners from a node
+//!   or an enrolled peer. No identity header, so the backends see `infra` and
+//!   every role check passes. That is break-glass, and `whoami` says so.
 
-use anyhow::{bail, Context, Result};
-use serde_json::Value;
+mod client;
+mod cmd;
+mod config;
+mod output;
+mod resolve;
 
-/// The bot's WG-internal listener (`Config::listen_internal`).
-const DEFAULT_BASE_URL: &str = "http://10.88.0.1:8081";
+use anyhow::Result;
+use clap::{Parser, Subcommand};
 
-const USAGE: &str = "\
-majnet — read-only CLI for the MajNet control plane
+use client::Client;
+use config::{Config, Context};
+use output::Format;
 
-USAGE:
-    majnet [OPTIONS] <COMMAND>
+#[derive(Parser)]
+#[command(
+    name = "majnet",
+    version,
+    about = "Command-line client for a MajNet control plane",
+    long_about = "Command-line client for a MajNet control plane.\n\n\
+                  Authentication is your Tailscale identity — there is no token. Run \
+                  `majnet login` once, then `majnet whoami` to see who the platform thinks \
+                  you are and what you may do.\n\n\
+                  Machine-readable documentation for scripts and AI agents: `majnet agent-guide`."
+    // No `propagate_version`: it puts a `--version` flag on every subcommand,
+    // which collides with `release promote <VERSION>`. `majnet --version` is
+    // the only place anyone looks for it anyway.
+)]
+pub(crate) struct Cli {
+    /// Output format (default: table on a terminal, json otherwise).
+    #[arg(short, long, global = true, value_enum)]
+    output: Option<Format>,
 
-COMMANDS:
-    events                    Recent fleet activity (the dashboard's feed)
-    nodes                     Registered nodes from the platform repo
-    control-plane             Pinned control-plane version and rollout state
-    projects                  Registered projects
-    apps <org>                Apps in a project
-    releases <org> <app>      Release history for an app
-    whoami                    The identity the API attributes to this caller
-    version                   The pinned control-plane version
+    /// Use a named context from the config file instead of the current one.
+    #[arg(long, global = true, value_name = "NAME")]
+    context: Option<String>,
 
-OPTIONS:
-    --base-url <URL>   Internal API base (env MAJNET_URL)
-                       [default: http://10.88.0.1:8081]
-    --json             Print the raw JSON response instead of a table
-    --limit <N>        events: show at most N (default 40)
-    --project <NAME>   events: only this project/org
-    --failed           events: only entries that look like failures
-    --timeout <SECS>   Request timeout (default 15)
-    -h, --help         This help
+    /// Control-plane origin for this invocation (overrides the context).
+    #[arg(long, global = true, value_name = "URL", env = "MAJNET_URL")]
+    url: Option<String>,
 
-NOTES:
-    The internal API is bound to the main node's WireGuard IP and is trusted by
-    bind address, so no token is needed — but it is only reachable from a WG
-    peer. Responses must be JSON: if the dashboard's SPA shell comes back
-    instead, this exits non-zero rather than pretending it worked.
-";
+    /// Talk to the WireGuard-internal listeners directly. No identity is sent,
+    /// so the control plane treats the call as `infra` break-glass.
+    #[arg(long, global = true)]
+    direct: bool,
 
-struct Args {
-    base_url: String,
-    json: bool,
-    limit: usize,
-    project: Option<String>,
-    failed: bool,
+    /// Skip the production confirmation prompt.
+    #[arg(short = 'y', long, global = true)]
+    yes: bool,
+
+    /// Request timeout in seconds.
+    #[arg(long, global = true, default_value_t = 30, value_name = "SECS")]
     timeout: u64,
-    command: Vec<String>,
+
+    #[command(subcommand)]
+    command: Command,
 }
 
-fn parse_args() -> Result<Option<Args>> {
-    let mut a = Args {
-        base_url: std::env::var("MAJNET_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.into()),
-        json: false,
-        limit: 40,
-        project: None,
-        failed: false,
-        timeout: 15,
-        command: Vec::new(),
-    };
-    let mut it = std::env::args().skip(1);
-    while let Some(arg) = it.next() {
-        // A flag needing a value; `next()` is the value, so a missing one is an
-        // error rather than silently swallowing the following subcommand.
-        let mut value = |name: &str| -> Result<String> {
-            it.next().with_context(|| format!("{name} needs a value"))
-        };
-        match arg.as_str() {
-            "-h" | "--help" => return Ok(None),
-            "--json" => a.json = true,
-            "--failed" => a.failed = true,
-            "--base-url" => a.base_url = value("--base-url")?,
-            "--project" => a.project = Some(value("--project")?),
-            "--limit" => {
-                a.limit = value("--limit")?
-                    .parse()
-                    .context("--limit must be a number")?
-            }
-            "--timeout" => {
-                a.timeout = value("--timeout")?
-                    .parse()
-                    .context("--timeout must be seconds")?
-            }
-            s if s.starts_with('-') => bail!("unknown option '{s}' (try --help)"),
-            s => a.command.push(s.to_string()),
-        }
-    }
-    if a.command.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(a))
+#[derive(Subcommand)]
+enum Command {
+    /// Point this machine at a control plane and verify who it thinks you are.
+    Login(cmd::auth::LoginArgs),
+    /// Forget a context.
+    Logout {
+        /// Context to remove (default: the current one).
+        name: Option<String>,
+    },
+    /// Who the control plane says you are, and what that lets you do.
+    Whoami,
+    /// Manage saved contexts.
+    #[command(subcommand)]
+    Context(cmd::auth::ContextCmd),
+
+    /// One-screen fleet summary: nodes, deploys in flight, recent failures.
+    Status,
+    /// Recent fleet activity (the dashboard's feed).
+    Events(cmd::read::EventArgs),
+    /// Registered nodes.
+    Nodes,
+    /// Live per-node CPU, memory and container counts.
+    Metrics {
+        /// Only this node.
+        #[arg(long)]
+        node: Option<String>,
+    },
+    /// Registered projects.
+    Projects,
+    /// Apps in a project.
+    Apps {
+        /// Project name or GitHub org.
+        project: Option<String>,
+    },
+    /// Everything about one app: environments, image, containers, build info.
+    App {
+        project: Option<String>,
+        app: Option<String>,
+    },
+    /// Containers backing an app in one environment.
+    Ps(cmd::read::TargetArgs),
+    /// Container logs for an app in one environment.
+    Logs(cmd::read::LogArgs),
+    /// Build metadata each environment reported at `/info`.
+    Info {
+        project: Option<String>,
+        app: Option<String>,
+    },
+    /// The app's manifest files as committed on ops `main`.
+    Manifest {
+        project: Option<String>,
+        app: Option<String>,
+    },
+    /// Project members and their roles.
+    Members { project: Option<String> },
+    /// Secret names for an app+environment (values only with --reveal).
+    Secrets(cmd::read::SecretArgs),
+
+    /// Deploys: promote, restart, roll back, and the render PRs in flight.
+    #[command(subcommand)]
+    Deploy(cmd::deploy::DeployCmd),
+    /// Releases: cut a version, review a draft, promote one.
+    #[command(subcommand)]
+    Release(cmd::release::ReleaseCmd),
+
+    /// Run one command inside an app's container and print what it said.
+    Exec(cmd::run::ExecArgs),
+    /// Open an interactive shell — in an app container, or on a node.
+    Shell(cmd::shell::ShellArgs),
+    /// Run SQL against an app's managed database.
+    Sql(cmd::run::SqlArgs),
+    /// Describe an app's managed database (engine, name, where it lives).
+    Db(cmd::read::TargetArgs),
+
+    /// Control-plane version: what is pinned, what is running.
+    #[command(subcommand)]
+    ControlPlane(cmd::admin::ControlPlaneCmd),
+    /// The platform version pinned in the platform repo.
+    Version,
+
+    /// Print a shell completion script.
+    Completions {
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+    /// Print the reference another AI agent needs to drive this CLI safely.
+    AgentGuide(cmd::guide::GuideArgs),
 }
 
-/// GET a path and insist on JSON.
-///
-/// The `NotJson` branch is the reason this helper exists: the dashboard serves
-/// its SPA for unauthenticated `/api/...`, so a 200 with `text/html` means "you
-/// are not talking to the API", not "no results".
-async fn get_json(client: &reqwest::Client, base: &str, path: &str) -> Result<Value> {
-    let url = format!("{}{}", base.trim_end_matches('/'), path);
-    let response = client.get(&url).send().await.with_context(|| {
-        // Only blame WireGuard when we actually tried the WG endpoint — telling
-        // someone who passed their own --base-url to "enroll as a WG peer" sends
-        // them after the wrong problem.
-        if base.trim_end_matches('/') == DEFAULT_BASE_URL {
-            format!(
-                "cannot reach {url}\n\
-                 That is the WG-internal listener, which is only routable from a \
-                 WireGuard peer. Run this on the main node, enroll this machine as a \
-                 peer, or pass --base-url."
-            )
-        } else {
-            format!("cannot reach {url}")
-        }
-    })?;
-
-    let status = response.status();
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-    let body = response.text().await.context("reading response body")?;
-
-    if !status.is_success() {
-        bail!("{url} returned {status}\n{}", snippet(&body));
-    }
-    // Belt and braces: trust the content type, but also catch a mislabelled shell.
-    if !content_type.contains("json") || body.trim_start().starts_with('<') {
-        bail!(
-            "{url} returned {status} {content_type}, not JSON.\n\
-             This is almost certainly the dashboard's SPA shell: an /api request \
-             without a resolved Tailscale identity falls through to the app instead \
-             of 401-ing. You are not talking to the API.\n\
-             Point --base-url at the WG-internal listener ({DEFAULT_BASE_URL}) from a \
-             WG peer.\n{}",
-            snippet(&body)
-        );
-    }
-    serde_json::from_str(&body).with_context(|| format!("{url} returned unparseable JSON"))
+/// Everything a command needs: a configured client, the resolved defaults, and
+/// how to print.
+pub struct App {
+    pub client: Client,
+    pub ctx: Context,
+    pub format: Format,
+    pub yes: bool,
+    /// The `--timeout` value, so a command that legitimately takes longer than
+    /// a status query can build itself a more patient client.
+    pub timeout: u64,
 }
 
-fn snippet(body: &str) -> String {
-    let s: String = body.chars().take(200).collect();
-    format!("  ── body ──\n  {}", s.replace('\n', "\n  "))
-}
-
-fn field<'a>(v: &'a Value, key: &str) -> &'a str {
-    v.get(key).and_then(Value::as_str).unwrap_or("")
-}
-
-/// Heuristic for "this line is a problem", matching how the dashboard feed reads:
-/// the reconciler records failures in `result`, prefixed `FAILED:` or similar.
-fn looks_failed(event: &Value) -> bool {
-    let r = field(event, "result").to_ascii_lowercase();
-    r.contains("failed") || r.contains("error") || r.contains("unhealthy")
-}
-
-fn truncate(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        return s.to_string();
+impl App {
+    pub fn table(&self) -> bool {
+        self.format == Format::Table
     }
-    let head: String = s.chars().take(n.saturating_sub(1)).collect();
-    format!("{head}…")
-}
 
-fn print_events(events: &[Value], args: &Args) {
-    let rows: Vec<&Value> = events
-        .iter()
-        .filter(|e| {
-            args.project
-                .as_deref()
-                .is_none_or(|p| field(e, "project") == p)
-        })
-        .filter(|e| !args.failed || looks_failed(e))
-        .take(args.limit)
-        .collect();
-
-    if rows.is_empty() {
-        println!("no matching events");
-        return;
+    /// A client for the long calls. `exec` and `sql` are allowed 120s by the
+    /// reconciler, so the default 30s request timeout would abandon a query the
+    /// server is still happily running — and the caller would have no way to
+    /// tell that from a failure. Never *shortens* an explicit `--timeout`.
+    pub fn patient_client(&self) -> Result<Client> {
+        Client::new(self.ctx.clone(), self.timeout.max(150))
     }
-    println!(
-        "{:<20}  {:<16}  {:<22}  {:<8}  RESULT",
-        "AT", "PROJECT", "ACTION", "COMMIT"
-    );
-    for e in &rows {
-        println!(
-            "{:<20}  {:<16}  {:<22}  {:<8}  {}",
-            truncate(field(e, "at"), 20),
-            truncate(field(e, "project"), 16),
-            truncate(field(e, "action"), 22),
-            truncate(field(e, "commit"), 8),
-            truncate(field(e, "result"), 90),
-        );
-    }
-    let failures = rows.iter().filter(|e| looks_failed(e)).count();
-    println!("\n{} shown · {} look like failures", rows.len(), failures);
-}
-
-fn print_table(items: &[Value], columns: &[&str]) {
-    if items.is_empty() {
-        println!("(none)");
-        return;
-    }
-    for c in columns {
-        print!("{:<24}", c.to_ascii_uppercase());
-    }
-    println!();
-    for it in items {
-        for c in columns {
-            // Fall back to a compact JSON rendering for non-string fields
-            // (booleans, numbers, nested objects) rather than printing blanks.
-            let raw = it.get(*c).map_or_else(String::new, |v| {
-                v.as_str().map_or_else(|| v.to_string(), str::to_string)
-            });
-            print!("{:<24}", truncate(&raw, 23));
-        }
-        println!();
-    }
-}
-
-fn as_array(v: &Value) -> Vec<Value> {
-    v.as_array().cloned().unwrap_or_else(|| vec![v.clone()])
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    let Some(args) = parse_args()? else {
-        print!("{USAGE}");
-        return Ok(());
-    };
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(args.timeout))
-        .build()?;
+async fn main() {
+    // Rust ignores SIGPIPE, so a write to a closed pipe returns EPIPE and
+    // `println!` panics — which turns `majnet events | head` into a stack
+    // trace. Restore the default so the process just dies quietly, the way
+    // every other command in a pipeline does.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
 
-    let cmd: Vec<&str> = args.command.iter().map(String::as_str).collect();
-    let (path, render): (String, fn(&Value, &Args)) = match cmd.as_slice() {
-        ["events"] => ("/api/events".into(), |v, a| print_events(&as_array(v), a)),
-        ["nodes"] => ("/api/nodes".into(), |v, _| {
-            print_table(
-                &as_array(v),
-                &["name", "role", "wireguard_ip", "tailscale_ip"],
-            )
-        }),
-        ["control-plane"] => ("/api/control-plane".into(), |v, _| {
-            println!("{}", serde_json::to_string_pretty(v).unwrap_or_default())
-        }),
-        ["version"] => ("/api/platform/version".into(), |v, _| {
-            println!("{}", serde_json::to_string_pretty(v).unwrap_or_default())
-        }),
-        ["projects"] => ("/api/projects".into(), |v, _| {
-            print_table(&as_array(v), &["name", "org"])
-        }),
-        ["whoami"] => ("/api/whoami".into(), |v, _| {
-            println!(
-                "login: {}\nadmin: {}",
-                v.get("login").and_then(Value::as_str).unwrap_or("(none)"),
-                v.get("admin").and_then(Value::as_bool).unwrap_or(false)
-            )
-        }),
-        ["apps", org] => (format!("/api/apps/{org}"), |v, _| {
-            print_table(&as_array(v), &["name", "class", "digest"])
-        }),
-        ["releases", org, app] => (format!("/api/releases/{org}/{app}"), |v, _| {
-            print_table(&as_array(v), &["version", "at", "digest"])
-        }),
-        [] => unreachable!("empty command handled in parse_args"),
-        other => bail!("unknown command '{}' (try --help)", other.join(" ")),
-    };
-
-    let body = get_json(&client, &args.base_url, &path).await?;
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&body)?);
-    } else {
-        render(&body, &args);
+    if let Err(e) = run().await {
+        // `{e:#}` keeps the anyhow context chain — the layer that failed *and*
+        // what it was doing. Losing that is how "cannot reach" stops being
+        // actionable.
+        eprintln!("majnet: {e:#}");
+        std::process::exit(1);
     }
-    Ok(())
+}
+
+async fn run() -> Result<()> {
+    let cli = Cli::parse();
+
+    // Two commands need no control plane at all; resolving a context first
+    // would make `majnet completions` fail on a machine that isn't set up.
+    match &cli.command {
+        Command::Completions { shell } => return cmd::guide::completions(*shell),
+        Command::AgentGuide(args) => return cmd::guide::agent_guide(args),
+        _ => {}
+    }
+
+    let config = Config::load()?;
+    if let Command::Login(args) = &cli.command {
+        return cmd::auth::login(config, args, cli.url.as_deref(), cli.timeout).await;
+    }
+    if let Command::Logout { name } = &cli.command {
+        return cmd::auth::logout(config, name.as_deref());
+    }
+    if let Command::Context(sub) = &cli.command {
+        return cmd::auth::context(config, sub);
+    }
+
+    let mut ctx = config.resolve(cli.context.as_deref())?;
+    if let Some(url) = &cli.url {
+        ctx.url = Some(url.clone());
+        ctx.direct = false;
+    }
+    if cli.direct {
+        ctx.direct = true;
+    }
+    // After the overrides, not before: `--url` on a machine with no config file
+    // is a perfectly good way to run this.
+    ctx.require_endpoint()?;
+
+    let format = cli.output.unwrap_or({
+        // A pipe gets JSON: a caller redirecting output wants data, and column
+        // alignment is not data.
+        if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+            Format::Table
+        } else {
+            Format::Json
+        }
+    });
+
+    let app = App {
+        client: Client::new(ctx.clone(), cli.timeout)?,
+        ctx,
+        format,
+        yes: cli.yes,
+        timeout: cli.timeout,
+    };
+
+    match cli.command {
+        Command::Whoami => cmd::auth::whoami(&app).await,
+        Command::Status => cmd::read::status(&app).await,
+        Command::Events(args) => cmd::read::events(&app, &args).await,
+        Command::Nodes => cmd::read::nodes(&app).await,
+        Command::Metrics { node } => cmd::read::metrics(&app, node.as_deref()).await,
+        Command::Projects => cmd::read::projects(&app).await,
+        Command::Apps { project } => cmd::read::apps(&app, project.as_deref()).await,
+        Command::App { project, app: name } => {
+            cmd::read::app_detail(&app, project.as_deref(), name.as_deref()).await
+        }
+        Command::Ps(args) => cmd::read::ps(&app, &args).await,
+        Command::Logs(args) => cmd::read::logs(&app, &args).await,
+        Command::Info { project, app: name } => {
+            cmd::read::info(&app, project.as_deref(), name.as_deref()).await
+        }
+        Command::Manifest { project, app: name } => {
+            cmd::read::manifest(&app, project.as_deref(), name.as_deref()).await
+        }
+        Command::Members { project } => cmd::read::members(&app, project.as_deref()).await,
+        Command::Secrets(args) => cmd::read::secrets(&app, &args).await,
+        Command::Deploy(sub) => cmd::deploy::run(&app, sub).await,
+        Command::Release(sub) => cmd::release::run(&app, sub).await,
+        Command::Exec(args) => cmd::run::exec(&app, &args).await,
+        Command::Shell(args) => cmd::shell::shell(&app, &args).await,
+        Command::Sql(args) => cmd::run::sql(&app, &args).await,
+        Command::Db(args) => cmd::read::db(&app, &args).await,
+        Command::ControlPlane(sub) => cmd::admin::control_plane(&app, sub).await,
+        Command::Version => cmd::admin::version(&app).await,
+        // Handled above, before a control plane was required.
+        Command::Login(_)
+        | Command::Logout { .. }
+        | Command::Context(_)
+        | Command::Completions { .. }
+        | Command::AgentGuide(_) => unreachable!(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
-    fn ev(project: &str, action: &str, result: &str) -> Value {
-        serde_json::json!({
-            "at": "2026-08-26T15:00:00Z", "commit": "12b2549abc",
-            "project": project, "node": "private", "action": action,
-            "result": result, "kind": "deploy",
-        })
-    }
-
-    /// The whole point of the tool: a 200 carrying the SPA shell must be an
-    /// error, not an empty result. This is the footgun that made a dashboard
-    /// probe look successful during an incident.
+    /// clap panics at runtime on a malformed command tree (duplicate flags, an
+    /// optional positional ahead of a required one). `debug_assert` catches
+    /// most of it; generating completions walks every subcommand, which is how
+    /// the rest surfaces — and it is a real command, so it must not panic.
     #[test]
-    fn looks_failed_matches_the_reconciler_wording() {
-        assert!(looks_failed(&ev("sideline", "converge", "FAILED: boom")));
-        assert!(looks_failed(&ev(
-            "sideline",
-            "converge",
-            "health check failed — old container keeps serving: container reported unhealthy"
-        )));
-        assert!(!looks_failed(&ev("sideline", "deploy", "deployed 12b2549")));
-    }
-
-    #[test]
-    fn truncate_is_char_safe_and_marks_elision() {
-        assert_eq!(truncate("abc", 8), "abc");
-        assert_eq!(truncate("abcdefgh", 4), "abc…");
-        // Must not panic or split a multi-byte char mid-sequence.
-        assert_eq!(truncate("čárka", 3), "čá…");
-    }
-
-    #[test]
-    fn field_is_tolerant_of_missing_and_non_string_values() {
-        let v = serde_json::json!({ "a": "x", "n": 3 });
-        assert_eq!(field(&v, "a"), "x");
-        assert_eq!(field(&v, "n"), "");
-        assert_eq!(field(&v, "absent"), "");
-    }
-
-    #[test]
-    fn as_array_wraps_a_bare_object() {
-        assert_eq!(as_array(&serde_json::json!([1, 2])).len(), 2);
-        assert_eq!(as_array(&serde_json::json!({"a": 1})).len(), 1);
+    fn the_command_tree_is_well_formed() {
+        Cli::command().debug_assert();
+        for shell in [
+            clap_complete::Shell::Bash,
+            clap_complete::Shell::Zsh,
+            clap_complete::Shell::Fish,
+        ] {
+            let mut command = Cli::command();
+            let mut sink = Vec::new();
+            clap_complete::generate(shell, &mut command, "majnet", &mut sink);
+            assert!(!sink.is_empty(), "{shell} completions came out empty");
+        }
     }
 }

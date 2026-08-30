@@ -15,6 +15,8 @@ Three custom Rust services form the control plane:
 - **Reconciler** (`crates/reconciler`) — the orchestrator. Consumes rendered `env/*` branches, decrypts SOPS secrets with class keys, and converges each node's Docker API over WireGuard: blue-green deploys, per-project networks/ingress/DB provisioning, ephemeral GC.
 - **Setup** (`crates/setup`) — the provisioner (ADR 0004). First-run wizard (GitHub App via manifest flow, platform repo seeding) + node enrollment over SSH.
 
+Plus a client: **`majnet`** (`crates/cli`) — everything the dashboard does, from a laptop. Status, logs, deploys, releases, a shell in a container, SQL against an app's managed database. No token: it authenticates as your **Tailscale identity**, so the roles granted in the dashboard are exactly the ones it has (ADR 0029).
+
 **Credential isolation:** the bot holds the GitHub App key + Tailscale API key; the reconciler holds age keys + Docker mTLS certs; setup holds the enrollment SSH key + PKI CA. Disjoint powers.
 
 📄 **Full design:** [docs/design.md](docs/design.md) · **Roadmap:** [docs/roadmap.md](docs/roadmap.md) · **Diagrams:** [docs/diagrams/](docs/diagrams/)
@@ -34,6 +36,15 @@ curl -fsSL https://raw.githubusercontent.com/majnet/majnet/main/bootstrap/instal
 The installer bootstraps the node, generates all key material, starts the control plane, and prints a **setup-wizard URL**: create the GitHub App there (manifest flow — one click), seed the platform repo, and enroll the prod/private nodes by handing the wizard SSH access. See [ADR 0004](docs/adr/0004-setup-service-auto-provisioning.md) and [`crates/setup/README.md`](crates/setup/README.md).
 
 Break-glass / manual path: the [`bootstrap/`](bootstrap/README.md) scripts remain runnable standalone, and the crate READMEs document every env var. Day-2 operations live in [`docs/runbooks/`](docs/runbooks/).
+
+### Using the platform (everyone else)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/majnet/majnet/main/scripts/install-cli.sh | bash
+majnet login && majnet status
+```
+
+The CLI is authenticated by your tailnet identity — nothing to issue or store. See [`crates/cli/README.md`](crates/cli/README.md). Driving it from an AI agent: `majnet agent-guide` (and `majnet agent-guide --install` to drop the reference into a repo as a skill).
 
 ### Hacking on the platform
 
