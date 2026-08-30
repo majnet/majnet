@@ -48,9 +48,13 @@ esac
 if [[ $VERSION == latest ]]; then
   # Resolve through the API rather than the /latest redirect so the failure is
   # a readable message when there is no release yet.
-  VERSION=$(fetch_stdout "https://api.github.com/repos/$REPO/releases/latest" \
-    | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
-  [[ -n $VERSION ]] || die "could not resolve the latest release of $REPO (set MAJNET_VERSION)"
+  # `|| true`: under `set -e` a failing curl inside a command substitution kills
+  # the script outright, so the message below — the one that actually tells you
+  # the repo is wrong or there is no release yet — would never be reached.
+  VERSION=$(fetch_stdout "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
+    | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1 || true)
+  [[ -n $VERSION ]] || die "could not resolve the latest release of $REPO — no releases yet, \
+or the repo name is wrong. Pin one with MAJNET_VERSION."
 fi
 
 name="majnet-$target"
