@@ -1,0 +1,16 @@
+# Smoke fixture: the identities the authorization step acts as (ADR 0029).
+#
+# `tailscale` is the login the front door injects as `Tailscale-User-Login`;
+# `github` is the name everything else (project.yaml, audit rows) uses. `admin`
+# is the PLATFORM-admin flag — deliberately false for smoke-admin, who is an
+# admin of the project only, so the two tiers stay distinguishable in the test.
+people:
+  - github: smoke-dev
+    tailscale: dev@smoke.invalid
+    admin: false
+  - github: smoke-admin
+    tailscale: admin@smoke.invalid
+    admin: false
+  - github: smoke-platform
+    tailscale: platform@smoke.invalid
+    admin: true

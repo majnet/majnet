@@ -1,0 +1,10 @@
+# Smoke fixture: the per-project roles the reconciler reads for authorization.
+# `apps` stays empty — nothing here materializes repos; the env branch supplies
+# the manifests.
+name: demo
+members:
+  - user: smoke-dev
+    role: developer
+  - user: smoke-admin
+    role: admin
+apps: []

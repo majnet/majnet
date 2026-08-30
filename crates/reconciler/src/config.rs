@@ -28,6 +28,11 @@ pub struct Config {
     /// DEV: read snapshots from `<dir>/<org>/<repo>/<branch>/` instead of
     /// the bot. For the smoke-test harness — never in production.
     pub snapshot_dir: Option<PathBuf>,
+    /// Host directory holding each DB engine's root-secret file, bind-mounted
+    /// into the engine container. `/etc/majnet/db-root` in production; the
+    /// smoke-test harness points it at a temp dir so a test run never writes a
+    /// derived password into `/etc` on a developer's machine.
+    pub db_root_dir: String,
     /// Image for the host-shell helper container (ADR 0016) — a minimal image
     /// carrying `nsenter`. Run `--privileged --pid=host` so `nsenter -t 1`
     /// enters the host namespaces. Pin by digest in production.
@@ -73,6 +78,12 @@ impl Config {
             docker_local: std::env::var("MAJNET_DOCKER_LOCAL")
                 .is_ok_and(|v| v == "1" || v == "true"),
             snapshot_dir: std::env::var("MAJNET_SNAPSHOT_DIR").ok().map(Into::into),
+            db_root_dir: std::env::var("MAJNET_DB_ROOT_DIR")
+                .ok()
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| "/etc/majnet/db-root".into())
+                .trim_end_matches('/')
+                .to_string(),
             // Digest-pinned (the platform's image invariant) — reproducible and
             // supply-chain-fixed; bump the digest to update. Override with
             // MAJNET_TERM_HELPER_IMAGE.

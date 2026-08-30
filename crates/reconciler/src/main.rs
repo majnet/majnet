@@ -31,6 +31,7 @@ mod obs;
 mod platform;
 mod purge;
 mod rename;
+mod run;
 mod secrets;
 mod snapshot;
 mod state;

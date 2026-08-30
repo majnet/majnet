@@ -336,7 +336,7 @@ async fn ensure_helper_image(docker: &Docker, image: &str) -> Result<()> {
 
 /// The running container id for an app/class, matched by the deploy labels (same
 /// resolution logs/restart use — the project org maps to the project name).
-async fn find_app_container(
+pub(crate) async fn find_app_container(
     docker: &Docker,
     platform: &crate::snapshot::Snapshot,
     org: &str,

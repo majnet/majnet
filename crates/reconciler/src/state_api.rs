@@ -33,6 +33,18 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/containers/{project}/{class}/{app}",
             get(containers_get),
         )
+        // One-shot imperative surface for the CLI (ADR 0029): run a command in
+        // an app container, or a statement against its managed database. Both
+        // are role-gated like /api/logs and audited.
+        .route(
+            "/api/exec/{project}/{class}/{app}",
+            post(crate::run::exec_post),
+        )
+        .route("/api/db/{project}/{class}/{app}", get(crate::run::db_get))
+        .route(
+            "/api/sql/{project}/{class}/{app}",
+            post(crate::run::sql_post),
+        )
         .route("/api/terminal", get(crate::terminal::terminal_ws))
         .route("/api/terminal/sessions", get(crate::terminal::sessions_get))
         .route(
