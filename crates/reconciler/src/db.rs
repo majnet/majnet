@@ -375,6 +375,23 @@ fn derive_project_password(
     )
 }
 
+/// The per-app DB name + its derived password. The role name *is* the database
+/// name (see `ensure`), so one value covers both. Exposed so the CLI's `sql`
+/// path (ADR 0029) connects as the app itself rather than as the superuser —
+/// a human's query gets exactly the app's privileges, nothing more.
+pub fn app_credentials(
+    config: &Config,
+    engine: DbEngine,
+    project: &str,
+    app: &str,
+    class: EnvClass,
+) -> Result<(String, String)> {
+    Ok((
+        db_name(project, app, class),
+        derive_password(config, engine, project, app, class)?,
+    ))
+}
+
 /// The per-project human role + its derived password (ADR 0014) — the identity
 /// the per-project Adminer auto-logs in as. Exposed so the platform layer can
 /// build Adminer's DB→credentials map without duplicating the derivation.

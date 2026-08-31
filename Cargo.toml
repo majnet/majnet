@@ -29,7 +29,15 @@ bollard = { version = "0.21", features = ["ssl"] }
 futures-util = "0.3"
 
 # http client (tarball downloads, reconciler notify)
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+
+# CLI (crates/cli): arg parsing + generated shell completions
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+clap_complete = "4"
+# The CLI's interactive shell speaks the reconciler's terminal WebSocket
+# (ADR 0016); libc gives it raw-mode termios without another dependency.
+tokio-tungstenite = { version = "0.29", features = ["connect", "rustls-tls-native-roots"] }
+libc = "0.2"
 
 # crypto (webhook signatures, App JWT key loading)
 hmac = "0.12"

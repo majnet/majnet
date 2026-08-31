@@ -574,7 +574,9 @@ async fn converge_error_pages(docker: &Docker) -> Result<()> {
 
 // ── managed DB engines (§15) ─────────────────────────────────────────────────
 
-const DB_ROOT_DIR: &str = "/etc/majnet/db-root";
+// Where each engine's root-secret file lives on the host. Configurable
+// (`Config::db_root_dir`) so the smoke test can keep its state in a temp dir
+// instead of writing a derived password into a developer's /etc.
 
 /// Container spec for a managed DB engine — mirrors
 /// `platform/databases/compose.yaml`, but the reconciler owns the deploy over
@@ -588,7 +590,7 @@ struct EngineSpec {
     cmd: Option<Vec<String>>,
     /// Host binds: the named data volume + the read-only root-secret file.
     binds: Vec<String>,
-    /// Basename of the root-secret file under DB_ROOT_DIR.
+    /// Basename of the root-secret file under `Config::db_root_dir`.
     secret: &'static str,
     /// Readiness probe run inside the container (exit 0 = accepting
     /// authenticated connections).
@@ -598,7 +600,7 @@ struct EngineSpec {
     nano_cpus: i64,
 }
 
-fn engine_spec(engine: DbEngine) -> EngineSpec {
+fn engine_spec(engine: DbEngine, db_root_dir: &str) -> EngineSpec {
     let secret = match engine {
         DbEngine::Postgres => "postgres",
         DbEngine::Mariadb => "mariadb",
@@ -606,7 +608,7 @@ fn engine_spec(engine: DbEngine) -> EngineSpec {
         DbEngine::Mongodb => "mongodb",
     };
     let root_file = format!("/run/secrets/{secret}-root");
-    let root_bind = format!("{DB_ROOT_DIR}/{secret}:{root_file}:ro");
+    let root_bind = format!("{db_root_dir}/{secret}:{root_file}:ro");
     match engine {
         DbEngine::Postgres => EngineSpec {
             image: "postgres:17",
@@ -679,7 +681,7 @@ fn engine_spec(engine: DbEngine) -> EngineSpec {
 pub async fn ensure_engine(config: &Config, docker: &Docker, engine: DbEngine) -> Result<()> {
     let name = crate::db::engine_container(engine);
     let root_pw = crate::db::root_password(config, engine)?;
-    let spec = engine_spec(engine);
+    let spec = engine_spec(engine, &config.db_root_dir);
 
     let hash = engine_hash(&spec, &root_pw);
     if running_with_hash(docker, name, &hash).await? {
@@ -691,7 +693,7 @@ pub async fn ensure_engine(config: &Config, docker: &Docker, engine: DbEngine) -
     ensure_image(docker, HELPER_IMAGE).await?;
     deliver_files(
         docker,
-        DB_ROOT_DIR,
+        &config.db_root_dir,
         &BTreeMap::from([(spec.secret.to_string(), root_pw.into_bytes())]),
     )
     .await

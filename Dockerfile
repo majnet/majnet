@@ -44,7 +44,16 @@ RUN apt-get update \
 # from the nodes, shipping the binary here is the only way to run it on a node —
 # `docker exec majnet-bot majnet events --failed` needs no WG peer and no
 # toolchain.
+#
+# The two URLs below put that in-image CLI into `--direct` mode by default, so
+# it talks to the WG listeners with no config file. Direct mode sends no
+# identity, so those calls are audited as `infra` (§12.1) — correct for a
+# node-local break-glass, and `majnet whoami` says so rather than printing a
+# name it does not have. A human at a laptop goes through the dashboard instead
+# (ADR 0029).
 COPY --from=builder /out/majnet-bot /out/majnet-reconciler /out/majnet-setup /out/majnet /usr/local/bin/
+ENV MAJNET_BOT_URL=http://10.88.0.1:8081 \
+    MAJNET_RECON_URL=http://10.88.0.1:9090
 # Build metadata (CI-injected) so the bot can report what's running at /info —
 # the control plane's own version signal, mirroring apps (design §16). bot and
 # reconciler share this image, so one commit describes both.

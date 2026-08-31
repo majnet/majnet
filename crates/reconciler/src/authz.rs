@@ -1,7 +1,8 @@
 //! Authorization plumbing for the reconciler's human-facing endpoints
 //! (restart, TTL extend). Role logic + header trust model live in
-//! `majnet_common::authz`; config comes from bot snapshots. Projects are
-//! addressed by name here — the registry maps name → org for the ops fetch.
+//! `majnet_common::authz`; config comes from bot snapshots. A project may be
+//! addressed by name or by org here — the registry maps either to the org the
+//! ops fetch needs.
 
 use anyhow::{Context, Result};
 use axum::http::HeaderMap;
@@ -119,10 +120,17 @@ pub async fn require(
                     .get("projects.yaml")
                     .context("platform repo has no projects.yaml")?,
             )?;
+            // Callers address a project by **org** (the dashboard and the CLI
+            // both do; `/api/secrets` even fetches the ops repo straight from
+            // this value), while `projects.yaml` keys on the project *name*.
+            // They differ whenever an org is not named after its project, and
+            // matching only on `name` denied every non-platform-admin member of
+            // such a project — a 403 that read as "you have no role" when the
+            // real cause was a lookup miss. Accept either.
             let org = &projects
                 .projects
                 .iter()
-                .find(|p| p.name == project)
+                .find(|p| p.name == project || p.org == project)
                 .with_context(|| format!("unknown project {project}"))?
                 .org;
             let ops = crate::snapshot::fetch(&state.http, &state.config, org, "ops", "main")
