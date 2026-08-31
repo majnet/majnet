@@ -15,6 +15,14 @@
 //! fleet. These two are scoped to one app the caller already administers, which
 //! is the same blast radius they get from `restart` and the manifest editor.
 //!
+//! ## What the timeout does and does not do
+//!
+//! Docker exposes no way to cancel a running exec. `RUN_TIMEOUT` therefore
+//! abandons *reading* the output; the command itself keeps running in the
+//! container until it exits or the container is replaced. So the timeout bounds
+//! this API's latency, not the work it started — which is why a timed-out call
+//! is still audited.
+//!
 //! ## The read-only guard is a seatbelt, not a sandbox
 //!
 //! `sql` runs the engine's own client inside the engine container as the app's
@@ -146,7 +154,6 @@ async fn exec_capture(
     cmd: Vec<String>,
     env: Option<Vec<String>>,
     stdin: Option<&str>,
-    user: Option<String>,
     workdir: Option<String>,
 ) -> Result<RunOutput> {
     let exec = docker
@@ -155,7 +162,6 @@ async fn exec_capture(
             ExecConfig {
                 cmd: Some(cmd),
                 env,
-                user,
                 working_dir: workdir,
                 attach_stdin: Some(stdin.is_some()),
                 attach_stdout: Some(true),
@@ -245,9 +251,16 @@ pub struct ExecBody {
     /// explicit, so nobody is surprised by shell expansion they didn't ask for.
     pub cmd: Vec<String>,
     pub stdin: Option<String>,
-    pub user: Option<String>,
     pub workdir: Option<String>,
 }
+
+// There is deliberately no `user` field. Docker's exec API would happily take
+// one, which would let a project *developer* run as root inside the app
+// container — reading root-owned paths, writing protected ones, and reading the
+// secrets tmpfs even where the app's own user cannot. That is escalation beyond
+// what the app itself runs as, for a convenience nobody asked for. The command
+// runs as the image's user; a platform admin who genuinely needs root has the
+// ADR 0016 terminal.
 
 #[derive(Debug, Serialize)]
 pub struct ExecResult {
@@ -283,28 +296,35 @@ pub async fn exec_post(
     .map_err(upstream)?;
 
     let line = body.cmd.join(" ");
-    let output = exec_capture(
+    let attempt = exec_capture(
         &placed.docker,
         &container,
         body.cmd,
         None,
         body.stdin.as_deref(),
-        body.user,
         body.workdir,
     )
-    .await
-    .map_err(upstream)?;
+    .await;
 
-    // Audit before returning: the record is the point of allowing this at all.
+    // Audit BOTH outcomes. Recording only on success left a hole big enough to
+    // matter: the timeout abandons *reading* the output, but Docker has no way
+    // to cancel an exec, so the command is still running in the container — a
+    // caller could run something long and leave no trace at all. A failed
+    // attempt is exactly the one worth having on record.
+    let outcome = match &attempt {
+        Ok(o) => format!("exit {}", o.exit_code),
+        Err(e) => format!("FAILED: {e:#}"),
+    };
     let _ = state.store.record(
         "imperative",
         &placed.project_name,
         &placed.node,
         &format!("exec {app} ({})", class.as_str()),
-        &format!("by {actor}: {line} → exit {}", output.exit_code),
+        &format!("by {actor}: {line} → {outcome}"),
     );
-    tracing::info!(%actor, project = %placed.project_name, app, class = class.as_str(), cmd = %line, exit = output.exit_code, "cli exec");
+    tracing::info!(%actor, project = %placed.project_name, app, class = class.as_str(), cmd = %line, outcome = %outcome, "cli exec");
 
+    let output = attempt.map_err(upstream)?;
     Ok(Json(ExecResult {
         output,
         container,
@@ -507,25 +527,28 @@ pub async fn sql_post(
     // `meta=` call open a read-write transaction nobody asked for.
     let write = q.write && q.meta.is_none();
 
-    let result = run_sql(&target, &sql, write, q.limit.unwrap_or(DEFAULT_ROWS))
-        .await
-        .map_err(upstream)?;
+    let attempt = run_sql(&target, &sql, write, q.limit.unwrap_or(DEFAULT_ROWS)).await;
 
+    // Audited either way — a statement the engine *rejected* is the one most
+    // worth keeping, since that is what probing looks like.
+    let outcome = match &attempt {
+        Ok(r) => format!("{} row(s)", r.row_count),
+        Err(e) => format!("FAILED: {}", one_line(&format!("{e:#}"), 200)),
+    };
     let _ = state.store.record(
         "imperative",
         &target.project_name,
         &target.node,
         &format!("sql {app} ({})", class.as_str()),
         &format!(
-            "by {actor} [{}]: {} → {} row(s)",
+            "by {actor} [{}]: {} → {outcome}",
             if write { "write" } else { "read-only" },
             one_line(&sql, 300),
-            result.row_count
         ),
     );
-    tracing::info!(%actor, project = %target.project_name, app, class = class.as_str(), write, rows = result.row_count, "cli sql");
+    tracing::info!(%actor, project = %target.project_name, app, class = class.as_str(), write, outcome = %outcome, "cli sql");
 
-    Ok(Json(result))
+    Ok(Json(attempt.map_err(upstream)?))
 }
 
 /// Collapse a statement to one audit-log line without losing the shape of it.
@@ -599,7 +622,6 @@ async fn run_sql(target: &DbTarget, sql: &str, write: bool, limit: usize) -> Res
         cmd,
         Some(env),
         stdin.as_deref(),
-        None,
         None,
     )
     .await?;

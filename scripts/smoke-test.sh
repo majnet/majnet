@@ -277,7 +277,17 @@ has '"stdout":"postgres://demo_hellodb_stable:' "$out" \
   || fail "DATABASE_URL missing, or not pointing at the app's own database"
 green "the app got a DATABASE_URL for the same database"
 
-step "5) authorization: the identity header decides what you may do"
+# The audit trail has to survive failure, or it is not one: a command the
+# reconciler could not finish reading is still a command that ran (Docker cannot
+# cancel an exec), and a rejected statement is what probing looks like. Provoke
+# one of each so step 7 can check they were recorded.
+step "5) failures are audited too, not just successes"
+api_post "$EXEC" '{"cmd":["sh","-c","exit 3"]}' >/dev/null
+code=$(api_status "/api/sql/$PROJECT/stable/$DBAPP" '{"sql":"SELECT * FROM does_not_exist"}')
+[[ $code != 2* ]] || fail "a bad statement was reported as success (HTTP $code)"
+green "a rejected statement is refused"
+
+step "6) authorization: the identity header decides what you may do"
 DEV=dev@smoke.invalid
 PADMIN=admin@smoke.invalid
 PLATFORM=platform@smoke.invalid
@@ -317,12 +327,12 @@ green "platform admin passes the project gate"
 denied "an unknown tailnet login is refused" \
   "$(api_status_as "nobody@smoke.invalid" "/api/exec/$PROJECT/stable/$APP" "$READ")"
 
-step "6) GC: manifests removed from git → containers removed"
+step "7) GC: manifests removed from git → containers removed"
 rm "$SNAP/$PROJECT/ops/env/stable/$APP.yaml" "$SNAP/$PROJECT/ops/env/stable/$DBAPP.yaml"
 notify
 wait_for 60 "app container gone" app_gone
 
-step "7) event log tells the story"
+step "8) event log tells the story"
 events=$(curl -fs "http://$LISTEN/api/events?limit=100")
 has '"action":"converge hello"' "$events" && green "converge events recorded"
 has '"action":"gc"' "$events" && green "gc event recorded"
@@ -336,6 +346,10 @@ green "exec and sql are audited"
 has 'by smoke-dev' "$events" || fail "an identified call was audited as someone else"
 has 'by smoke-admin' "$events" || fail "the admin write was not attributed"
 green "identified calls are audited under the caller's name"
+# The claim is "every call is audited", so the failures have to be there too.
+has 'exit 3' "$events" || fail "a non-zero exec exit was not recorded"
+has 'FAILED:' "$events" || fail "a rejected statement left no audit trail"
+green "failed calls are audited as well as successful ones"
 
 echo
 green "SMOKE TEST PASSED — converge→blue-green→exec→sql→roles→GC all work against real Docker"

@@ -36,9 +36,6 @@ pub struct ExecArgs {
     /// Run the command through `sh -c` instead of executing argv directly.
     #[arg(long)]
     pub shell: bool,
-    /// Run as this user inside the container.
-    #[arg(long)]
-    pub user: Option<String>,
     /// Working directory inside the container.
     #[arg(long)]
     pub workdir: Option<String>,
@@ -85,10 +82,12 @@ pub async fn exec(app: &App, args: &ExecArgs) -> Result<()> {
         other => other.map(str::to_string),
     };
 
+    // No `user`: the command runs as the image's user. Letting a caller pick
+    // one would let a project developer run as root in the app container, which
+    // is escalation past what the app itself runs as (see reconciler run.rs).
     let body = json!({
         "cmd": cmd,
         "stdin": stdin,
-        "user": args.user,
         "workdir": args.workdir,
     });
     let result: Value = app

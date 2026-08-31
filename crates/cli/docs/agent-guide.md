@@ -138,7 +138,9 @@ majnet exec demo api -c production --yes -- printenv APP_VERSION
 ```
 
 - Argv is executed directly — no shell — unless `--shell` is passed.
-- `--user` and `--workdir` map to the container exec options.
+- `--workdir` maps to the container exec option. There is no `--user`: the
+  command runs as the image's user, deliberately — picking one would let a
+  developer run as root in the app container, past what the app itself runs as.
 - Output is capped at 1 MiB; the CLI says so on stderr when it truncates.
 - One command has 120 seconds.
 - **Exit code is the container's.** `majnet exec … -- test -f /app/x` is safe in
