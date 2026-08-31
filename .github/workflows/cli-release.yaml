@@ -56,7 +56,11 @@ jobs:
         run: |
           set -euo pipefail
           name="majnet-${{ matrix.target }}"
-          install -Dm755 "target/${{ matrix.target }}/release/majnet" "dist/$name/majnet"
+          # `mkdir -p` then plain `install`: `install -D` is GNU coreutils only,
+          # and the macOS runners ship BSD install, which silently does not
+          # create the parent and then fails writing its temp file there.
+          mkdir -p "dist/$name"
+          install -m 0755 "target/${{ matrix.target }}/release/majnet" "dist/$name/majnet"
           cp crates/cli/README.md crates/cli/docs/agent-guide.md "dist/$name/"
           tar -czf "$name.tar.gz" -C dist "$name"
           # Checksums travel with the archive; the installer verifies them, so a
