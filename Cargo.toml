@@ -9,7 +9,9 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+# Bumped for the cli-v0.1.1 release. Shared across the workspace, which is
+# accurate here: the reconciler changed in the same fix (#149), not just the CLI.
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
 authors = ["Ondrej Maxa"]
