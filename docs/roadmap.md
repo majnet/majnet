@@ -2,23 +2,35 @@
 
 Phased plan from the design doc (§19), tracked here as the implementation progresses.
 
-## Phase 0 — Foundations 🚧 (current)
+> **The platform is live.** Verified 2026-08-31: all three nodes provisioned and
+> reachable (`main`/`prod`/`private`), five project orgs onboarded with 21 apps
+> deployed, private GHCR images pulling on the nodes, both class age keys
+> decrypting secrets, public traffic served through Cloudflare, and the control
+> plane self-updating from its pinned version.
+>
+> Read the unchecked boxes below as *specific things not yet confirmed*, not as
+> "the platform does not exist yet" — several of them stayed unticked long after
+> the capability was working, and that framing has already misled a reader into
+> asserting there was no infrastructure at all. Anything genuinely unverifiable
+> from outside says what would prove it.
 
-Tooling ✅ / infra provisioning ⏳:
+## Phase 0 — Foundations ✅ (live)
+
+Tooling ✅ / infra provisioning ✅:
 
 - [x] Node bootstrap tooling: WireGuard mesh, Docker APIs bound to WG IPs + mTLS, node roles, PKI (`bootstrap/`)
 - [x] Firewall tooling: nftables per role, prod 80/443 from Cloudflare ranges w/ weekly refresh (`bootstrap/steps/40`)
 - [x] `edge-main` Traefik + hello-world manifests (`platform-seed/platform/`)
 - [x] Platform repo seed: nodes.yaml, people.yaml, projects.yaml, ACL template (`platform-seed/`)
 - [x] `majnet` CLI (`crates/cli`): originally read-only access to the internal API (grown into the full client in phase 5 — ADR 0029) — `events`, `nodes`, `projects`, `apps`, `releases`, `control-plane`, `whoami`. Makes the fleet diagnosable without a browser. Refuses non-JSON responses, because the dashboard's `/api` serves its SPA shell (HTTP 200 `text/html`) when Tailscale identity is unresolved rather than 401-ing — a fallthrough that has already made a probe look successful when it wasn't. Reaches the WG-internal listener, so it runs on the main node or a WG peer
-- [ ] Provision the 3 Debian nodes + run bootstrap (needs servers, WG pubkey exchange, Docker PKI distribution)
-- [ ] Tailscale org + paste rendered base ACL
+- [x] Provision the 3 Debian nodes + run bootstrap — `main` 10.88.0.1, `prod` 10.88.0.2, `private` 10.88.0.3; all three reachable over the WG mesh and reporting metrics (confirmed 2026-08-31)
+- [ ] Tailscale org + paste rendered base ACL — the tailnet itself is live (identity resolves end to end through the front door). Outstanding only in that ACL *management* is opt-in and off by default (`ts_manage_acl`, phase 5), so the policy is hand-managed; proof would be enabling it and seeing the generated tag-based policy applied without locking anyone out
 - [x] Create root org `majksa-platform` on GitHub (done 2026-07-07, id 300856753 — the one manual §2 step; the wizard's seed step pushes `platform-seed/` as the `platform` repo)
-- [ ] Cloudflare: origin cert on prod node, proxied DNS record → hello-world reachable publicly
+- [x] Cloudflare: origin cert on prod node, proxied DNS record → public traffic served (confirmed 2026-08-31: `https://sideline.cz` → HTTP 200 via Cloudflare to the prod node's `edge-main`). The original hello-world probe was retired in phase 5; a real project host proves the same path
 
-## Phase 1 — Bot MVP 🚧
+## Phase 1 — Bot MVP ✅ (live)
 
-Code ✅ / live wiring ⏳:
+Code ✅ / deployed ✅ — one payload detail still unconfirmed:
 
 - [x] GitHub App: JWT auth, per-org installation token cache (`bot/src/github.rs`)
 - [x] Webhook server: HMAC verification, delivery dedup, event dispatch (`bot/src/webhooks.rs`)
@@ -26,12 +38,12 @@ Code ✅ / live wiring ⏳:
 - [x] Repo access proxy: `GET /api/snapshot/{org}/{repo}/{branch}` — SHA-cached tarballs on the WG-internal listener (`bot/src/proxy.rs`)
 - [x] Reconciler notify on `env/*` + platform pushes (best-effort; drift poll backs it up)
 - [x] GHA workflow templates: `rust-service`, `web-app` (test → GHCR by digest)
-- [ ] Register the GitHub App (key, webhook secret, events per `crates/bot/README.md`) and deploy the bot to the main node
-- [ ] Verify the `registry_package` payload digest path against a real delivery (ADR 0001 caveat)
+- [x] Register the GitHub App and deploy the bot to the main node — running on `main`; five orgs report `onboarded: true`, which requires both the installed App and a reachable `ops` repo
+- [ ] Verify the `registry_package` payload digest path against a real delivery (ADR 0001 caveat) — digest bumps are landing in practice, but nobody has read a raw delivery payload to confirm the digest is taken from the field ADR 0001 assumes rather than one that happens to agree
 
-## Phase 2 — Reconciler MVP 🚧
+## Phase 2 — Reconciler MVP ✅ (live)
 
-Code ✅ / live verification ⏳:
+Code ✅ / verified against the real fleet ✅:
 
 - [x] Manifest schema v1 + strict validation + base ⊕ overlay merge (`common/src/{manifest,merge}.rs`)
 - [x] Rendering: ops `main` push → full-tree render PRs onto `env/*`; stable auto-merges, production waits for admin review (`bot/src/render.rs`)
@@ -39,30 +51,30 @@ Code ✅ / live verification ⏳:
 - [x] Blue-green: migrations → health-gated rollout, old container survives failed deploys (ADR 0002, `reconciler/src/deploy.rs`)
 - [x] SOPS decrypt (sops subprocess + class age key) → tmpfs delivery via helper container, ro-mounted at `/run/secrets` (`reconciler/src/secrets.rs`)
 - [x] Removed-app GC (deletions only when config gone from git) + SQLite event log tagged with causing commit
-- [ ] End-to-end verification against a real node (needs phase 0 infra): render PR → merge → converge → hello-world serving
-- [ ] Private GHCR pull auth on nodes (bootstrap-level `docker login`; reconciler stays credential-free)
+- [x] End-to-end verification against real nodes: render PR → merge → converge → serving. 21 apps deployed across `production`/`stable`/`testing`, health-gated, with blue-green keeping the previous container on a failed rollout (observed doing exactly that on 2026-08-31)
+- [x] Private GHCR pull auth on nodes (bootstrap-level `docker login`; reconciler stays credential-free) — 21 private `ghcr.io/*` images running across the fleet
 
-## Phase 3 — Org management 🚧
+## Phase 3 — Org management ✅ (live)
 
-Code ✅ / live wiring ⏳:
+Code ✅ / five orgs onboarded — split DNS still manual:
 
 - [x] Registry-gated discovery: App installed ∧ listed in `projects.yaml`; listed-but-uninstalled logs "pending" (`bot/src/org_sync.rs`)
 - [x] Org reconciliation loop (hourly + on config pushes): ops repo + scaffold, app repos from `repo-templates/` with `{{app}}`/`{{org}}` placeholders, archive-on-removal, branch protection (`env/production` review gate, app `main` build check), `admins`/`developers` teams + membership
 - [x] Tailscale sync: ACL policy rendered from people.yaml + project members, pushed via API; one-shot tagged auth keys minted for ingresses over the WG-internal API (`bot/src/tailscale.rs`)
 - [x] Per-project ingress: Traefik + tailscale sidecar (shared netns, state volume, docker-provider constraint on `majnet.project`) ensured by the reconciler on the private node (`reconciler/src/ingress.rs`)
-- [ ] Split DNS for `*.<project>.majksa.net` on the tailnet (Tailscale admin: DNS → split DNS pointing at the project ingress IPs; automate later)
-- [ ] Live verification: real org onboarding end-to-end (create org → install App → registry line → repos/teams/ACLs appear)
+- [ ] Split DNS for `*.<project>.majksa.net` on the tailnet (Tailscale admin: DNS → split DNS pointing at the project ingress IPs; automate later) — proof: resolving a project host from a tailnet peer without a hosts-file entry
+- [x] Live verification: real org onboarding end-to-end — five orgs onboarded (`majksa-projects`, `majnet`, `sideline-cz`, `withzyme`, `majksa-ops`)
 
-## Phase 4 — Environment classes 🚧
+## Phase 4 — Environment classes ✅ (live)
 
-Code ✅ / live wiring ⏳:
+Code ✅ / all three classes converging — the GC tail unobserved:
 
 - [x] Promote flow: `POST /api/promote/{org}/{app}` copies the stable digest into the production overlay on ops `main`; the gated `env/production` render PR follows automatically (`bot/src/promote.rs`)
 - [x] Ephemeral lifecycle: `pr-N` GHCR build → generated manifest (base ⊕ ephemeral overlay ⊕ PR patch) committed directly onto `env/ephemeral` (ADR 0003) → preview-URL PR comment (updated in place); PR close removes the manifest (`bot/src/ephemeral.rs`)
 - [x] Ephemeral GC: 48 h grace after manifest removal, 7 d hard TTL enforced even while a manifest lingers; SQLite tracking (`reconciler/src/gc.rs`)
 - [x] Reconciler converges all three classes; `age-production`/`age-stable` class keys already wired (§14)
-- [ ] Generate the two class age keys + distribute (`age-keygen`; reconciler `MAJNET_AGE_KEY_DIR`)
-- [ ] Live verification: PR → preview URL → close → grace GC observed end-to-end
+- [x] Generate the two class age keys + distribute — both in use: `production` and `stable` secrets decrypt for a live app (confirmed 2026-08-31)
+- [ ] Live verification: PR → preview URL → close → grace GC observed end-to-end — previews are being generated (open PR manifests on `env/ephemeral`), but the tail of the lifecycle (48 h grace, then GC) has not been watched through to the end
 
 ## Phase 5 — Data & polish 🚧
 
@@ -97,7 +109,7 @@ Code ✅ / remaining ⏳:
 - [x] Draft releases (**ADR 0009** follow-up): review-gated cuts. On each push to an app repo's `main` the bot prepares a **draft** — the proposed next version + a generated changelog (conventional commits grouped into Breaking/Features/Fixes/Other) — stored per repo (repo-wide for a monorepo) and shown on the dashboard Releases page with editable notes. Submitting (`POST …/draft/submit`, admin) tags the repo and runs the existing cut→CI→record flow; the changelog is persisted and shown per release. Nothing auto-releases — the draft waits for an operator. Endpoints: `GET/DELETE …/draft`, `POST …/draft/refresh`, `PUT …/draft/notes`, `POST …/draft/submit`
 - [x] Per-app resource limits: `resources: { memory, cpus }` in the manifest → applied to the container's Docker `HostConfig` (memory / nano_cpus); editable in the manifest form, surfaced as usage-vs-limit in `/nodes`
 - [x] **Installable `majnet` CLI (ADR 0029):** the phase-0 read-only tool grown into the whole API from a laptop — status/events/logs/ps/metrics/manifests/members/secrets, deploys (promote, render-PR merge/close, rollback, restart), releases (drafts, cut, promote), an interactive shell over the ADR 0016 terminal WebSocket, `exec`, and `sql`. **No token**: identity is the caller's Tailscale device, resolved at the dashboard's front door, so the roles granted in the UI are the CLI's roles. Distinguishes *human* / *`infra`* / *not-the-API* rather than rendering an unresolved identity as a name, and turns the dashboard's HTTP-200-`text/html` SPA fallthrough into a loud error. Two new reconciler endpoints back it (`POST /api/exec/…`, `POST /api/sql/…` + `GET /api/db/…`), gated like `/api/logs` and audited; SQL connects as the app's own DB role and is read-only unless `--write` (project admin). Ships as cross-compiled release binaries (`scripts/install-cli.sh`, `.github/workflows/cli-release.yaml`) and inside the control-plane image. Self-documenting for agents: `majnet agent-guide`, `--install` writes it into a repo as a Claude Code skill
-- [ ] First weekly restore test actually performed
+- [ ] First weekly restore test actually performed — backups run on a timer; nobody has restored one and checked the data
 
 ## Phase 6 — One-line auto-provisioning (Coolify-style install) 🚧
 
