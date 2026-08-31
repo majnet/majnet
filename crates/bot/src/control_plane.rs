@@ -228,6 +228,24 @@ fn commit_eq(a: &str, b: &str) -> bool {
 
 /// Resolve the latest main build: the source `main` HEAD + each image's
 /// `sha-<HEAD>` digest.
+/// How far back to look for a commit whose images exist. Generous: a run of
+/// docs-only commits is normal, and the cost of each step is two HEAD-ish GETs
+/// against GHCR.
+const LATEST_LOOKBACK: usize = 25;
+
+/// The newest commit on the source repo's `main` that has **published images**.
+///
+/// Not simply `main`'s HEAD. `images.yaml` is path-filtered (`crates/**`,
+/// `Cargo.*`, `Dockerfile`, `dashboard/**`), so a docs-only or CI-only commit
+/// publishes nothing — and when such a commit is HEAD, resolving only HEAD
+/// fails, the status reports `latest: null` + `latest_building: true`, and the
+/// whole update path goes dark until somebody happens to land a code change.
+/// That is a lie of omission: a newer deployable build usually *does* exist, one
+/// or two commits down.
+///
+/// So walk back from HEAD and return the first commit whose control-plane *and*
+/// dashboard images both resolve. `latest_building` then means what it says —
+/// nothing in recent history is published yet, i.e. CI really is still building.
 async fn resolve_latest(state: &AppState, src_org: &str, src_repo: &str) -> Result<Pin> {
     let client = state.github.org_client(src_org).await?;
     let head =
@@ -235,21 +253,95 @@ async fn resolve_latest(state: &AppState, src_org: &str, src_repo: &str) -> Resu
             .await?
             .context("source repo has no main branch")?;
     let (user, pass) = crate::proxy::ghcr_credential(state, src_org).await?;
-    let tag = format!("sha-{head}");
     let cp_name = format!("{src_repo}/control-plane");
     let dash_name = format!("{src_repo}/dashboard");
-    let image = crate::registry::resolve_digest(&state.http, src_org, &cp_name, &tag, &user, &pass)
-        .await
-        .context("resolving control-plane digest")?;
-    let dashboard =
-        crate::registry::resolve_digest(&state.http, src_org, &dash_name, &tag, &user, &pass)
-            .await
-            .context("resolving dashboard digest")?;
-    Ok(Pin {
-        git_ref: head,
-        image: Some(image),
-        dashboard: Some(dashboard),
-    })
+
+    let mut first_error = None;
+    for sha in recent_commits(state, src_org, src_repo, &head, LATEST_LOOKBACK).await? {
+        let tag = format!("sha-{sha}");
+        let image =
+            crate::registry::resolve_digest(&state.http, src_org, &cp_name, &tag, &user, &pass)
+                .await;
+        let dashboard =
+            crate::registry::resolve_digest(&state.http, src_org, &dash_name, &tag, &user, &pass)
+                .await;
+        match (image, dashboard) {
+            (Ok(image), Ok(dashboard)) => {
+                if sha != head {
+                    tracing::info!(
+                        %head, chosen = %sha,
+                        "control-plane latest: HEAD publishes no images (docs-only?), using the newest built commit"
+                    );
+                }
+                return Ok(Pin {
+                    git_ref: sha,
+                    image: Some(image),
+                    dashboard: Some(dashboard),
+                });
+            }
+            (image, dashboard) => {
+                // Keep the *newest* failure: it is the one that explains why
+                // HEAD itself is not deployable, which is what an operator asked.
+                if first_error.is_none() {
+                    let e = image
+                        .err()
+                        .map(|e| e.context("resolving control-plane digest"))
+                        .or_else(|| {
+                            dashboard
+                                .err()
+                                .map(|e| e.context("resolving dashboard digest"))
+                        });
+                    first_error = e;
+                }
+            }
+        }
+    }
+    Err(first_error
+        .unwrap_or_else(|| anyhow::anyhow!("no commit in the last {LATEST_LOOKBACK} has images")))
+}
+
+/// `head` followed by its ancestors on `main`, newest first, at most `limit`.
+///
+/// `head` is yielded even if the listing call fails, so a GitHub hiccup degrades
+/// to the old HEAD-only behaviour rather than reporting nothing at all.
+async fn recent_commits(
+    state: &AppState,
+    org: &str,
+    repo: &str,
+    head: &str,
+    limit: usize,
+) -> Result<Vec<String>> {
+    let client = state.github.org_client(org).await?;
+    let listed: Result<serde_json::Value, _> = client
+        .get(
+            format!("/repos/{org}/{repo}/commits?sha=main&per_page={limit}"),
+            None::<&()>,
+        )
+        .await;
+    let listed = match listed {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("could not list recent commits ({e}) — falling back to HEAD only");
+            serde_json::Value::Null
+        }
+    };
+    Ok(order_candidates(head, &listed, limit))
+}
+
+/// The pure half of `recent_commits`: HEAD first, then the listed ancestors,
+/// no duplicates, capped. Separated so the ordering is testable — getting it
+/// wrong would silently pin an *older* build than the newest available one.
+fn order_candidates(head: &str, listed: &serde_json::Value, limit: usize) -> Vec<String> {
+    let mut out = vec![head.to_string()];
+    for c in listed.as_array().into_iter().flatten() {
+        if let Some(sha) = c["sha"].as_str() {
+            if !sha.is_empty() && !out.iter().any(|s| s == sha) {
+                out.push(sha.to_string());
+            }
+        }
+    }
+    out.truncate(limit.max(1));
+    out
 }
 
 /// The source commits in `base..head` (newest first, capped), plus a GitHub
@@ -519,6 +611,39 @@ fn pin_label(p: &ControlPlanePin) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// HEAD must come first, and must not repeat when the listing includes it —
+    /// otherwise the walk-back probes the same commit twice and, worse, an
+    /// ordering slip would pin an older build than the newest available.
+    #[test]
+    fn candidates_put_head_first_and_dedupe_it() {
+        let listed = serde_json::json!([
+            {"sha": "aaa"}, {"sha": "bbb"}, {"sha": "ccc"}
+        ]);
+        assert_eq!(
+            super::order_candidates("aaa", &listed, 10),
+            vec!["aaa", "bbb", "ccc"]
+        );
+        // HEAD absent from the listing (a fresh push GitHub has not indexed yet).
+        assert_eq!(
+            super::order_candidates("zzz", &listed, 10),
+            vec!["zzz", "aaa", "bbb", "ccc"]
+        );
+    }
+
+    /// A failed listing degrades to HEAD-only — the old behaviour — rather than
+    /// to an empty candidate set, which would report "nothing is built".
+    #[test]
+    fn candidates_survive_a_missing_listing_and_respect_the_cap() {
+        assert_eq!(
+            super::order_candidates("head", &serde_json::Value::Null, 25),
+            vec!["head"]
+        );
+        let listed = serde_json::json!([{"sha": "a"}, {"sha": "b"}, {"sha": "c"}]);
+        assert_eq!(super::order_candidates("h", &listed, 2), vec!["h", "a"]);
+        // A zero cap would make the loop probe nothing at all; floor it at one.
+        assert_eq!(super::order_candidates("h", &listed, 0), vec!["h"]);
+    }
+
     use super::*;
 
     #[test]
