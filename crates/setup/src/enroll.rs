@@ -328,7 +328,58 @@ async fn push_payload(config: &Config, host: &str) -> Result<()> {
     )
     .await
     .context("pushing bootstrap payload")?;
+    stamp_payload_ref(config, host).await;
     Ok(())
+}
+
+/// Record which commit the pushed `bootstrap/` payload came from.
+///
+/// The payload arrives as a tarball, so the node has no `.git` — `git -C
+/// /opt/majnet rev-parse HEAD` there fails with "not a git repository", and
+/// nothing on the node can say which ref its bootstrap scripts are. That
+/// matters because `bootstrap.sh` sources whatever is in `steps/`: run it
+/// against a stale payload and it re-applies the old config, exits 0, and
+/// prints `done.` A merged fix can be "applied" repeatedly without landing.
+///
+/// `bootstrap.sh` reads this file and prints it, so the provenance is visible
+/// at the moment it matters rather than inferable only by diffing the artefact
+/// the step was supposed to write.
+///
+/// Best-effort: enrollment must not fail because a stamp could not be written.
+/// A missing stamp is itself reported by `bootstrap.sh` as unknown provenance,
+/// which is the honest answer.
+async fn stamp_payload_ref(config: &Config, host: &str) {
+    let rev = local_sh(
+        &format!(
+            "git -C '{}' rev-parse HEAD 2>/dev/null",
+            config.repo_dir.display()
+        ),
+        "",
+        30,
+    )
+    .await
+    .map(|s| s.trim().to_string())
+    .unwrap_or_default();
+
+    if rev.is_empty() {
+        tracing::warn!(
+            "could not read a git rev for {} — node payload will report unknown provenance",
+            config.repo_dir.display()
+        );
+        return;
+    }
+
+    if let Err(e) = exec_with_stdin(
+        config,
+        host,
+        "install -D -m 0644 /dev/stdin /opt/majnet/bootstrap/.payload-ref",
+        &rev,
+        30,
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "could not stamp the payload ref on {host}");
+    }
 }
 
 /// Write a root-owned 0600 file on the node.
