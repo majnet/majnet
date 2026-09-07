@@ -19,6 +19,38 @@ load_config
 
 log "bootstrapping node '$NODE_NAME' (role: $NODE_ROLE)"
 
+# Which payload is this? `bootstrap.sh` sources whatever is in `steps/`, so a
+# stale tree re-applies the old config, exits 0, and prints "done." — a merged
+# fix can be "applied" several times without ever landing, and the only way to
+# tell is to inspect whatever the step was supposed to write.
+#
+# Two provenance sources, because a node has neither reliably:
+#   - `main` is a git checkout (majnet-update fetches the pinned ref there)
+#   - enrolled nodes get a tarball, so no .git — `enroll.rs` writes
+#     `.payload-ref` instead
+# Neither present means nobody knows what this tree is, which is worth saying
+# out loud rather than leaving to be discovered.
+payload_ref() {
+  local rev
+  if rev=$(git -C . rev-parse --short HEAD 2>/dev/null) && [[ -n $rev ]]; then
+    printf 'git %s' "$rev"
+    git -C . diff --quiet 2>/dev/null || printf ' (dirty)'
+    return
+  fi
+  if [[ -f .payload-ref ]]; then
+    printf 'pushed %s' "$(cut -c1-12 < .payload-ref)"
+    return
+  fi
+  return 1
+}
+if ref=$(payload_ref); then
+  log "payload: $ref"
+else
+  warn "payload provenance UNKNOWN — no .git and no .payload-ref."
+  warn "  This tree may predate a fix you believe is applied; bootstrap.sh"
+  warn "  cannot tell. Verify whatever the step writes, not just its exit code."
+fi
+
 steps=(steps/*.sh)
 if (($#)); then
   selected=()
