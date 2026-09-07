@@ -10,3 +10,4 @@ Operational procedures, driven by the failure modes in the design doc (§17). Ta
 | [secret-rotation.md](secret-rotation.md) | App secrets, personal keys, platform class keys, DB master key |
 | [restore-test.md](restore-test.md) | Weekly restic restore verification |
 | [github-outage.md](github-outage.md) | Pipeline paused; workloads unaffected; what not to do |
+| [node-disk-full.md](node-disk-full.md) | Node at 100%: containers die, converges fail; safe reclaim and the one flag never to use |
