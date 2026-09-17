@@ -60,9 +60,23 @@ main() {
   target=$(git -C "$DIR" rev-parse FETCH_HEAD)
   if [[ $current != "$target" ]]; then
     log "source $current → $target ($ref)"
-    git -C "$DIR" checkout -q "$target"
     changed=1
   fi
+  # $DIR is a deployment checkout, not a workspace: the pin always wins. A plain
+  # `checkout` refuses when a tracked file it must touch was hand-edited, and
+  # `set -e` then aborts every run *before* the pull — so one stray edit wedges
+  # the node on its old control plane until someone reads the journal. That is
+  # not hypothetical: a hotfix pasted onto main during an incident, byte-identical
+  # to the commit that later carried it, still blocked the next pin for a day.
+  # Untracked files are left alone (`-uno`); only tracked drift is discarded, and
+  # it is logged, because that log line is the sole trace it ever existed.
+  local drift
+  drift=$(git -C "$DIR" status --porcelain -uno)
+  if [[ -n $drift ]]; then
+    log "discarding local drift in $DIR:"
+    printf '%s\n' "$drift" | sed 's/^/[majnet-update]   /'
+  fi
+  git -C "$DIR" checkout -q --force "$target"
 
   # Persist the image refs next to the compose file so ad-hoc operator commands
   # (`docker compose -f deploy/compose.yaml ps/logs/down`) interpolate without
