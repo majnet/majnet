@@ -196,10 +196,7 @@ async fn do_status(state: &AppState) -> Result<Status> {
 
     // Running-vs-pinned: the honest "converged / still rolling" signal.
     let running = Running::from_env();
-    let converged = running
-        .commit
-        .as_deref()
-        .map(|rc| commit_eq(rc, current.git_ref.trim()));
+    let converged = is_converged(state, &src_org, &src_repo, &running, &current).await;
 
     Ok(Status {
         current,
@@ -219,11 +216,62 @@ async fn do_status(state: &AppState) -> Result<Status> {
     })
 }
 
-/// Two commit refs describe the same commit if either is a prefix of the other
-/// (a full sha vs a short sha), compared on ≥7 chars.
-fn commit_eq(a: &str, b: &str) -> bool {
-    let n = 7.min(a.len()).min(b.len());
-    n >= 7 && a[..n].eq_ignore_ascii_case(&b[..n])
+/// Has the node applied the pin?
+///
+/// Comparing the running build's commit against the pinned *ref* is wrong
+/// whenever a pin's two legs move independently — and they routinely do.
+/// `images.yaml` is path-filtered (`crates/**`, `Cargo.*`, `Dockerfile`,
+/// `dashboard/**`), so a commit touching only `bootstrap/**` or `docs/**`
+/// publishes no images and ships by the git ref alone. Pinning one of those
+/// leaves the containers legitimately on an older build, and a ref comparison
+/// then reports "rolling out" forever: a rollout that finished seconds after
+/// the pin and can never produce a matching build. 2655a3c did exactly that —
+/// applied on the node in 3s, "Rolling out" on the page for four days.
+///
+/// So ask the question the bot can actually answer about itself. It knows which
+/// commit it was built from; the registry maps that to the image it was
+/// published as; the pin names an image. Converged iff those two images agree.
+/// A ref-only pin is converged the moment the node checks the ref out, and an
+/// image pin still reads false until the node swaps containers.
+///
+/// `None` — rendered as its own "unknown" state, never as "no" — when the build
+/// baked no commit, when the pin is tag-pinned rather than digest-pinned (a tag
+/// cannot identify a build), or when the registry lookup fails. Guessing here
+/// sends someone chasing a rollout that is fine.
+async fn is_converged(
+    state: &AppState,
+    src_org: &str,
+    src_repo: &str,
+    running: &Running,
+    pinned: &Pin,
+) -> Option<bool> {
+    let (commit, pinned_image) = comparable(running.commit.as_deref(), pinned.image.as_deref())?;
+    let (user, pass) = crate::proxy::ghcr_credential(state, src_org)
+        .await
+        .map_err(|e| tracing::warn!("converged check: no GHCR credential: {e:#}"))
+        .ok()?;
+    let name = format!("{src_repo}/control-plane");
+    let tag = format!("sha-{commit}");
+    let running_image =
+        crate::registry::resolve_digest(&state.http, src_org, &name, &tag, &user, &pass)
+            .await
+            .map_err(|e| tracing::warn!("converged check: resolving {tag}: {e:#}"))
+            .ok()?;
+    Some(running_image == pinned_image)
+}
+
+/// Both halves of the converged comparison, or `None` when the question is
+/// unanswerable: a build that baked no commit, or a pin naming a tag rather
+/// than a digest (a tag cannot identify which build is running). Split out so
+/// the guards are testable without a registry — answering `Some(false)` where
+/// the honest answer is "unknown" is the exact failure this function prevents.
+fn comparable<'a>(
+    commit: Option<&'a str>,
+    pinned_image: Option<&'a str>,
+) -> Option<(&'a str, &'a str)> {
+    let commit = commit?.trim();
+    let pinned_image = pinned_image?.trim();
+    (!commit.is_empty() && pinned_image.contains("@sha256:")).then_some((commit, pinned_image))
 }
 
 /// Resolve the latest main build: the source `main` HEAD + each image's
@@ -676,16 +724,29 @@ mod tests {
     }
 
     #[test]
-    fn commit_eq_matches_short_and_full() {
-        assert!(commit_eq(
-            "f31e9b6c86b44d18501ee02b00ae451ad9d5ae8e",
-            "f31e9b6"
-        ));
-        assert!(commit_eq("f31e9b6", "f31e9b6c86b44d18501ee02b"));
-        assert!(commit_eq("ABCDEF1234", "abcdef1"));
-        assert!(!commit_eq("f31e9b6", "81867c8"));
-        // Too short to be confident.
-        assert!(!commit_eq("f31e9", "f31e9"));
+    fn comparable_needs_a_commit_and_a_digest_pin() {
+        let digest = "ghcr.io/majnet/majnet/control-plane@sha256:ef5ad75";
+        let img = Some(digest);
+        assert_eq!(comparable(Some("98b9ced"), img), Some(("98b9ced", digest)));
+        // Whitespace from a sloppily-baked env var is not a different commit.
+        assert_eq!(
+            comparable(Some("  98b9ced \n"), img),
+            Some(("98b9ced", digest))
+        );
+
+        // Unanswerable — must be "unknown", never "not converged".
+        assert_eq!(comparable(None, img), None, "pre-metadata build");
+        assert_eq!(comparable(Some(""), img), None, "empty baked commit");
+        assert_eq!(comparable(Some("   "), img), None, "blank baked commit");
+        assert_eq!(comparable(Some("98b9ced"), None), None, "pin has no image");
+        assert_eq!(
+            comparable(
+                Some("98b9ced"),
+                Some("ghcr.io/majnet/majnet/control-plane:latest")
+            ),
+            None,
+            "a tag cannot identify which build is running"
+        );
     }
 
     #[test]
