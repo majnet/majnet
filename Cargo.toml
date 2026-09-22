@@ -9,9 +9,10 @@ members = [
 ]
 
 [workspace.package]
-# Bumped for the cli-v0.1.1 release. Shared across the workspace, which is
-# accurate here: the reconciler changed in the same fix (#149), not just the CLI.
-version = "0.1.1"
+# Bumped for the cli-v0.1.2 release. Shared across the workspace, which is
+# accurate here: the disk work (#161, #162) changed the reconciler and the CLI
+# together — the node `disk` column is only useful once both ends have it.
+version = "0.1.2"
 edition = "2021"
 license = "MIT"
 authors = ["Ondrej Maxa"]
