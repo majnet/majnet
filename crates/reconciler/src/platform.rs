@@ -985,6 +985,32 @@ async fn remove_container(docker: &Docker, name: &str) {
         .await;
 }
 
+/// Every image the reconciler runs on a node's behalf, for the image-reclamation
+/// protected set (`images::protected_images`).
+///
+/// Read from the constants and `engine_spec` above rather than restated in
+/// `images`, so bumping `postgres:17` or `traefik:v3.6` can't leave the old tag
+/// protected and the new one exposed. A DB engine matters most here: reclaiming
+/// its image on a node under disk pressure means the next `ensure_engine` has to
+/// pull ~400 MB onto a disk that just filled.
+pub(crate) fn platform_images(db_root_dir: &str) -> Vec<String> {
+    let mut images = vec![
+        EDGE_IMAGE.to_string(),
+        HELPER_IMAGE.to_string(),
+        ERROR_PAGES_IMAGE.to_string(),
+        ADMINER_IMAGE.to_string(),
+    ];
+    for engine in [
+        DbEngine::Postgres,
+        DbEngine::Mariadb,
+        DbEngine::Valkey,
+        DbEngine::Mongodb,
+    ] {
+        images.push(engine_spec(engine, db_root_dir).image.to_string());
+    }
+    images
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

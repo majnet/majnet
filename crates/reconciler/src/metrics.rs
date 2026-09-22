@@ -5,7 +5,7 @@
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use majnet_common::platform::{Node, NodesFile};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -104,6 +104,8 @@ fn write_history(state: &AppState, nodes: &[NodeMetrics]) {
             n.mem_used,
             n.mem_total,
             n.containers_running,
+            n.disk_used,
+            n.disk_total,
         ) {
             tracing::warn!(error = %format!("{e:#}"), node = n.name, "metric sample write failed");
             continue;
@@ -123,7 +125,7 @@ fn write_history(state: &AppState, nodes: &[NodeMetrics]) {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct NodeMetrics {
     pub name: String,
     pub role: String,
@@ -133,7 +135,14 @@ pub struct NodeMetrics {
     pub host_cpu_pct: f64,
     pub mem_total: i64,
     pub mem_used: i64,
+    /// Bytes of image layers (`docker df`). Useful for *why* a disk is full;
+    /// useless for *whether* it is, which is what `disk_total`/`disk_used` are
+    /// for — this node reported 105 GB of images while nothing in `majnet
+    /// status` could say the filesystem underneath had 0 bytes left.
     pub disk_images: i64,
+    /// Filesystem backing Docker's data root: size and used, in bytes.
+    pub disk_total: i64,
+    pub disk_used: i64,
     pub containers: i64,
     pub containers_running: i64,
     pub server_version: String,
@@ -142,7 +151,19 @@ pub struct NodeMetrics {
     pub apps: Vec<ContainerMetric>,
 }
 
-#[derive(Serialize)]
+impl NodeMetrics {
+    /// Disk usage as a percentage, or 0.0 when the probe did not report a
+    /// filesystem (unreachable node, or a probe that timed out).
+    pub fn disk_pct(&self) -> f64 {
+        if self.disk_total > 0 {
+            self.disk_used as f64 / self.disk_total as f64 * 100.0
+        } else {
+            0.0
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct ContainerMetric {
     pub name: String,
     pub image: String,
@@ -179,6 +200,8 @@ pub async fn gather(state: &AppState) -> Result<Vec<NodeMetrics>> {
             mem_total: 0,
             mem_used: 0,
             disk_images: 0,
+            disk_total: 0,
+            disk_used: 0,
             containers: 0,
             containers_running: 0,
             server_version: String::new(),
@@ -295,20 +318,37 @@ async fn collect(
     }));
     let (apps, host) = tokio::join!(apps_fut, host_probe(&docker));
     m.apps = apps;
-    if let Some((cpu, total, used)) = host {
-        m.host_cpu_pct = cpu;
-        m.mem_used = used;
+    if let Some(h) = host {
+        m.host_cpu_pct = h.cpu_pct;
+        m.mem_used = h.mem_used;
         if m.mem_total == 0 {
-            m.mem_total = total;
+            m.mem_total = h.mem_total;
         }
+        m.disk_total = h.disk_total;
+        m.disk_used = h.disk_used;
     }
     Ok(())
 }
 
-/// Host CPU% + memory, read from `/proc` inside a throwaway busybox container.
+/// What one host probe reports. Bytes throughout.
+pub struct HostProbe {
+    pub cpu_pct: f64,
+    pub mem_total: i64,
+    pub mem_used: i64,
+    pub disk_total: i64,
+    pub disk_used: i64,
+}
+
+/// Host CPU%, memory and disk, read from inside a throwaway busybox container.
 /// On plain Docker (no lxcfs) `/proc/stat` and `/proc/meminfo` reflect the host,
 /// so this needs no host shell, agent, or privileges — just the Docker API.
-/// Returns (cpu_pct, mem_total_bytes, mem_used_bytes).
+///
+/// Disk comes from `df` on the container's own `/`. That is an overlay whose
+/// backing store *is* the filesystem holding Docker's data root, so its size and
+/// used figures are the ones that matter: this is the disk that images fill and
+/// the disk that hit 100% on node `private`. It is also exactly what an operator
+/// sees from `majnet exec <app> -- df -h /`, which is how the outage had to be
+/// diagnosed before this existed.
 ///
 /// Best-effort with a hard internal deadline: the node already answered
 /// `info()`, so a slow host probe must NOT hang `collect()` (its outer timeout
@@ -317,7 +357,7 @@ async fn collect(
 /// and skips the helper's removal below — so we also `auto_remove` the helper
 /// and sweep any orphans up front, making the probe self-healing rather than
 /// leaking a container every slow tick.
-async fn host_probe(docker: &bollard::Docker) -> Option<(f64, i64, i64)> {
+async fn host_probe(docker: &bollard::Docker) -> Option<HostProbe> {
     sweep_helpers(docker).await;
     tokio::time::timeout(Duration::from_secs(8), host_probe_inner(docker))
         .await
@@ -359,7 +399,7 @@ async fn sweep_helpers(docker: &bollard::Docker) {
     }
 }
 
-async fn host_probe_inner(docker: &bollard::Docker) -> Option<(f64, i64, i64)> {
+async fn host_probe_inner(docker: &bollard::Docker) -> Option<HostProbe> {
     use bollard::query_parameters as qp;
     if docker
         .inspect_image(crate::secrets::HELPER_IMAGE)
@@ -382,8 +422,13 @@ async fn host_probe_inner(docker: &bollard::Docker) -> Option<(f64, i64, i64)> {
         })
         .await;
     }
+    // Three `---`-separated sections: meminfo, two /proc/stat samples a second
+    // apart, then the filesystem. `df -k` (not `-h`) so the numbers parse
+    // exactly, and `/` because that overlay is backed by Docker's data-root
+    // filesystem.
     let script = "grep -E '^MemTotal|^MemAvailable' /proc/meminfo; echo ---; \
-                  grep '^cpu ' /proc/stat; sleep 1; grep '^cpu ' /proc/stat";
+                  grep '^cpu ' /proc/stat; sleep 1; grep '^cpu ' /proc/stat; echo ---; \
+                  df -k /";
     let helper = docker
         .create_container(
             None::<qp::CreateContainerOptions>,
@@ -440,8 +485,14 @@ async fn host_probe_inner(docker: &bollard::Docker) -> Option<(f64, i64, i64)> {
     parse_proc(&out.ok()?)
 }
 
-fn parse_proc(s: &str) -> Option<(f64, i64, i64)> {
-    let (mem, cpu) = s.split_once("---")?;
+fn parse_proc(s: &str) -> Option<HostProbe> {
+    let mut sections = s.splitn(3, "---");
+    let mem = sections.next()?;
+    let cpu = sections.next()?;
+    // The `df` section is the one part that may legitimately be missing (an
+    // older probe payload, a busybox without `df`). Disk then reports 0, which
+    // every consumer already reads as "not measured" rather than "empty disk".
+    let disk = sections.next().unwrap_or("");
     let kb = |key: &str| -> Option<i64> {
         mem.lines()
             .find(|l| l.starts_with(key))?
@@ -476,7 +527,35 @@ fn parse_proc(s: &str) -> Option<(f64, i64, i64)> {
     } else {
         0.0
     };
-    Some((cpu_pct, mem_total, mem_used))
+    let (disk_total, disk_used) = parse_df(disk).unwrap_or((0, 0));
+    Some(HostProbe {
+        cpu_pct,
+        mem_total,
+        mem_used,
+        disk_total,
+        disk_used,
+    })
+}
+
+/// `df -k /` output → (total_bytes, used_bytes) for the root filesystem.
+///
+/// Counted from the *right* — `… 1K-blocks Used Available Use% Mounted-on` —
+/// and anchored on a `/` mount point. Counting from the left breaks on the two
+/// shapes df actually produces: a device name long enough to wrap pushes the
+/// numbers onto their own line (so `Used` lands where `1K-blocks` was), and a
+/// device name containing a space shifts every column. Anchoring on the mount
+/// point also skips the header, whose last field is `on`.
+fn parse_df(s: &str) -> Option<(i64, i64)> {
+    s.lines().find_map(|line| {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        let n = f.len();
+        if n < 5 || f[n - 1] != "/" {
+            return None;
+        }
+        let total = f[n - 5].parse::<i64>().ok()?;
+        let used = f[n - 4].parse::<i64>().ok()?;
+        Some((total * 1024, used * 1024))
+    })
 }
 
 /// Docker's container CPU% — the same formula `docker stats` uses, read from the
@@ -507,16 +586,56 @@ fn cpu_percent(v: &serde_json::Value) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_proc;
+    use super::{parse_df, parse_proc};
+
+    const DF: &str = "Filesystem           1K-blocks      Used Available Use% Mounted on\n\
+                      overlay              152672636 149000000   1000000  99% /\n";
 
     #[test]
     fn parses_meminfo_and_cpu_delta() {
         // idle goes 100→160 (Δ60) out of total 200→300 (Δ100) → 40% busy.
         let s = "MemTotal:       1000 kB\nMemAvailable:    400 kB\n---\n\
                  cpu  50 0 50 100 0 0 0 0\ncpu  90 0 50 160 0 0 0 0\n";
-        let (cpu, total, used) = parse_proc(s).unwrap();
-        assert_eq!(total, 1000 * 1024);
-        assert_eq!(used, 600 * 1024);
-        assert!((cpu - 40.0).abs() < 0.01, "cpu={cpu}");
+        let h = parse_proc(s).unwrap();
+        assert_eq!(h.mem_total, 1000 * 1024);
+        assert_eq!(h.mem_used, 600 * 1024);
+        assert!((h.cpu_pct - 40.0).abs() < 0.01, "cpu={}", h.cpu_pct);
+    }
+
+    #[test]
+    fn parses_disk_when_the_probe_reports_it() {
+        let s = format!(
+            "MemTotal:       1000 kB\nMemAvailable:    400 kB\n---\n\
+             cpu  50 0 50 100 0 0 0 0\ncpu  90 0 50 160 0 0 0 0\n---\n{DF}"
+        );
+        let h = parse_proc(&s).unwrap();
+        assert_eq!(h.disk_total, 152_672_636 * 1024);
+        assert_eq!(h.disk_used, 149_000_000 * 1024);
+    }
+
+    #[test]
+    fn a_probe_without_a_df_section_still_reports_cpu_and_memory() {
+        // Disk must degrade on its own — an older payload or a busybox without
+        // `df` cannot be allowed to cost the node its CPU/memory reporting.
+        let s = "MemTotal:       1000 kB\nMemAvailable:    400 kB\n---\n\
+                 cpu  50 0 50 100 0 0 0 0\ncpu  90 0 50 160 0 0 0 0\n";
+        let h = parse_proc(s).unwrap();
+        assert_eq!((h.disk_total, h.disk_used), (0, 0));
+        assert_eq!(h.mem_total, 1000 * 1024);
+    }
+
+    #[test]
+    fn df_skips_the_header_row() {
+        assert_eq!(parse_df(DF), Some((152_672_636 * 1024, 149_000_000 * 1024)));
+    }
+
+    #[test]
+    fn df_handles_a_wrapped_device_name() {
+        // Long device names wrap onto their own line; that line carries no
+        // numbers, so the numeric parse skips it rather than misreading it.
+        let wrapped = "Filesystem 1K-blocks Used Available Use% Mounted on\n\
+                       /dev/mapper/a-very-long-volume-group-name-here\n\
+                       \u{20}         100 40 60 40% /\n";
+        assert_eq!(parse_df(wrapped), Some((100 * 1024, 40 * 1024)));
     }
 }

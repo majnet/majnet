@@ -448,10 +448,21 @@ pub async fn restart_app(ctx: &DeployCtx<'_>, app: &str) -> Result<usize> {
     Ok(restarted)
 }
 
-/// Remove all containers of one app (project + class scoped).
+/// Remove all containers of one app (project + class scoped), and the images
+/// they were running.
 pub async fn remove_app(ctx: &DeployCtx<'_>, app: &str) -> Result<()> {
-    for container in list_app_containers(ctx, app).await? {
-        if let Some(name) = container_name(&container) {
+    let containers = list_app_containers(ctx, app).await?;
+    // Note what these containers run *before* removing them: once the container
+    // is gone its image has no back-reference left, and nothing downstream could
+    // work out that it was ever ours. This is the only place an ephemeral
+    // preview's images are attributable, and skipping it is what filled node
+    // `private` to 100% (see `images`).
+    let images: Vec<String> = containers
+        .iter()
+        .filter_map(|c| c.image_id.clone())
+        .collect();
+    for container in &containers {
+        if let Some(name) = container_name(container) {
             remove_container_if_exists(ctx.docker, &name).await?;
         }
     }
@@ -462,6 +473,11 @@ pub async fn remove_app(ctx: &DeployCtx<'_>, app: &str) -> Result<()> {
         let net = app_network(ctx.project, ctx.class, app);
         let _ = ctx.docker.remove_network(&net).await;
     }
+    // Images last — Docker refuses while a container still references one, so
+    // this only frees anything after the removals above. Best-effort: a sibling
+    // preview built from the same commit legitimately holds the digest, and its
+    // own teardown is what frees it.
+    crate::images::release(ctx.docker, &images).await;
     Ok(())
 }
 
@@ -482,6 +498,7 @@ pub async fn list_class_apps(ctx: &DeployCtx<'_>) -> Result<Vec<String>> {
 pub async fn gc_removed_apps(ctx: &DeployCtx<'_>, rendered_apps: &[String]) -> Result<Vec<String>> {
     let all = list_class_containers(ctx).await?;
     let mut removed = Vec::new();
+    let mut images = Vec::new();
     for container in &all {
         let Some(app) = label(container, LABEL_APP) else {
             continue;
@@ -493,11 +510,19 @@ pub async fn gc_removed_apps(ctx: &DeployCtx<'_>, rendered_apps: &[String]) -> R
             if ctx.dry_run {
                 removed.push(format!("DRY RUN: would remove {name}"));
             } else {
+                // Captured before the removal, for the same reason as in
+                // `remove_app`: afterwards the image is unattributable.
+                if let Some(id) = container.image_id.clone() {
+                    images.push(id);
+                }
                 remove_container_if_exists(ctx.docker, &name).await?;
                 removed.push(name);
             }
         }
     }
+    // A stable/production app whose config left git is gone for good — its image
+    // should not outlive it any more than a preview's should.
+    crate::images::release(ctx.docker, &images).await;
     Ok(removed)
 }
 

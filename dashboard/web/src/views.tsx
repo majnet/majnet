@@ -544,16 +544,21 @@ export function Nodes() {
   const [range, setRange] = useState<number | 'live'>('live')
   // Live: accumulate a rolling ~10-min window client-side. A chosen range:
   // pull persisted history (ADR 0017) instead.
-  const [hist, setHist] = useState<Record<string, { cpu: number[]; mem: number[] }>>({})
+  const [hist, setHist] = useState<Record<string, { cpu: number[]; mem: number[]; disk: number[] }>>({})
   useEffect(() => {
     if (!m.data) return
     setHist((h) => {
       const next = { ...h }
       for (const nd of m.data!) {
         if (!nd.reachable) continue
-        const cur = next[nd.name] ?? { cpu: [], mem: [] }
+        const cur = next[nd.name] ?? { cpu: [], mem: [], disk: [] }
         const memPct = nd.mem_total ? (nd.mem_used / nd.mem_total) * 100 : 0
-        next[nd.name] = { cpu: [...cur.cpu, nd.host_cpu_pct].slice(-60), mem: [...cur.mem, memPct].slice(-60) }
+        const diskPct = nd.disk_total ? (nd.disk_used / nd.disk_total) * 100 : 0
+        next[nd.name] = {
+          cpu: [...cur.cpu, nd.host_cpu_pct].slice(-60),
+          mem: [...cur.mem, memPct].slice(-60),
+          disk: [...cur.disk, diskPct].slice(-60),
+        }
       }
       return next
     })
@@ -562,12 +567,15 @@ export function Nodes() {
   const isLive = range === 'live'
   const histQ = useMetricsHistory(isLive ? 0 : range, !isLive)
   // Per-node series for the charts, from live accumulation or persisted history.
-  const seriesFor = (name: string): { cpu: number[]; mem: number[]; sampleSecs: number } => {
-    if (isLive) return { ...(hist[name] ?? { cpu: [], mem: [] }), sampleSecs: 10 }
+  const seriesFor = (name: string): { cpu: number[]; mem: number[]; disk: number[]; sampleSecs: number } => {
+    if (isLive) return { ...(hist[name] ?? { cpu: [], mem: [], disk: [] }), sampleSecs: 10 }
     const pts = (histQ.data ?? []).filter((p) => p.node === name)
     return {
       cpu: pts.map((p) => p.cpu_pct),
       mem: pts.map((p) => (p.mem_total ? (p.mem_used / p.mem_total) * 100 : 0)),
+      // Samples predating disk recording carry disk_total === 0 and chart as 0
+      // — a flat floor, not a plausible-looking usage line.
+      disk: pts.map((p) => (p.disk_total ? (p.disk_used / p.disk_total) * 100 : 0)),
       sampleSecs: pts.length > 1 ? Math.round((range as number) / (pts.length - 1)) : 60,
     }
   }
@@ -613,6 +621,9 @@ export function Nodes() {
                     <div className="mt-3 grid grid-cols-2 gap-x-6 gap-y-2 text-xs sm:grid-cols-4">
                       <Stat label="CPU" value={`${mm.host_cpu_pct.toFixed(0)}% of ${mm.cpus}`} />
                       <Stat label="Memory" value={`${gb(mm.mem_used)} / ${gb(mm.mem_total)}${mm.mem_total ? ` (${Math.round((mm.mem_used / mm.mem_total) * 100)}%)` : ''}`} />
+                      <Stat label="Disk" value={mm.disk_total
+                        ? `${gb(mm.disk_used)} / ${gb(mm.disk_total)} (${Math.round((mm.disk_used / mm.disk_total) * 100)}%)`
+                        : '—'} />
                       <Stat label="Image disk" value={gb(mm.disk_images)} />
                       <Stat label="Containers" value={`${mm.containers_running}/${mm.containers}`} />
                       <Stat label="Docker" value={mm.server_version} />
@@ -626,6 +637,10 @@ export function Nodes() {
                             format={(p) => `${(p / 100 * mm.cpus).toFixed(1)} of ${mm.cpus} cores`} />
                           <MetricChart label="Memory" values={s.mem} sampleSecs={s.sampleSecs}
                             format={(p) => `${gb((p / 100) * mm.mem_total)} of ${gb(mm.mem_total)}`} />
+                          {mm.disk_total > 0 && (
+                            <MetricChart label="Disk" values={s.disk} sampleSecs={s.sampleSecs}
+                              format={(p) => `${gb((p / 100) * mm.disk_total)} of ${gb(mm.disk_total)}`} />
+                          )}
                         </>
                       })()}
                     </div>

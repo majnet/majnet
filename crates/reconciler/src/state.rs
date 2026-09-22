@@ -194,6 +194,65 @@ impl Store {
         Ok(())
     }
 
+    /// Drop `deploy_progress` rows for a `(project, class)` whose app is not in
+    /// `keep`, exactly as `app_info_prune` does for build info.
+    ///
+    /// V10 reasoned that one row per `(project, app, class)` overwritten on each
+    /// rollout is "naturally bounded by the fleet size (no GC needed)". That
+    /// holds for stable/production, where the app set is the fleet. It does not
+    /// hold for ephemeral: a preview app is `<app>-pr<N>`, so every PR mints new
+    /// keys that no later rollout ever overwrites, and the table grows with PR
+    /// throughput forever. It reached 158 rows across 35 long-closed PRs
+    /// (2026-07-23 → 2026-08-27) with not one preview container still running.
+    ///
+    /// The sibling `app_info` table was already pruned on the same GC pass; this
+    /// row simply never got added to it.
+    pub fn deploy_progress_prune(
+        &self,
+        project: &str,
+        class: &str,
+        keep: &[String],
+    ) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let mut sql = String::from("DELETE FROM deploy_progress WHERE project = ?1 AND class = ?2");
+        if !keep.is_empty() {
+            let placeholders = (0..keep.len())
+                .map(|i| format!("?{}", i + 3))
+                .collect::<Vec<_>>()
+                .join(", ");
+            sql.push_str(&format!(" AND app NOT IN ({placeholders})"));
+        }
+        let mut params: Vec<&dyn rusqlite::ToSql> = vec![&project, &class];
+        params.extend(keep.iter().map(|k| k as &dyn rusqlite::ToSql));
+        Ok(conn.execute(&sql, params.as_slice())?)
+    }
+
+    /// Resolve rows left `active` by a rollout that never reached a terminal
+    /// state, marking them failed with the reason.
+    ///
+    /// `DeployTracker` writes `active` on entering a stage and `done`/`fail` on
+    /// the way out — so a reconciler that restarts mid-rollout (or a node that
+    /// stops answering) strands the row as `active` forever. Two such rows
+    /// survived on the fleet with no container behind them, which makes
+    /// `majnet status`'s "in flight" section quietly untrustworthy: a stuck row
+    /// is indistinguishable from a deploy that really is running.
+    ///
+    /// Anything still `active` after `older_than_secs` is past every deploy
+    /// deadline the rollout could have been waiting on (health gates included),
+    /// so it is abandoned, not slow.
+    pub fn deploy_progress_expire_stale(&self, older_than_secs: i64) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "UPDATE deploy_progress
+                SET status = 'failed',
+                    detail = 'abandoned — no progress for ' || ?1 ||
+                             's; the rollout never reported a terminal state'
+              WHERE status = 'active'
+                AND updated_at < strftime('%s','now') - ?1",
+            rusqlite::params![older_than_secs],
+        )?)
+    }
+
     /// Every app's latest deploy-progress row, newest first — the dashboard
     /// shows active rollouts + freshly-finished ones.
     pub fn deploy_progress(&self) -> Result<Vec<DeployProgress>> {
@@ -472,6 +531,7 @@ impl Store {
 
     /// Write one raw node/host sample. `INSERT OR REPLACE` so a re-run at the
     /// same aligned timestamp (after compaction) is idempotent.
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_metric_sample(
         &self,
         ts: i64,
@@ -480,13 +540,24 @@ impl Store {
         mem_used: i64,
         mem_total: i64,
         containers_running: i64,
+        disk_used: i64,
+        disk_total: i64,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO metric_samples
-               (ts, node, cpu_pct, mem_used, mem_total, containers_running)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![ts, node, cpu_pct, mem_used, mem_total, containers_running],
+               (ts, node, cpu_pct, mem_used, mem_total, containers_running, disk_used, disk_total)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                ts,
+                node,
+                cpu_pct,
+                mem_used,
+                mem_total,
+                containers_running,
+                disk_used,
+                disk_total
+            ],
         )?;
         Ok(())
     }
@@ -540,13 +611,17 @@ impl Store {
                    SELECT node, (ts/{bucket})*{bucket} AS ts, avg(cpu_pct) AS cpu_pct,
                           CAST(avg(mem_used) AS INTEGER) AS mem_used,
                           CAST(avg(mem_total) AS INTEGER) AS mem_total,
-                          CAST(avg(containers_running) AS INTEGER) AS containers_running
+                          CAST(avg(containers_running) AS INTEGER) AS containers_running,
+                          CAST(avg(disk_used) AS INTEGER) AS disk_used,
+                          CAST(avg(disk_total) AS INTEGER) AS disk_total
                    FROM metric_samples WHERE ts >= {lo} AND ts < {hi}
                    GROUP BY node, (ts/{bucket})*{bucket};
                  DELETE FROM metric_samples WHERE ts >= {lo} AND ts < {hi};
                  INSERT OR REPLACE INTO metric_samples
-                   (node, ts, cpu_pct, mem_used, mem_total, containers_running)
-                   SELECT node, ts, cpu_pct, mem_used, mem_total, containers_running FROM _compact;
+                   (node, ts, cpu_pct, mem_used, mem_total, containers_running,
+                    disk_used, disk_total)
+                   SELECT node, ts, cpu_pct, mem_used, mem_total, containers_running,
+                          disk_used, disk_total FROM _compact;
                  DROP TABLE _compact;"
             ))?;
         }
@@ -557,7 +632,8 @@ impl Store {
     pub fn metric_history(&self, node: Option<&str>, since: i64) -> Result<Vec<MetricPoint>> {
         let conn = self.conn.lock().unwrap();
         let mut sql = String::from(
-            "SELECT ts, node, cpu_pct, mem_used, mem_total, containers_running
+            "SELECT ts, node, cpu_pct, mem_used, mem_total, containers_running,
+                    disk_used, disk_total
              FROM metric_samples WHERE ts >= ?1",
         );
         if node.is_some() {
@@ -573,6 +649,8 @@ impl Store {
                 mem_used: row.get(3)?,
                 mem_total: row.get(4)?,
                 containers_running: row.get(5)?,
+                disk_used: row.get(6)?,
+                disk_total: row.get(7)?,
             })
         };
         let rows: Vec<MetricPoint> = match node {
@@ -595,6 +673,10 @@ pub struct MetricPoint {
     pub mem_used: i64,
     pub mem_total: i64,
     pub containers_running: i64,
+    /// Bytes. `disk_total = 0` means the sample predates disk recording (or the
+    /// probe timed out) — chart it as a gap, not as an empty disk.
+    pub disk_used: i64,
+    pub disk_total: i64,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -783,6 +865,96 @@ mod tests {
     }
 
     #[test]
+    fn deploy_progress_prune_drops_only_absent_apps_in_class() {
+        let s = store();
+        // Two previews and a live stable app. The previews' PRs have closed, so
+        // neither app name appears in the class's rendered set ever again.
+        s.set_deploy_progress("proj", "api-pr546", "ephemeral", "deployed", "done", "")
+            .unwrap();
+        s.set_deploy_progress("proj", "api-pr547", "ephemeral", "deployed", "done", "")
+            .unwrap();
+        s.set_deploy_progress("proj", "api", "stable", "deployed", "done", "")
+            .unwrap();
+
+        assert_eq!(
+            s.deploy_progress_prune("proj", "ephemeral", &["api-pr999".into()])
+                .unwrap(),
+            2
+        );
+        // The stable row is in another class and must be untouched by a
+        // class-scoped prune.
+        let left = s.deploy_progress().unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(
+            (left[0].app.as_str(), left[0].class.as_str()),
+            ("api", "stable")
+        );
+    }
+
+    #[test]
+    fn deploy_progress_prune_with_an_empty_keep_set_clears_the_class() {
+        let s = store();
+        s.set_deploy_progress("proj", "api-pr1", "ephemeral", "deployed", "done", "")
+            .unwrap();
+        assert_eq!(
+            s.deploy_progress_prune("proj", "ephemeral", &[]).unwrap(),
+            1
+        );
+        assert!(s.deploy_progress().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_stranded_active_row_expires_but_a_live_one_does_not() {
+        let s = store();
+        s.set_deploy_progress("proj", "stuck", "stable", "health", "active", "")
+            .unwrap();
+        s.set_deploy_progress("proj", "live", "stable", "pulling", "active", "")
+            .unwrap();
+        // Backdate only `stuck` — the rollout whose process died mid-deploy.
+        {
+            let conn = s.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE deploy_progress SET updated_at = strftime('%s','now') - 7200
+                  WHERE app = 'stuck'",
+                [],
+            )
+            .unwrap();
+        }
+
+        assert_eq!(s.deploy_progress_expire_stale(3_600).unwrap(), 1);
+        let rows = s.deploy_progress().unwrap();
+        let stuck = rows.iter().find(|r| r.app == "stuck").unwrap();
+        let live = rows.iter().find(|r| r.app == "live").unwrap();
+        assert_eq!(stuck.status, "failed");
+        assert!(
+            stuck.detail.contains("abandoned"),
+            "detail={}",
+            stuck.detail
+        );
+        // The stage it died at is kept — that is the diagnostic.
+        assert_eq!(stuck.stage, "health");
+        // A rollout genuinely in flight keeps running.
+        assert_eq!(live.status, "active");
+    }
+
+    #[test]
+    fn expiring_stale_rows_leaves_terminal_rows_alone() {
+        let s = store();
+        s.set_deploy_progress("proj", "old", "stable", "deployed", "done", "shipped")
+            .unwrap();
+        {
+            let conn = s.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE deploy_progress SET updated_at = strftime('%s','now') - 999999",
+                [],
+            )
+            .unwrap();
+        }
+        assert_eq!(s.deploy_progress_expire_stale(3_600).unwrap(), 0);
+        assert_eq!(s.deploy_progress().unwrap()[0].detail, "shipped");
+    }
+
+    #[test]
     fn deploy_progress_upserts_per_app_env() {
         let s = store();
         s.set_deploy_progress("proj", "api", "production", "pulling", "active", "img")
@@ -840,17 +1012,26 @@ mod tests {
         // 24h–7d band → 30-min buckets: 4 raw samples inside one aligned bucket.
         let base = ((now - 2 * day) / 1800) * 1800;
         for k in 0..4 {
-            s.insert_metric_sample(base + k * 300, "n1", 20.0 + k as f64, 100, 200, 3)
-                .unwrap();
+            s.insert_metric_sample(
+                base + k * 300,
+                "n1",
+                20.0 + k as f64,
+                100,
+                200,
+                3,
+                100 * (k + 1),
+                1_000,
+            )
+            .unwrap();
         }
         // < 24h: must stay raw, untouched.
-        s.insert_metric_sample(now - 600, "n1", 55.0, 150, 200, 5)
+        s.insert_metric_sample(now - 600, "n1", 55.0, 150, 200, 5, 800, 1_000)
             .unwrap();
         // > 30d → 1-day bucket: two samples in one day collapse to one.
         let dbase = ((now - 40 * day) / day) * day;
-        s.insert_metric_sample(dbase + 100, "n1", 10.0, 50, 200, 1)
+        s.insert_metric_sample(dbase + 100, "n1", 10.0, 50, 200, 1, 10, 1_000)
             .unwrap();
-        s.insert_metric_sample(dbase + 5000, "n1", 30.0, 90, 200, 1)
+        s.insert_metric_sample(dbase + 5000, "n1", 30.0, 90, 200, 1, 30, 1_000)
             .unwrap();
 
         s.compact_metrics(now).unwrap();

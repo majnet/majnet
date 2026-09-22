@@ -345,6 +345,7 @@ struct AlertSettings {
     webhook_set: bool,
     cpu_pct: f64,
     mem_pct: f64,
+    disk_pct: f64,
 }
 
 async fn alerts_get(
@@ -369,6 +370,9 @@ async fn alerts_get(
         webhook_set,
         cpu_pct: cfg("alert_cpu_pct", 90.0),
         mem_pct: cfg("alert_mem_pct", 90.0),
+        // Lower than CPU/memory on purpose: those recover on their own, a disk
+        // does not, and 85% is where there is still room to act.
+        disk_pct: cfg("alert_disk_pct", 85.0),
     }))
 }
 
@@ -378,6 +382,7 @@ struct AlertSettingsReq {
     webhook: Option<String>,
     cpu_pct: Option<f64>,
     mem_pct: Option<f64>,
+    disk_pct: Option<f64>,
 }
 
 async fn alerts_set(
@@ -409,6 +414,9 @@ async fn alerts_set(
     }
     if let Some(m) = req.mem_pct {
         set("alert_mem_pct", &m.to_string())?;
+    }
+    if let Some(d) = req.disk_pct {
+        set("alert_disk_pct", &d.to_string())?;
     }
     Ok("alert settings saved".into())
 }

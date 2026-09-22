@@ -74,6 +74,9 @@ export interface ObsLog {
 export interface NodeMetrics {
   name: string; role: string; reachable: boolean; error: string | null
   cpus: number; host_cpu_pct: number; mem_total: number; mem_used: number; disk_images: number
+  // Filesystem backing Docker's data root. disk_total === 0 means "not
+  // measured" (an older reconciler, or a probe that timed out) — never "empty".
+  disk_total: number; disk_used: number
   containers: number; containers_running: number
   server_version: string; os: string; kernel: string
   apps: ContainerMetric[]
@@ -349,7 +352,7 @@ export const useImports = (org: string) =>
     // Poll while anything is still importing; back off once it's all settled.
     refetchInterval: (q) => (q.state.data?.some((i) => i.status === 'running') ? 2500 : false),
   })
-export interface MetricPoint { ts: number; node: string; cpu_pct: number; mem_used: number; mem_total: number; containers_running: number }
+export interface MetricPoint { ts: number; node: string; cpu_pct: number; mem_used: number; mem_total: number; containers_running: number; disk_used: number; disk_total: number }
 export const useMetricsHistory = (range: number, enabled = true) =>
   useQuery({
     queryKey: ['metrics-history', range],
@@ -435,7 +438,7 @@ export const useManifest = (org: string, app: string) =>
   useQuery({ queryKey: ['manifest', org, app], queryFn: () => getJSON<Record<string, ManifestFile>>(urls.manifest(org, app)) })
 export const useMembers = (org: string) =>
   useQuery({ queryKey: ['members', org], queryFn: () => getJSON<Member[]>(urls.members(org)) })
-export interface AlertSettings { webhook_set: boolean; cpu_pct: number; mem_pct: number }
+export interface AlertSettings { webhook_set: boolean; cpu_pct: number; mem_pct: number; disk_pct: number }
 export const useAlertSettings = () =>
   useQuery({ queryKey: ['alert-settings'], queryFn: () => getJSON<AlertSettings>(urls.alertSettings) })
 export const useAppSecrets = (org: string, cls: string, app: string) =>

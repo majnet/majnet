@@ -23,6 +23,7 @@ mod db;
 mod deploy;
 mod docker;
 mod gc;
+mod images;
 mod info;
 mod ingress;
 mod metrics;
@@ -90,6 +91,12 @@ async fn main() -> Result<()> {
 
     // Metrics sampler: persist node/host history for the dashboard charts (ADR 0017).
     tokio::spawn(metrics::sample_loop(state.clone()));
+
+    // Image reclamation backstop: reclaim unused images on a node under disk
+    // pressure. Teardown reclamation (`deploy::remove_app`) is what keeps a
+    // healthy fleet lean; this catches what teardown never saw — a half-failed
+    // pull, an app renamed away, a node that was unreachable when its PR closed.
+    tokio::spawn(images::reclaim_loop(state.clone()));
 
     // The event loop (§12): converge now, then on every nudge or poll tick.
     let poll = std::time::Duration::from_secs(state.config.poll_interval_secs);

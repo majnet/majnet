@@ -85,10 +85,10 @@ org — either resolves.
 
 | Command | What it answers |
 |---|---|
-| `majnet status` | One screen: identity, node health, deploys in flight, recent failures. **Start here.** |
+| `majnet status` | One screen: identity, node health (incl. disk), deploys in flight, recent failures. **Start here.** |
 | `majnet events [--failed] [--project P] [--limit N] [--follow]` | The activity feed. `--failed` filters to things that broke. `--bot` reads the git-side log instead. |
 | `majnet nodes` | Registered nodes and their addresses. |
-| `majnet metrics [--node N]` | Live CPU / memory / container counts. With one node, also per-container detail. |
+| `majnet metrics [--node N]` | Live CPU / memory / **disk** / container counts. With one node, also per-container detail. |
 | `majnet projects` | The project registry. |
 | `majnet apps [project]` | Apps in a project: declared classes, image, database, host. |
 | `majnet app [project] [app]` | One app in full: image, classes, build info per environment, containers per environment. |
