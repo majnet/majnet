@@ -62,7 +62,16 @@ pub async fn status(app: &App) -> Result<()> {
             "identity": who.as_ref().map(|w| json!({"login": w.login, "platform_admin": w.admin})),
             "projects": projects.as_ref().ok(),
             "nodes": metrics.as_ref().ok(),
-            "deploys_in_flight": progress.as_ref().ok(),
+            // Active rollouts only — as the name says, and as the table below
+            // has always rendered. This used to carry the whole
+            // `deploy_progress` table, so a terminal row that nothing had
+            // overwritten read as a live deploy: four apps showed `failed` here
+            // at 27 days old while all four were serving. The reconciler now
+            // retires a resolved failure when the app converges, but a reader of
+            // this field should not depend on that to avoid seeing history.
+            "deploys_in_flight": progress.as_ref().ok().map(|p| {
+                Value::Array(rows(p).into_iter().filter(|d| cell(d, "status") == "active").collect())
+            }),
             "recent_failures": events.as_ref().ok().map(|e| {
                 Value::Array(rows(e).into_iter().filter(failed).take(20).collect())
             }),
