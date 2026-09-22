@@ -167,9 +167,12 @@ function AlertsWidget() {
   const m = useNodeMetrics()
   const cpuThr = a.data?.cpu_pct ?? 90
   const memThr = a.data?.mem_pct ?? 90
+  const diskThr = a.data?.disk_pct ?? 85
   const nodes = (m.data ?? []).filter((n) => n.reachable)
   const over = nodes.filter(
-    (n) => n.host_cpu_pct >= cpuThr || (n.mem_total > 0 && (n.mem_used / n.mem_total) * 100 >= memThr),
+    (n) => n.host_cpu_pct >= cpuThr
+      || (n.mem_total > 0 && (n.mem_used / n.mem_total) * 100 >= memThr)
+      || (n.disk_total > 0 && (n.disk_used / n.disk_total) * 100 >= diskThr),
   )
   return (
     <div className="flex flex-col gap-2 text-sm">

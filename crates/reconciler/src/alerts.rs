@@ -35,6 +35,7 @@ async fn tick(state: &AppState) -> anyhow::Result<()> {
     }
     let cpu_thr = threshold(state, "alert_cpu_pct");
     let mem_thr = threshold(state, "alert_mem_pct");
+    let disk_thr = threshold(state, "alert_disk_pct");
 
     // key -> human label for everything currently in an alerting state.
     let mut current: BTreeMap<String, String> = BTreeMap::new();
@@ -71,6 +72,24 @@ async fn tick(state: &AppState) -> anyhow::Result<()> {
                 format!(
                     "Node **{}** memory {:.0}% (> {:.0}%)",
                     n.name, mem_pct, mem_thr
+                ),
+            );
+        }
+        // Disk is the one of the three that does not recover on its own: CPU and
+        // memory spike and settle, a disk only fills. It reached 100% on
+        // `private` unannounced, so it alerts like the others now — and unlike
+        // them, it is worth acting on the first time it fires.
+        let disk_pct = n.disk_pct();
+        if n.disk_total > 0 && disk_pct > disk_thr {
+            current.insert(
+                format!("node:{}:disk", n.name),
+                format!(
+                    "Node **{}** disk {:.0}% (> {:.0}%) — {:.1} GB of {:.1} GB used",
+                    n.name,
+                    disk_pct,
+                    disk_thr,
+                    n.disk_used as f64 / 1e9,
+                    n.disk_total as f64 / 1e9,
                 ),
             );
         }

@@ -23,11 +23,11 @@ const WORKER_ROLES = ['prod', 'private'] as const
 // Every editable setting on the page, tracked centrally so one save bar can
 // commit them all. Secret fields are write-only (baseline = ''); the rest load
 // their baseline from the server.
-type Field = 'ghcr_token' | 'ts_client_id' | 'ts_client_secret' | 'tailnet' | 'ts_manage_acl' | 'webhook' | 'cpu_pct' | 'mem_pct'
+type Field = 'ghcr_token' | 'ts_client_id' | 'ts_client_secret' | 'tailnet' | 'ts_manage_acl' | 'webhook' | 'cpu_pct' | 'mem_pct' | 'disk_pct'
 const GROUPS = {
   registry: ['ghcr_token'],
   tailscale: ['ts_client_id', 'ts_client_secret', 'tailnet', 'ts_manage_acl'],
-  alerts: ['webhook', 'cpu_pct', 'mem_pct'],
+  alerts: ['webhook', 'cpu_pct', 'mem_pct', 'disk_pct'],
 } satisfies Record<string, Field[]>
 
 export interface Form {
@@ -53,6 +53,7 @@ export function Settings() {
     ts_manage_acl: ts.data?.manage_acl ? '1' : '0',
     cpu_pct: alerts.data?.cpu_pct != null ? String(alerts.data.cpu_pct) : '',
     mem_pct: alerts.data?.mem_pct != null ? String(alerts.data.mem_pct) : '',
+    disk_pct: alerts.data?.disk_pct != null ? String(alerts.data.disk_pct) : '',
   }
   const [changes, setChanges] = useState<Partial<Record<Field, string>>>({})
   const [saving, setSaving] = useState(false)
@@ -99,6 +100,7 @@ export function Settings() {
     const num = (f: Field) => (dirty(f) && val(f).trim() !== '' && Number.isFinite(Number(val(f))) ? Number(val(f)) : undefined)
     if (num('cpu_pct') !== undefined) alBody.cpu_pct = num('cpu_pct')
     if (num('mem_pct') !== undefined) alBody.mem_pct = num('mem_pct')
+    if (num('disk_pct') !== undefined) alBody.disk_pct = num('disk_pct')
     await run('Alerts', GROUPS.alerts, alBody, urls.alertSettings, 'alert-settings')
 
     setChanges((c) => {
@@ -273,6 +275,7 @@ function AlertsSection({ form, webhookSet, loading }: { form: Form; webhookSet?:
         <div className="grid grid-cols-2 gap-2">
           <Fld ctl={form} field="cpu_pct" type="number" label="CPU alert %" placeholder="90" />
           <Fld ctl={form} field="mem_pct" type="number" label="Memory alert %" placeholder="90" />
+          <Fld ctl={form} field="disk_pct" type="number" label="Disk alert %" placeholder="85" />
         </div>
         <div><Button variant="outline" disabled={!webhookSet} onClick={test}>Send test</Button></div>
       </CardContent>

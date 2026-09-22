@@ -420,3 +420,11 @@ async fn pull(docker: &Docker, image: &str) -> Result<()> {
         .with_context(|| format!("pulling {image}"))?;
     Ok(())
 }
+
+/// The images the per-project ingress stack runs, for the image-reclamation
+/// protected set (`images::protected_images`). Listed from the constants above
+/// rather than restated there, so bumping a version can't drop one out of the
+/// set and hand reclamation a live ingress image.
+pub(crate) fn ingress_images() -> [&'static str; 3] {
+    [TAILSCALE_IMAGE, TRAEFIK_IMAGE, CLOUDFLARED_IMAGE]
+}

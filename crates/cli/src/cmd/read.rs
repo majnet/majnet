@@ -310,8 +310,16 @@ pub async fn metrics(app: &App, node: Option<&str>) -> Result<()> {
 }
 
 fn node_table(nodes: &[Value]) -> Table {
-    let mut table = Table::new(&["node", "role", "state", "cpu%", "memory", "containers"])
-        .empty_note("(no nodes reporting)");
+    let mut table = Table::new(&[
+        "node",
+        "role",
+        "state",
+        "cpu%",
+        "memory",
+        "disk",
+        "containers",
+    ])
+    .empty_note("(no nodes reporting)");
     for n in nodes {
         let reachable = n.get("reachable").and_then(Value::as_bool).unwrap_or(false);
         let state = if reachable {
@@ -340,6 +348,7 @@ fn node_table(nodes: &[Value]) -> Table {
                 String::new()
             },
             memory,
+            disk_cell(n, reachable),
             if reachable {
                 format!(
                     "{}/{}",
@@ -356,6 +365,29 @@ fn node_table(nodes: &[Value]) -> Table {
 
 fn number(value: &Value, key: &str) -> f64 {
     value.get(key).and_then(Value::as_f64).unwrap_or(0.0)
+}
+
+/// The node's disk cell: `used / total (NN%)`, flagged once it is worth acting
+/// on. Nothing in `majnet` reported node disk before — a node filled to 100%,
+/// took `stable` down with it, and finding that out needed a shell on the host.
+///
+/// `!` at the reclamation threshold (85%) and `!!` near full, because by the
+/// time a disk is full the deploys that would fix it cannot pull.
+fn disk_cell(n: &Value, reachable: bool) -> String {
+    let total = number(n, "disk_total");
+    if !reachable || total <= 0.0 {
+        // An older reconciler, or a probe that timed out. Say nothing rather
+        // than print a confident 0% for a disk nobody measured.
+        return String::new();
+    }
+    let used = number(n, "disk_used");
+    let pct = used / total * 100.0;
+    let flag = match pct {
+        p if p >= 95.0 => " !!",
+        p if p >= 85.0 => " !",
+        _ => "",
+    };
+    format!("{} / {} ({pct:.0}%){flag}", bytes(used), bytes(total))
 }
 
 // ── projects and apps ────────────────────────────────────────────────────────

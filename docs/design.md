@@ -305,6 +305,8 @@ sequenceDiagram
 
 **Ephemeral flow:** PR opened → GHA builds → bot renders the PR manifest via auto-merged render PR onto `env/ephemeral` → reconciler deploys `<app>-pr<N>.<project>.majksa.net` → bot comments URL → PR closed → manifest deleted → GC (48 h grace, 7 d hard).
 
+GC reclaims the stack's **images** as well as its containers and per-PR network (**ADR 0030**) — a preview pulls digests no later PR will ask for, so container-only teardown leaks against PR throughput and once filled a node's disk to 100%. Images only: volumes are never reclaimed by automation.
+
 ```mermaid
 stateDiagram-v2
     [*] --> Deployed: PR opened → rendered onto env/ephemeral

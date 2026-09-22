@@ -23,6 +23,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::deploy::{self, DeployCtx};
 use crate::AppState;
 
+/// A `deploy_progress` row still `active` after this long is abandoned, not
+/// slow: it is well past the health-gate deadline any live rollout waits on.
+const STALE_DEPLOY_SECS: i64 = 3_600;
+
 const CLASSES: [EnvClass; 4] = [
     EnvClass::Testing,
     EnvClass::Stable,
@@ -54,6 +58,17 @@ pub async fn converge_all(state: &AppState) -> Result<()> {
     )?;
 
     tracing::info!(projects = projects.projects.len(), commit = %platform.commit, "converging");
+
+    // Resolve rollouts stranded `active` by a reconciler that restarted (or a
+    // node that stopped answering) mid-deploy, before this pass adds its own
+    // rows. Without it `majnet status` shows them as in-flight indefinitely.
+    match state.store.deploy_progress_expire_stale(STALE_DEPLOY_SECS) {
+        Ok(n) if n > 0 => tracing::warn!(rows = n, "expired abandoned deploy-progress rows"),
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "expiring stale deploy progress failed")
+        }
+    }
 
     // Platform services (edge-main, …) onto their role's nodes — ADR 0007.
     // Non-fatal, and independent of any project.
@@ -374,12 +389,18 @@ async fn converge_project_class(
             .record(&snapshot.commit, project, &node.name, "gc", &entry)?;
         tracing::info!(project, class = class.as_str(), entry, "removed");
     }
-    // Drop build-info rows for apps no longer present in this class (GC'd,
-    // renamed away, or archived) so they don't linger past their containers.
+    // Drop the per-app runtime rows for apps no longer present in this class
+    // (GC'd, renamed away, or archived) so they don't linger past their
+    // containers — build info and deploy progress alike. Ephemeral is why this
+    // matters: its app keys carry a PR number, so an un-pruned row is never
+    // overwritten by a later rollout, it just accumulates.
     if !state.config.dry_run {
         state
             .store
             .app_info_prune(project, class.as_str(), &converged_apps)?;
+        state
+            .store
+            .deploy_progress_prune(project, class.as_str(), &converged_apps)?;
     }
     Ok(())
 }
