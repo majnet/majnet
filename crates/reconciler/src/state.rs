@@ -227,6 +227,39 @@ impl Store {
         Ok(conn.execute(&sql, params.as_slice())?)
     }
 
+    /// Clear a `failed` row for an app that has since converged back to its
+    /// desired spec, and report whether there was one.
+    ///
+    /// A `failed` row is written by `DeployTracker::fail` and then only ever
+    /// overwritten by another *rollout*. But a rollout that failed transiently —
+    /// a Docker timeout mid-`starting`, say — often leaves the previous
+    /// container already matching the desired spec, so every later pass reports
+    /// "in sync", does no work, and writes nothing. The row then outlives the
+    /// failure indefinitely: four apps on the fleet read `failed` at 643–657 h
+    /// old while all four had been serving that whole time.
+    ///
+    /// In-sync is exactly the proof the failure is over: it means the running
+    /// container matches what git asks for. A genuinely stuck app never reaches
+    /// it — convergence retries and fails again, refreshing the row — so this
+    /// can only clear failures that are actually resolved.
+    pub fn deploy_progress_resolve_failed(
+        &self,
+        project: &str,
+        app: &str,
+        class: &str,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE deploy_progress
+                SET stage = 'deployed', status = 'done',
+                    detail = 'converged — an earlier rollout failure is resolved',
+                    updated_at = strftime('%s','now')
+              WHERE project = ?1 AND app = ?2 AND class = ?3 AND status = 'failed'",
+            rusqlite::params![project, app, class],
+        )?;
+        Ok(n > 0)
+    }
+
     /// Resolve rows left `active` by a rollout that never reached a terminal
     /// state, marking them failed with the reason.
     ///
@@ -901,6 +934,67 @@ mod tests {
             1
         );
         assert!(s.deploy_progress().unwrap().is_empty());
+    }
+
+    #[test]
+    fn converging_in_sync_retires_a_resolved_failure() {
+        let s = store();
+        s.set_deploy_progress(
+            "proj",
+            "api",
+            "stable",
+            "starting",
+            "failed",
+            "Timeout error",
+        )
+        .unwrap();
+
+        assert!(s
+            .deploy_progress_resolve_failed("proj", "api", "stable")
+            .unwrap());
+        let row = &s.deploy_progress().unwrap()[0];
+        assert_eq!(
+            (row.status.as_str(), row.stage.as_str()),
+            ("done", "deployed")
+        );
+        assert!(row.detail.contains("resolved"), "detail={}", row.detail);
+
+        // Idempotent: nothing left to clear on the next pass, so a healthy
+        // fleet never writes here.
+        assert!(!s
+            .deploy_progress_resolve_failed("proj", "api", "stable")
+            .unwrap());
+    }
+
+    #[test]
+    fn resolving_a_failure_touches_nothing_else() {
+        let s = store();
+        // A live rollout, a real failure in another env, and another app's row.
+        s.set_deploy_progress("proj", "api", "stable", "starting", "failed", "boom")
+            .unwrap();
+        s.set_deploy_progress(
+            "proj",
+            "api",
+            "production",
+            "health",
+            "failed",
+            "still broken",
+        )
+        .unwrap();
+        s.set_deploy_progress("proj", "web", "stable", "pulling", "active", "")
+            .unwrap();
+
+        assert!(s
+            .deploy_progress_resolve_failed("proj", "api", "stable")
+            .unwrap());
+        let rows = s.deploy_progress().unwrap();
+        let prod = rows.iter().find(|r| r.class == "production").unwrap();
+        let web = rows.iter().find(|r| r.app == "web").unwrap();
+        // production never converged, so its failure stands.
+        assert_eq!(prod.status, "failed");
+        assert_eq!(prod.detail, "still broken");
+        // An unrelated in-flight rollout is untouched.
+        assert_eq!(web.status, "active");
     }
 
     #[test]

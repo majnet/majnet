@@ -193,12 +193,32 @@ rollout overwrites. Hence 158 rows for long-dead PRs.
 
 The sibling `app_info` table was already pruned on the GC pass;
 `deploy_progress` simply never got added to it. It is now
-(`deploy_progress_prune`). Separately, a row left `active` by a rollout that
-never reached a terminal state — a reconciler restarted mid-deploy — is expired
-to `failed` after an hour (`deploy_progress_expire_stale`), keeping the stage it
-died at as the diagnostic. Two such rows were live on the fleet with no container
-behind them, which makes `majnet status`'s "in flight" section quietly
-untrustworthy: a stranded row is indistinguishable from a real rollout.
+(`deploy_progress_prune`).
+
+Two further ways a row outlived its meaning, both of which made `majnet status`
+quietly untrustworthy — a stale row is indistinguishable from a live one:
+
+- **Stranded `active`.** `DeployTracker` writes `active` on entering a stage and
+  `done`/`fail` on the way out, so a reconciler restarted mid-rollout leaves the
+  row `active` forever. Now expired to `failed` after an hour
+  (`deploy_progress_expire_stale`), keeping the stage it died at as the
+  diagnostic. Two such rows were live on the fleet with no container behind them.
+- **Immortal `failed`.** A `failed` row is only ever overwritten by another
+  *rollout*. But a transient failure — a Docker timeout mid-`starting` — usually
+  leaves the previous container already matching the desired spec, so every later
+  pass reports "in sync", does no work, and writes nothing. Four apps read
+  `failed` at **643–657 h old** while all four had been serving that entire time.
+  In-sync is precisely the proof the failure is over (the running container
+  matches git), and a genuinely stuck app never reaches it — convergence retries
+  and fails again, refreshing the row. So converging in sync now retires a
+  recorded failure (`deploy_progress_resolve_failed`), writing only when there is
+  one to clear.
+
+`majnet status --output json` compounded this by returning the whole table under
+`deploys_in_flight`, a name that promises only live rollouts and which the table
+renderer had always honoured. It now filters to `active` like the table, so a
+reader of that field does not depend on the reconciler's bookkeeping to avoid
+seeing history.
 
 ## Consequences
 

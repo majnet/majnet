@@ -517,6 +517,31 @@ async fn converge_one(
                 return Ok(summary.replace(&manifest.image_ref(), &version));
             }
         }
+    } else if !ctx.dry_run {
+        // No rollout happened, so nothing above touched the progress row — but
+        // reaching here proves the running container matches the desired spec,
+        // which retires any failure still recorded against this app. Without
+        // this a transient failure is permanent in the record: it is only ever
+        // overwritten by a later rollout, and an app that recovered by going
+        // back in sync never has one. Writes only when there is a failure to
+        // clear, so a healthy fleet is untouched.
+        match state
+            .store
+            .deploy_progress_resolve_failed(ctx.project, app, ctx.class.as_str())
+        {
+            Ok(true) => tracing::info!(
+                project = ctx.project,
+                class = ctx.class.as_str(),
+                app,
+                "in sync — cleared a stale deploy failure"
+            ),
+            Ok(false) => {}
+            Err(e) => tracing::warn!(
+                app,
+                error = %format!("{e:#}"),
+                "clearing a stale deploy failure failed"
+            ),
+        }
     }
     Ok(summary)
 }
