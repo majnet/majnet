@@ -70,26 +70,82 @@ pub async fn on_package_published(
 
     let image = format!("ghcr.io/{org}/{pkg_name}@{digest}");
 
-    // The image tag selects the tier (ADR 0009): `pr-<N>` → ephemeral preview;
-    // `vX.Y.Z` → a release (record it + auto-track stable); anything else
-    // (`latest`, `sha-…`) is a main build → testing.
+    match tier_for(tag) {
+        // Nothing to decide, and acting anyway is how `testing` got wedged —
+        // see `Tier::Untagged`.
+        Tier::Untagged => {
+            tracing::debug!(org, app, %image, "untagged package version — ignoring");
+            Ok(())
+        }
+        Tier::Preview(pr) => crate::ephemeral::on_pr_build(state, org, app, pr, &image).await,
+        Tier::Release => {
+            tracing::info!(org, app, tag, %image, "release publish — recording");
+            crate::releases::record(state, org, app, tag, &image).await
+        }
+        Tier::MainBuild => {
+            tracing::info!(org, app, %image, "main build — bumping testing digest");
+            if bump_class_digest(state, org, app, &image, "testing").await? {
+                state.store.log_event(
+                    "digest-bump",
+                    Some(org),
+                    &format!("{app} testing → {digest}"),
+                )?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// What a package publish's tag says to do with it (ADR 0009). The tier is a
+/// pure function of the tag, so it is decided here and tested directly.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Tier {
+    /// `pr-<N>` — an ephemeral preview for that PR.
+    Preview(u64),
+    /// `vX.Y.Z` / `X.Y.Z` — a release: record it, and auto-track `stable`.
+    Release,
+    /// `latest`, `sha-…` — a main build, which `testing` follows.
+    MainBuild,
+    /// No tag at all: the event carries no tier, so there is nothing to do.
+    ///
+    /// This is not hypothetical. A buildx push with provenance/SLSA
+    /// attestations publishes an OCI index whose entries include **attestation
+    /// manifests** alongside the real images, and GitHub raises a
+    /// `registry_package` event for each. The attestation's event has no tag,
+    /// so `container_metadata.tag.digest` is absent and the `version.version`
+    /// fallback yields the attestation's own digest.
+    ///
+    /// Treating that as a `MainBuild` — which is what falling through the tag
+    /// checks used to do — pins an artifact that is not an image into
+    /// `env/testing`. The reconciler then cannot recover on its own: the
+    /// attestation pulls fine, so `deploy::pull_image` short-circuits on
+    /// `inspect_image` ("digests are immutable — a present image is the image")
+    /// and never re-pulls, while every `create_container` fails 400 `no command
+    /// specified` because the artifact has no Cmd, no Entrypoint and no
+    /// platform. Observed on `sideline-web`/`sideline-bot` testing, failing
+    /// every ~5 min for hours:
+    ///
+    /// ```text
+    /// $ docker inspect ghcr.io/…/web@sha256:ef8c3596…
+    /// Cmd=[] Ep=[] Arch= Os= Size=45911
+    /// ```
+    ///
+    /// Only `testing` was ever exposed: the release path needs a version tag and
+    /// previews need `pr-<N>`, both of which an untagged event fails.
+    Untagged,
+}
+
+pub(crate) fn tier_for(tag: &str) -> Tier {
+    if tag.is_empty() {
+        return Tier::Untagged;
+    }
     if let Some(pr) = tag.strip_prefix("pr-").and_then(|n| n.parse::<u64>().ok()) {
-        return crate::ephemeral::on_pr_build(state, org, app, pr, &image).await;
+        return Tier::Preview(pr);
     }
     if is_version_tag(tag) {
-        tracing::info!(org, app, tag, %image, "release publish — recording");
-        return crate::releases::record(state, org, app, tag, &image).await;
+        return Tier::Release;
     }
-
-    tracing::info!(org, app, %image, "main build — bumping testing digest");
-    if bump_class_digest(state, org, app, &image, "testing").await? {
-        state.store.log_event(
-            "digest-bump",
-            Some(org),
-            &format!("{app} testing → {digest}"),
-        )?;
-    }
-    Ok(())
+    Tier::MainBuild
 }
 
 /// A release tag: an optional `v` then a digit — matches both `vX.Y.Z` and the
@@ -255,7 +311,27 @@ pub(crate) fn replace_digest_line(content: &str, digest: &str) -> Result<String>
 
 #[cfg(test)]
 mod tests {
-    use super::{is_version_tag, overlay_digest, replace_digest_line};
+    use super::{is_version_tag, overlay_digest, replace_digest_line, tier_for, Tier};
+
+    /// The regression that wedged `sideline-web`/`sideline-bot` testing for
+    /// hours: an attestation manifest's `registry_package` event has no tag, and
+    /// falling through the tag checks pinned it as a main build.
+    #[test]
+    fn an_untagged_version_is_not_a_main_build() {
+        assert_eq!(tier_for(""), Tier::Untagged);
+    }
+
+    #[test]
+    fn a_tag_selects_its_tier() {
+        assert_eq!(tier_for("pr-546"), Tier::Preview(546));
+        assert_eq!(tier_for("v1.4.2"), Tier::Release);
+        assert_eq!(tier_for("1.4.2"), Tier::Release);
+        assert_eq!(tier_for("sha-9c3f1a2"), Tier::MainBuild);
+        assert_eq!(tier_for("latest"), Tier::MainBuild);
+        // A `pr-` prefix with a non-numeric suffix is not a preview; it falls
+        // through to a main build exactly as it always did.
+        assert_eq!(tier_for("pr-nope"), Tier::MainBuild);
+    }
 
     #[test]
     fn version_tags_are_recognized() {
