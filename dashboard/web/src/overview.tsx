@@ -349,7 +349,7 @@ export function Overview() {
         className={editing ? 'rounded-lg outline-dashed outline-1 outline-border' : ''}
         layouts={layouts}
         breakpoints={{ lg: 1100, md: 800, sm: 500, xs: 0 }}
-        cols={{ lg: 12, md: 12, sm: 6, xs: 2 }}
+        cols={{ lg: 12, md: 12, sm: 6, xs: 1 }}
         rowHeight={94}
         margin={[14, 14]}
         containerPadding={[0, 0]}

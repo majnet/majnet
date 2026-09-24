@@ -272,7 +272,7 @@ function AlertsSection({ form, webhookSet, loading }: { form: Form; webhookSet?:
           The reconciler checks node/host metrics + site health every minute and posts up/down transitions to this Discord webhook.
         </p>
         <Fld ctl={form} field="webhook" type="password" label="Webhook URL" hint="(leave blank to keep)" placeholder="https://discord.com/api/webhooks/…" />
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
           <Fld ctl={form} field="cpu_pct" type="number" label="CPU alert %" placeholder="90" />
           <Fld ctl={form} field="mem_pct" type="number" label="Memory alert %" placeholder="90" />
           <Fld ctl={form} field="disk_pct" type="number" label="Disk alert %" placeholder="85" />
