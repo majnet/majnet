@@ -1,0 +1,12 @@
+{
+  "name": "MajNet",
+  "short_name": "MajNet",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#111A22",
+  "theme_color": "#111A22",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

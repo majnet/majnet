@@ -13,6 +13,11 @@ const applyTheme = () => document.documentElement.classList.toggle('dark', mq.ma
 applyTheme()
 mq.addEventListener('change', applyTheme)
 
+// Makes the dashboard installable (see public/sw.js — it caches nothing).
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => void navigator.serviceWorker.register('/sw.js'))
+}
+
 const queryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 10_000, retry: 1, refetchOnWindowFocus: false } },
 })
