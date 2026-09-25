@@ -5,7 +5,7 @@ import tailwindcss from '@tailwindcss/vite'
 
 // Built assets are served by nginx (dashboard/nginx.conf), which also proxies
 // /api/bot and /api/recon to the WG-internal APIs. `npm run dev` can proxy to a
-// live backend by setting MAJNET_API (e.g. https://majksa.tail09a9c1.ts.net over the tailnet).
+// live backend by setting MAJNET_API (e.g. http://majksa over the tailnet).
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   // react-draggable (via react-grid-layout, the Overview "Customize" grid) does
