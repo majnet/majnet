@@ -9,10 +9,10 @@ members = [
 ]
 
 [workspace.package]
-# Bumped for the cli-v0.1.2 release. Shared across the workspace, which is
-# accurate here: the disk work (#161, #162) changed the reconciler and the CLI
-# together — the node `disk` column is only useful once both ends have it.
-version = "0.1.2"
+# Bumped for the cli-v0.1.3 release: `release progress` now shows the fleet's
+# view beside the bot's (#172), which is only useful once it is on a laptop —
+# `install-cli.sh` downloads release binaries, not `main`.
+version = "0.1.3"
 edition = "2021"
 license = "MIT"
 authors = ["Ondrej Maxa"]
