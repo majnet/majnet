@@ -37,14 +37,21 @@ log "ensuring the dashboard is up + tailscale serve"
 # Idempotent; the image ref is auto-loaded from deploy/.env (written by install
 # / majnet-update). nginx binds 127.0.0.1:8090 (host networking).
 docker compose -f "$COMPOSE" up -d dashboard
-tailscale serve --bg --http 80 http://127.0.0.1:8090
-# Also serve HTTPS so the dashboard is installable as a PWA: browsers gate
-# service-worker registration (and the install prompt) on a secure context, and
-# `http://majksa` is not one. Keep :80 as well — the CLI's saved context and any
-# bookmark point at http://, and dropping it would break them.
+# HTTPS only. Browsers gate service-worker registration — and so the PWA install
+# prompt — on a secure context, which plain `http://majksa` is not.
 #
-# Needs HTTPS certificates enabled for the tailnet (admin console → DNS). Not
-# fatal if they are not: the dashboard stays reachable over :80, it just cannot
-# be installed.
-tailscale serve --bg --https 443 http://127.0.0.1:8090 ||
-  warn "tailscale serve :443 failed — enable HTTPS certificates for the tailnet if you want the dashboard installable as a PWA"
+# Turning :80 off does NOT strand anything: with an HTTPS serve in place,
+# Tailscale answers port 80 itself with a 308 to the https:// URL. Saved CLI
+# contexts and old bookmarks keep working (reqwest follows redirects), and
+# browsers upgrade silently — so this enforces HTTPS without a coordinated
+# re-login.
+#
+# Needs HTTPS certificates enabled for the tailnet (admin console → DNS). If
+# they are not, fall back to plain HTTP so the dashboard is still reachable —
+# it just cannot host the PWA.
+if tailscale serve --bg --https 443 http://127.0.0.1:8090; then
+  tailscale serve --http=80 off 2>/dev/null || true
+else
+  warn "tailscale serve :443 failed — enable HTTPS certificates for the tailnet to serve the dashboard over HTTPS (and to install it as a PWA)"
+  tailscale serve --bg --http 80 http://127.0.0.1:8090
+fi
