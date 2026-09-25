@@ -45,7 +45,7 @@ look like success without being success.
 
 ```sh
 majnet login                       # find the control plane on the tailnet and verify identity
-majnet login --url https://majksa.tail09a9c1.ts.net   # or name it directly
+majnet login --url http://majksa   # or name it directly
 majnet whoami                      # who the platform thinks you are, and your role per project
 ```
 

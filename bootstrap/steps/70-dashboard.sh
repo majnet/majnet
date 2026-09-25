@@ -37,21 +37,16 @@ log "ensuring the dashboard is up + tailscale serve"
 # Idempotent; the image ref is auto-loaded from deploy/.env (written by install
 # / majnet-update). nginx binds 127.0.0.1:8090 (host networking).
 docker compose -f "$COMPOSE" up -d dashboard
-# HTTPS only. Browsers gate service-worker registration — and so the PWA install
-# prompt — on a secure context, which plain `http://majksa` is not.
+# Plain HTTP, and deliberately NOT `tailscale serve --https 443`.
 #
-# Turning :80 off does NOT strand anything: with an HTTPS serve in place,
-# Tailscale answers port 80 itself with a 308 to the https:// URL. Saved CLI
-# contexts and old bookmarks keep working (reqwest follows redirects), and
-# browsers upgrade silently — so this enforces HTTPS without a coordinated
-# re-login.
+# `serve --https 443` intercepts TLS for the node's *tailnet IP*, and
+# `dash.majksa.net` resolves to that same IP (the VPN-only front door, ADR
+# 0006/0016). Tailscale only holds a cert for the `.ts.net` name, so a request
+# with any other SNI gets no certificate at all: enabling it took
+# `dash.majksa.net` down with `tlsv1 alert internal error`. That is the clash
+# `dashboard/nginx.conf` already warns about when it binds 127.0.0.1 only.
 #
-# Needs HTTPS certificates enabled for the tailnet (admin console → DNS). If
-# they are not, fall back to plain HTTP so the dashboard is still reachable —
-# it just cannot host the PWA.
-if tailscale serve --bg --https 443 http://127.0.0.1:8090; then
-  tailscale serve --http=80 off 2>/dev/null || true
-else
-  warn "tailscale serve :443 failed — enable HTTPS certificates for the tailnet to serve the dashboard over HTTPS (and to install it as a PWA)"
-  tailscale serve --bg --http 80 http://127.0.0.1:8090
-fi
+# HTTPS for the dashboard — and so the secure context the PWA needs — comes from
+# Caddy on `dash.majksa.net`, which has a real cert and does not fight Tailscale
+# for :443. This port-80 serve is the tailnet convenience URL the CLI defaults to.
+tailscale serve --bg --http 80 http://127.0.0.1:8090
