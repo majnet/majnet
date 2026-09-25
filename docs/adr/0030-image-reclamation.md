@@ -133,7 +133,7 @@ digest resident and rollback stays local.
 
 A 10-minute loop reads the metrics snapshot the sampler already writes (no extra
 probing — a backstop has no business adding load to a node that is out of disk)
-and, for any node at or above `reclaim_disk_pct` (**85%**), reclaims images that
+and, for any node at or above `reclaim_disk_pct` (**80%**), reclaims images that
 are simultaneously:
 
 - **not in use** by any container, running or stopped;
@@ -151,12 +151,30 @@ are simultaneously:
   exists to save.
 
 Candidates are then taken **oldest first, only until the node reaches
-`reclaim_target_pct` (70%)**. Age is the best proxy available for "least likely
+`reclaim_target_pct` (60%)**. Age is the best proxy available for "least likely
 to be wanted again" — Docker records no last-used time — so the newest images,
 which are the plausible rollback targets, are the last to go. Stopping at the
 shortfall means a node 2 GB over target gives up 2 GB of cache, not all of it.
-The 15-point gap below the 85% trigger is hysteresis, so a pass does not re-fire
-on the next tick.
+The 20-point gap below the trigger is doing two jobs. One is ordinary hysteresis,
+so a pass does not re-fire on the next tick. The other is absorbing a measured
+undershoot: `plan` sizes candidates by per-image `size`, which double-counts
+layers shared between images exactly as `docker system df` does, so a pass that
+believes it freed 26 GB frees materially less. At the original 85/70 the node
+settled at 82–86% and never approached its target.
+
+The accurate fix is `shared_size` on `list_images`, and it is not worth it:
+Docker computes it by walking every layer — the same work that makes `docker df`
+time out at 6 s on exactly the image-heavy node this exists to save. Paying that
+on a node already out of disk, to place a boundary a wider band places for free,
+is the wrong trade.
+
+**The trigger sits deliberately below `alert_disk_pct` (85).** Reclamation is
+routine and an alert is not. On a node churning ~15 GB/h the backstop runs most
+of the day, so a trigger at the alert line makes every *successful* pass page
+someone — observed on 2026-09-25, two clean reclamations (54 images/26.5 GB at
+08:47, 42 images/26.3 GB at 14:28), each tripping the disk alert on its way.
+Firing first leaves the alert meaning the thing worth waking up for: reclamation
+is running and losing.
 
 Below the threshold it does nothing at all, so a healthy node keeps its image
 cache. Every pass that frees anything writes an `image-reclaim` event, so a disk
