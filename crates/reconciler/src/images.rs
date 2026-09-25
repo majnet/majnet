@@ -59,12 +59,34 @@ const RECLAIM_INTERVAL: Duration = Duration::from_secs(600);
 /// Disk usage (%) at which the backstop starts reclaiming on a node. Override
 /// with the `reclaim_disk_pct` config key. Below this it does nothing at all —
 /// a healthy node keeps its image cache, so redeploys and rollbacks stay local.
-const DEFAULT_DISK_PCT: f64 = 85.0;
+///
+/// **Deliberately below `alert_disk_pct` (85).** Reclamation is routine and an
+/// alert is not: on a node churning ~15 GB/h the backstop runs most of the day,
+/// and if it only started where the alert fires, every *successful* pass would
+/// page someone. Observed exactly that at 85/70 — two clean reclamations on
+/// 2026-09-25, each tripping the disk alert on its way. Firing first leaves the
+/// alert to mean the thing worth waking up for: reclamation is running and
+/// losing.
+const DEFAULT_DISK_PCT: f64 = 80.0;
 
 /// Reclaim down to this much disk usage (%) once triggered, oldest image first.
-/// The gap below `DEFAULT_DISK_PCT` is hysteresis: freeing to just under the
-/// trigger would re-fire on the next tick. Override with `reclaim_target_pct`.
-const DEFAULT_TARGET_PCT: f64 = 70.0;
+/// Override with `reclaim_target_pct`.
+///
+/// The gap below `DEFAULT_DISK_PCT` is doing two jobs. One is ordinary
+/// hysteresis — freeing to just under the trigger would re-fire next tick. The
+/// other is absorbing a known undershoot: `plan` sizes candidates by
+/// `ImageFacts.size`, which double-counts layers shared between images exactly
+/// as `docker system df` does, so a pass that believes it freed 26 GB frees
+/// materially less. Measured at 85/70 the node settled at 82–86%, never near
+/// its target.
+///
+/// A wide band is the cheap fix. The accurate one is `shared_size` on
+/// `list_images`, and it is not worth it: Docker computes it by walking every
+/// layer — the same work that makes `docker df` time out at 6 s on exactly the
+/// image-heavy node this exists to save (see `collect` in `metrics`). Paying
+/// that on a node already out of disk, to place a boundary that a wider band
+/// places for free, is the wrong trade.
+const DEFAULT_TARGET_PCT: f64 = 60.0;
 
 /// Safety floor: an unused image younger than this is never reclaimed, because
 /// an image pulled seconds ago whose container does not exist yet is
@@ -91,7 +113,9 @@ impl std::fmt::Display for Reclaimed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} image(s), {:.1} GB",
+            // "of images", not "freed": per-image sizes overlap on shared
+            // layers, so this reads high against the actual disk change.
+            "{} image(s), {:.1} GB of images",
             self.images,
             self.bytes as f64 / 1_000_000_000.0
         )
