@@ -63,11 +63,24 @@ them by construction. Running `--filter until=72h` by hand on that node
 reclaimed **0 B** while the disk sat at 96% and climbed ~4 GB/h; `until=4h`
 reclaimed **73.58 GB** and took it to 51%.
 
-So the node churns ~150 images/day, and the only reclamation it had retained a
-week of them. A week of that churn cannot fit on a 157 GB disk that is already
+So the node churns on the order of 150 images/day — 169 and 149 on the two days
+measured, and 76 on a quieter one a few days later; it tracks push volume — and
+the only reclamation it had retained a week of them. A week of that churn cannot fit on a 157 GB disk that is already
 giving 59 GB to volumes — and no fixed age cut can be correct, because the
 quantity that varies is the *rate*, not the age. The nightly job is also blind to
 pressure: it retained its full week at 100% disk exactly as it would at 10%.
+
+That rate is **5× larger than the work being done**, and reducible at source.
+All of it is one monorepo: sideline's five apps hold 22–28 images each on
+`private` while every other image on the node is a single copy. Its `build.yaml`
+matrixes over all five apps with no path filter, so a docs typo rebuilds and
+republishes `server`, `bot`, `proxy` and `web` too — 76 images from ~15 pushes
+on the day that was measured. Each app's Dockerfile also builds from the repo
+root (`context: .`), so any change invalidates every app's layer cache.
+
+That is a fix in the app repo, not here, and reclamation should be sized for the
+rate as it is rather than the rate someone might achieve. Worth knowing before
+concluding the platform generates this much on its own: it does not.
 
 Two conclusions, both load-bearing for the decision below:
 
@@ -169,8 +182,8 @@ on a node already out of disk, to place a boundary a wider band places for free,
 is the wrong trade.
 
 **The trigger sits deliberately below `alert_disk_pct` (85).** Reclamation is
-routine and an alert is not. On a node churning ~15 GB/h the backstop runs most
-of the day, so a trigger at the alert line makes every *successful* pass page
+routine and an alert is not. On the busiest node the backstop runs several times
+a day, so a trigger at the alert line makes every *successful* pass page
 someone — observed on 2026-09-25, two clean reclamations (54 images/26.5 GB at
 08:47, 42 images/26.3 GB at 14:28), each tripping the disk alert on its way.
 Firing first leaves the alert meaning the thing worth waking up for: reclamation
@@ -290,6 +303,6 @@ churn, and only pressure-triggered reclamation will hold it.
   Disk pressure is the condition we actually care about.
 - **A longer fixed age cut instead of a target.** This is what
   `majnet-docker-prune.timer` already does, and the measurement above is what it
-  is worth on a node churning 150 images/day: any window long enough to be a
+  is worth on a node churning ~150 images/day: any window long enough to be a
   useful rollback cache is also long enough to fill the disk. Whatever constant
   is chosen is wrong for some node, and wrong in the direction of an outage.
