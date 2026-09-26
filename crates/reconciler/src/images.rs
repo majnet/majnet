@@ -61,9 +61,9 @@ const RECLAIM_INTERVAL: Duration = Duration::from_secs(600);
 /// a healthy node keeps its image cache, so redeploys and rollbacks stay local.
 ///
 /// **Deliberately below `alert_disk_pct` (85).** Reclamation is routine and an
-/// alert is not: on a node churning ~15 GB/h the backstop runs most of the day,
-/// and if it only started where the alert fires, every *successful* pass would
-/// page someone. Observed exactly that at 85/70 — two clean reclamations on
+/// alert is not: on the busiest node the backstop runs several times a day, and
+/// if it only started where the alert fires, every *successful* pass would page
+/// someone. Observed exactly that at 85/70 — two clean reclamations on
 /// 2026-09-25, each tripping the disk alert on its way. Firing first leaves the
 /// alert to mean the thing worth waking up for: reclamation is running and
 /// losing.
