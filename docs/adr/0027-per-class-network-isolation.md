@@ -63,6 +63,25 @@ join are untouched**.
 - Migration containers can't resolve sibling aliases (they're only on the shared net) — accepted;
   migrations target the DB, not siblings.
 
+## Ephemeral: capacity, not just isolation
+
+⚠️ **Per-PR previews are unbounded, and that took a node down.** This ADR gave each PR its own
+network so concurrent previews could coexist — correctly — but nothing bounds *how many* coexist.
+A preview is per-PR yet costs one container **per app in the project**, so an open-PR count
+multiplies straight into container count on a single box.
+
+Live consequence on the private node (4 CPU / 8 GB): **20 open sideline PRs × ~5 apps ≈ 100
+containers**, load average **515**. At that point dockerd timed out, container creates and health
+checks failed, `sshd` stopped completing its banner exchange, and *nothing* could deploy —
+including apps unrelated to the previews. Every running container kept serving, so from outside
+the platform looked healthy while being entirely frozen.
+
+Mitigated by `Config::max_ephemeral_previews` (`MAJNET_MAX_EPHEMERAL_PREVIEWS`, default 8, 0 =
+unlimited): previews beyond the cap are **deferred, never evicted** — a PR that already has
+containers keeps its slot, and only not-yet-running previews wait. Eviction was rejected because
+it would thrash the node and yank a preview out from under whoever was using it; freeing capacity
+stays a human decision (close the PR).
+
 ## Ephemeral: per-PR networks
 
 Ephemeral (PR preview) apps go one step finer: since several PRs share the private
