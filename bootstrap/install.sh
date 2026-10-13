@@ -123,8 +123,33 @@ if [[ -n $DOMAIN ]]; then
     DEBIAN_FRONTEND=noninteractive apt-get install -y caddy
   fi
   log "writing /etc/caddy/Caddyfile for $DOMAIN"
+  # Extra vhosts (the tailnet dashboard, prod Adminer — both file-cert, both
+  # added after an install) live in conf.d so re-running install.sh cannot
+  # delete them. They used to be appended to this file by hand, under a header
+  # saying not to edit it by hand; a re-run would have taken both TLS hosts out.
+  mkdir -p /etc/caddy/conf.d
+  [[ -e /etc/caddy/conf.d/README.caddy ]] || cat > /etc/caddy/conf.d/README.caddy <<'EOF'
+# Vhosts added after install (imported by /etc/caddy/Caddyfile, never rewritten
+# by install.sh). One file per host, e.g. dash.caddy. This placeholder also
+# keeps the import glob matching when nothing else is here yet.
+EOF
   cat > /etc/caddy/Caddyfile <<EOF
 # Managed by majnet install.sh (ADR 0006) — do not edit by hand.
+# Extra vhosts belong in /etc/caddy/conf.d/*.caddy, imported at the end.
+{
+	# tailscaled holds :80 on the tailnet IP once \`tailscale serve --http 80\`
+	# is configured (steps/70-dashboard.sh — the \`http://<node>\` URL the CLI
+	# defaults to), so Caddy cannot bind :80 for its automatic HTTP->HTTPS
+	# redirect server. On a cold boot tailscaled wins the race and Caddy exits
+	# "bind: address already in use" — observed 2026-10-13, which took
+	# $DOMAIN and the tailnet dashboard down until it was restarted by hand.
+	#
+	# Caddy needs only :443 here: conf.d vhosts carry file-based certs (lego
+	# DNS-01) and $DOMAIN renews over TLS-ALPN-01. The cost is that plain
+	# http://$DOMAIN no longer redirects to HTTPS, which is cosmetic.
+	auto_https disable_redirects
+}
+
 # /webhook + /healthz → bot; everything else → setup wizard. The wizard
 # listener closes at /finish; 502 on those paths afterwards is expected.
 $DOMAIN {
@@ -143,6 +168,8 @@ $DOMAIN {
 		reverse_proxy 127.0.0.1:7600
 	}
 }
+
+import /etc/caddy/conf.d/*.caddy
 EOF
   systemctl enable --now caddy
   systemctl reload caddy
