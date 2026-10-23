@@ -93,6 +93,37 @@ async fn tick(state: &AppState) -> anyhow::Result<()> {
                 ),
             );
         }
+        // A container stuck restarting. Every other check here watches a
+        // *resource*, which only catches a crash loop once it has already
+        // damaged something: Tempo was OOM-killed 1023 times in 24 h — about
+        // once every 84 s — and the only symptom anyone saw was `private` at
+        // 100% disk weeks later, because the dead compactor could not enforce
+        // its own retention. The cause ran for weeks in silence; the
+        // consequence paged in minutes.
+        //
+        // No new sampling: `state` already comes from the same `list_containers`
+        // the per-container stats use, and Docker reports `restarting` for
+        // exactly this. Peak memory is the wrong signal — a container that has
+        // just been OOM-killed reads *low* (Tempo sampled at 65 MiB of its 512
+        // MiB ceiling seconds after a kill), so a limit-proximity check would
+        // have missed it entirely.
+        //
+        // The two-tick debounce below does the real work of telling a crash loop
+        // apart from an ordinary restart: a deploy or a one-off exit is gone
+        // within ~2 min, a loop is still restarting on the next pass.
+        for c in &n.apps {
+            if c.state == "restarting" {
+                current.insert(
+                    format!("container:{}:{}:restarting", n.name, c.name),
+                    format!(
+                        "**{}** on node **{}** is stuck restarting (crash loop — \
+                         check `majnet logs`; if it is OOM, raise the app's \
+                         `resources.memory`)",
+                        c.name, n.name
+                    ),
+                );
+            }
+        }
     }
 
     for (name, url) in discover_sites(state).await {
