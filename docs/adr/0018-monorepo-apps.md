@@ -46,7 +46,12 @@ value are one monorepo; an app with no `repo` keeps its own repo named after it
 - **Repo lifecycle is per-repo, bring-your-own.** A monorepo repo is **not**
   scaffolded from a template and **never archived** by org-sync while any app
   references it; the platform only consumes the images it publishes. Solo app
-  repos are scaffolded/archived as before. (`org_sync.rs`.)
+  repos are scaffolded/archived as before. (`org_sync.rs`.) *Amended
+  2026-11-24:* if the declared repo doesn't exist, org-sync **creates it
+  empty** (private, squash-only, no commit, no branch protection) so the owner's
+  first push sets `main` with their own history; template-sync's `monorepo-ci`
+  seeding applies once `main` exists. Previously a missing monorepo repo was
+  never created and its apps could never build.
 
 **CI is the repo owner's** (phase 1): the monorepo's own workflow builds and
 pushes the per-app images (`vX.Y.Z` / `sha-…` / `pr-N` tags on
