@@ -20,6 +20,16 @@ pub struct Config {
     pub data_dir: PathBuf,
     /// Drift poll interval seconds (§12.1), default 300.
     pub poll_interval_secs: u64,
+    /// Max **concurrent PR previews per project** on the private node; 0 = no
+    /// limit. Default 8.
+    ///
+    /// A preview is per-PR but costs one container *per app in the project*, so
+    /// an unbounded open-PR count lands an unbounded number of containers on a
+    /// single box. Live consequence: 20 open sideline PRs × ~5 apps put ~100
+    /// containers on a 4-CPU node and drove its load average to 515, at which
+    /// point dockerd timed out, health checks failed, SSH stopped answering and
+    /// nothing could deploy at all — including the apps that were already there.
+    pub max_ephemeral_previews: usize,
     /// Log planned actions without touching Docker (§12 principles).
     pub dry_run: bool,
     /// DEV: use the local Docker socket for every node and skip the tailnet
@@ -74,6 +84,10 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(300),
+            max_ephemeral_previews: std::env::var("MAJNET_MAX_EPHEMERAL_PREVIEWS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(8),
             dry_run: std::env::var("MAJNET_DRY_RUN").is_ok_and(|v| v == "1" || v == "true"),
             docker_local: std::env::var("MAJNET_DOCKER_LOCAL")
                 .is_ok_and(|v| v == "1" || v == "true"),
