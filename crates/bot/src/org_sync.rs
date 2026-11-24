@@ -8,6 +8,7 @@
 //!   1. ensure the `ops` repo exists (created with a starter scaffold)
 //!   2. create missing app repos from `repo-templates/<template>/` in the
 //!      platform repo (GHA workflow, .gitignore, …)
+//!      (monorepo repos — ADR 0018 — are created empty, never scaffolded)
 //!   3. archive app repos removed from config — never delete (§2)
 //!   4. enforce branch protection: ops `env/production` requires an admin
 //!      review (the production gate, §9), app `main` requires the build check
@@ -164,9 +165,16 @@ pub async fn sync_org(
         serde_yaml::from_slice(project_yaml).context("parsing project.yaml")?;
 
     // App repos: create from template, archive removed. Monorepo apps
-    // (`repo` set, shared) are bring-your-own — the platform neither scaffolds
-    // nor archives their repo; it only consumes the images they publish.
+    // (`repo` set, shared) are bring-your-own — the platform creates their repo
+    // (bare, see `create_monorepo_repo`) but never scaffolds, protects or
+    // archives it; it only consumes the images they publish.
     let existing = list_org_repos(&client, org).await?;
+    for repo in missing_monorepo_repos(&project, &existing) {
+        create_monorepo_repo(&client, org, repo).await?;
+        state
+            .store
+            .log_event("repo-created", Some(org), &format!("{repo} (monorepo)"))?;
+    }
     for app in &project.apps {
         if app.is_monorepo() {
             continue;
@@ -402,6 +410,49 @@ async fn create_repo_from_template(
     Ok(())
 }
 
+/// Monorepo repos (ADR 0018) declared in `project.yaml` but absent from the
+/// org — deduped, since several apps share one.
+fn missing_monorepo_repos<'a>(
+    project: &'a ProjectConfig,
+    existing: &BTreeMap<String, bool>,
+) -> std::collections::BTreeSet<&'a str> {
+    project
+        .apps
+        .iter()
+        .filter(|a| a.is_monorepo() && !existing.contains_key(a.repo()))
+        .map(|a| a.repo())
+        .collect()
+}
+
+/// Create a monorepo's repo **empty** (no commit, no template): its code and CI
+/// are the owner's (ADR 0018), so the owner's first push sets `main` with their
+/// own history. Template-sync's `monorepo-ci` seeding kicks in once `main`
+/// exists. No branch protection: the solo-app required `test` check isn't a
+/// contract a BYO-CI monorepo has, and requiring it would wedge every PR.
+/// Tolerates 422 (already exists — e.g. created between list and create).
+async fn create_monorepo_repo(client: &octocrab::Octocrab, org: &str, repo: &str) -> Result<()> {
+    tracing::info!(org, repo, "creating monorepo repo");
+    match client
+        .post(
+            format!("/orgs/{org}/repos"),
+            Some(&json!({
+                "name": repo,
+                "private": true,
+                "auto_init": false,
+                // Same merge policy as solo app repos: one squash commit per PR.
+                "allow_squash_merge": true,
+                "allow_merge_commit": false,
+                "allow_rebase_merge": false,
+            })),
+        )
+        .await
+    {
+        Ok::<serde_json::Value, _>(_) => Ok(()),
+        Err(octocrab::Error::GitHub { source, .. }) if source.status_code == 422 => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("creating monorepo repo {repo}")),
+    }
+}
+
 /// The production gate (§9): merging into env/production requires an
 /// approving review. Even a compromised dashboard can't skip this.
 async fn protect_ops_production(client: &octocrab::Octocrab, org: &str) -> Result<()> {
@@ -602,7 +653,27 @@ fn is_reserved_repo(repo: &str, org: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_reserved_repo;
+    use super::{is_reserved_repo, missing_monorepo_repos};
+    use majnet_common::project::ProjectConfig;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn missing_monorepo_repos_are_created_once_and_only_when_absent() {
+        let project: ProjectConfig = serde_yaml::from_str(
+            "name: p\nmembers: []\napps:\n\
+             - {name: home-monitor-dashboard, template: web-app, repo: home-monitor}\n\
+             - {name: home-monitor-agent, template: web-app, repo: home-monitor}\n\
+             - {name: sideline-web, template: web-app, repo: sideline}\n\
+             - {name: solo, template: web-app}\n",
+        )
+        .unwrap();
+        let existing = BTreeMap::from([("sideline".to_string(), false)]);
+        let missing: Vec<_> = missing_monorepo_repos(&project, &existing)
+            .into_iter()
+            .collect();
+        // Deduped; existing monorepo and solo repos (template path) excluded.
+        assert_eq!(missing, ["home-monitor"]);
+    }
 
     #[test]
     fn reserves_ops_platform_and_eponymous_source_repo() {
