@@ -51,7 +51,9 @@ pub async fn on_ops_main_push(state: &AppState, org: &str, commit: &str) -> Resu
                 }
                 push_render_pr(state, org, class, commit, rendered).await?;
             }
-            None => tracing::debug!(org, class = class.as_str(), "no apps opt into this class"),
+            // No app opts in any more: still render (an empty tree), or the env
+            // branch keeps the last app forever and the reconciler retries it.
+            None => push_render_pr(state, org, class, commit, BTreeMap::new()).await?,
         }
     }
     Ok(())
@@ -210,6 +212,7 @@ async fn push_render_pr(
     let env_head = crate::git::get_branch_head(&client, &repo, &env_branch).await?;
     let env_head = match env_head {
         Some(sha) => sha,
+        None if files.is_empty() => return Ok(()), // class never had apps: no branch needed
         None => {
             let commit = crate::git::create_commit(
                 &client,

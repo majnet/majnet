@@ -34,11 +34,18 @@ pub async fn get_branch_head(
 }
 
 /// Create a complete tree from file contents (no base tree — full snapshot).
+/// SHA of git's empty tree, which exists implicitly in every repository.
+pub const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
 pub async fn create_tree(
     client: &octocrab::Octocrab,
     repo: &str,
     files: &BTreeMap<String, String>,
 ) -> Result<String> {
+    if files.is_empty() {
+        // GitHub rejects an empty `tree` array; git's well-known empty tree needs no upload.
+        return Ok(EMPTY_TREE.to_string());
+    }
     let items: Vec<_> = files
         .iter()
         .map(|(path, content)| json!({ "path": path, "mode": "100644", "type": "blob", "content": content }))
