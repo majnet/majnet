@@ -88,9 +88,14 @@ async fn age_decrypt(key_file: &std::path::Path, ciphertext: &[u8]) -> Result<St
     String::from_utf8(out.stdout).context("decrypted secret is not valid UTF-8")
 }
 
+/// Parent of every stack's secrets dir on the node. Kept root-only (0700) so the
+/// world-readable files below it are reachable only through a container's own
+/// bind mount, never by other users on the node.
+const HOST_ROOT: &str = "/run/majnet/secrets";
+
 /// Host path where a stack's secrets live (tmpfs on Debian).
 pub fn host_dir(project: &str, app: &str, class: EnvClass) -> String {
-    format!("/run/majnet/secrets/{project}-{app}-{}", class.as_str())
+    format!("{HOST_ROOT}/{project}-{app}-{}", class.as_str())
 }
 
 /// Write `secrets` to `host_dir` on the node behind `docker`.
@@ -102,9 +107,18 @@ pub async fn deliver(docker: &Docker, dir: &str, secrets: &BTreeMap<String, Stri
             None::<qp::CreateContainerOptions>,
             bollard::models::ContainerCreateBody {
                 image: Some(HELPER_IMAGE.into()),
-                cmd: Some(vec!["sleep".into(), "60".into()]),
+                // Lock the parent first: a failed chmod exits the helper, so the
+                // upload below fails loudly instead of leaving secrets exposed.
+                cmd: Some(vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "chmod 700 /host-root && exec sleep 60".into(),
+                ]),
                 host_config: Some(bollard::models::HostConfig {
-                    binds: Some(vec![format!("{dir}:/secrets")]),
+                    binds: Some(vec![
+                        format!("{dir}:/secrets"),
+                        format!("{HOST_ROOT}:/host-root"),
+                    ]),
                     auto_remove: Some(true),
                     ..Default::default()
                 }),
@@ -162,16 +176,35 @@ async fn ensure_helper_image(docker: &Docker) -> Result<()> {
     Ok(())
 }
 
-/// Tar archive of secret files, mode 0400.
+/// Tar archive of secret files, mode 0444. They extract owned by root, and an
+/// image may run as any user (`USER node`, `USER nobody`), so they must be
+/// world-readable: with 0400 a non-root app can't read its own secrets and dies
+/// at startup. The container is the boundary — the dir is bind-mounted into that
+/// app's containers only, and `HOST_ROOT` keeps it from other users on the node.
 fn tar_of(secrets: &BTreeMap<String, String>) -> Result<Vec<u8>> {
     let mut builder = tar::Builder::new(Vec::new());
     for (name, value) in secrets {
         let bytes = value.as_bytes();
         let mut header = tar::Header::new_gnu();
         header.set_size(bytes.len() as u64);
-        header.set_mode(0o400);
+        header.set_mode(0o444);
         header.set_cksum();
         builder.append_data(&mut header, name, bytes)?;
     }
     Ok(builder.into_inner()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secret_files_are_readable_by_any_container_user() {
+        let secrets = BTreeMap::from([("TOKEN".to_string(), "s3cret".to_string())]);
+        let tarball = tar_of(&secrets).unwrap();
+        let mut archive = tar::Archive::new(tarball.as_slice());
+        let entry = archive.entries().unwrap().next().unwrap().unwrap();
+        assert_eq!(entry.path().unwrap().to_str(), Some("TOKEN"));
+        assert_eq!(entry.header().mode().unwrap(), 0o444);
+    }
 }
